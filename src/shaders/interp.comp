@@ -1,0 +1,243 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D AY;
+layout(binding = 1) uniform sampler2D BY;
+layout(binding = 2) uniform sampler2D AC1;
+layout(binding = 3) uniform sampler2D BC1;
+layout(binding = 4) uniform sampler2D AC2;
+layout(binding = 5) uniform sampler2D BC2;
+layout(std430, binding = 6) readonly buffer TF { vec4 tf[]; };
+layout(std430, binding = 7) readonly buffer FA { vec4 fa[]; };
+layout(std430, binding = 8) readonly buffer FB { vec4 fb[]; };
+layout(binding = 12) uniform sampler2D AL;
+layout(binding = 13) uniform sampler2D BL;
+layout(std430, binding = 14) readonly buffer Stat { uint stat[]; };
+layout(std430, binding = 15) readonly buffer FBW { float fbw[]; };
+layout(std430, binding = 16) readonly buffer ILL { vec4 ill[]; };
+#ifdef DEPTH16
+layout(binding = 9, r16) uniform writeonly image2D oY;
+#ifdef NV
+layout(binding = 10, rg16) uniform writeonly image2D oC1;
+#else
+layout(binding = 10, r16) uniform writeonly image2D oC1;
+layout(binding = 11, r16) uniform writeonly image2D oC2;
+#endif
+#else
+layout(binding = 9, r8) uniform writeonly image2D oY;
+#ifdef NV
+layout(binding = 10, rg8) uniform writeonly image2D oC1;
+#else
+layout(binding = 10, r8) uniform writeonly image2D oC1;
+layout(binding = 11, r8) uniform writeonly image2D oC2;
+#endif
+#endif
+
+#define NC 5
+
+int bw, bh;
+
+vec4 illum_at(ivec2 q0, int bxA, int byA)
+{
+    vec4 s = vec4(0.0);
+    for (int k = 0; k < 4; k++) {
+        ivec2 b = ivec2(bxA + (k & 1), byA + (k >> 1));
+        vec2 w = max(vec2(0.0), 1.0 - abs(vec2(q0) + 0.5 - vec2(b * 8) - 3.5) / 8.0);
+        s += w.x * w.y * vec4(ill[bidx(b, ivec2(bw, bh))].xyz, 1.0);
+    }
+    return s / max(s.w, 1e-6);
+}
+
+vec2 fat(int which, vec2 p)
+{
+    int i = bidx(ivec2(floor(p / 8.0)), ivec2(bw, bh));
+    return which == 0 ? fa[i].xy : fb[i].xy;
+}
+
+void main()
+{
+    int W = pc.i0.x, H = pc.i0.y;
+    bw = pc.i0.z;
+    bh = pc.i0.w;
+    ivec2 q0 = ivec2(gl_GlobalInvocationID.xy) * 2;
+    if (q0.x >= W || q0.y >= H)
+        return;
+    float t = pc.f0.x;
+    vec2 inv = 1.0 / vec2(W, H);
+    if (float(stat[0]) > pc.f1.w && float(stat[1]) > pc.f2.y) {
+        bool useA = t < 0.5;
+        for (int j = 0; j < 4; j++) {
+            ivec2 p = q0 + ivec2(j & 1, j >> 1);
+            if (p.x < W && p.y < H)
+                imageStore(oY, p, vec4(useA ? texelFetch(AY, p, 0).r : texelFetch(BY, p, 0).r));
+        }
+        for (int cy = 0; cy < (2 >> pc.i1.w); cy++)
+            for (int cx = 0; cx < (2 >> pc.i1.z); cx++) {
+                ivec2 cp = (q0 >> pc.i1.zw) + ivec2(cx, cy);
+                if (cp.x >= pc.i1.x || cp.y >= pc.i1.y)
+                    continue;
+#ifdef NV
+                imageStore(oC1, cp, useA ? texelFetch(AC1, cp, 0) : texelFetch(BC1, cp, 0));
+#else
+                imageStore(oC1, cp, useA ? texelFetch(AC1, cp, 0) : texelFetch(BC1, cp, 0));
+                imageStore(oC2, cp, useA ? texelFetch(AC2, cp, 0) : texelFetch(BC2, cp, 0));
+#endif
+            }
+        return;
+    }
+    int qx = q0.x >> 2, qy = q0.y >> 2;
+    int bxA = (qx & 1) != 0 ? qx / 2 : qx / 2 - 1;
+    int byA = (qy & 1) != 0 ? qy / 2 : qy / 2 - 1;
+
+    vec2 cu[NC];
+    float cw[NC][4];
+    float fbs[4] = float[4](0.0, 0.0, 0.0, 0.0), fbn[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    int nc = 0;
+    for (int k = 0; k < 4; k++) {
+        ivec2 b = ivec2(bxA + (k & 1), byA + (k >> 1));
+        int bi = bidx(b, ivec2(bw, bh));
+        vec2 u = tf[bi].xy;
+        int ci = -1;
+        for (int i = 0; i < nc; i++)
+            if (cu[i] == u)
+                ci = i;
+        if (ci < 0) {
+            ci = nc++;
+            cu[ci] = u;
+            for (int j = 0; j < 4; j++)
+                cw[ci][j] = 0.0;
+        }
+        vec2 cb = vec2(b * 8) + 3.5;
+        for (int j = 0; j < 4; j++) {
+            vec2 p = vec2(q0 + ivec2(j & 1, j >> 1));
+            vec2 w2 = max(vec2(0.0), 1.0 - abs(p - cb) / 8.0);
+            cw[ci][j] += w2.x * w2.y;
+            fbs[j] += w2.x * w2.y * fbw[bi];
+            fbn[j] += w2.x * w2.y;
+        }
+    }
+    float dy = illum_at(q0, bxA, byA).x;
+    float dcl = dy * 255.0 * pc.f2.x;
+    int fbi = nc++;
+    cu[fbi] = vec2(0.0);
+    for (int j = 0; j < 4; j++)
+        cw[fbi][j] = 1.0 - pc.f1.y;
+
+    float cost[NC][4], va[NC][4], vb[NC][4];
+    uint am[4] = uint[4](0u, 0u, 0u, 0u);
+    for (int i = 0; i < nc; i++) {
+        vec2 u = cu[i];
+        vec2 oa = i == fbi ? vec2(0.0) : -t * u;
+        vec2 ob = i == fbi ? vec2(0.0) : (1.0 - t) * u;
+        float D[16], PA[4], PB[4];
+        for (int y = 0; y < 4; y++)
+            for (int x = 0; x < 4; x++) {
+                vec2 p = vec2(q0 + ivec2(x - 1, y - 1)) + 0.5;
+                float a = textureLod(AL, (p + oa) * inv, 0.0).r;
+                float b = textureLod(BL, (p + ob) * inv, 0.0).r;
+                D[y * 4 + x] = abs((a - b) * 255.0 - dcl);
+                if (x >= 1 && x <= 2 && y >= 1 && y <= 2) {
+                    PA[(y - 1) * 2 + x - 1] = textureLod(AY, (p + oa) * inv, 0.0).r;
+                    PB[(y - 1) * 2 + x - 1] = textureLod(BY, (p + ob) * inv, 0.0).r;
+                }
+            }
+        float thr = pc.f1.z * 0.25 + l1(u) / 8.0;
+        for (int j = 0; j < 4; j++) {
+            int jx = j & 1, jy = j >> 1;
+            float e = 0.0;
+            for (int dy = 0; dy < 3; dy++)
+                for (int dx = 0; dx < 3; dx++)
+                    e += D[(jy + dy) * 4 + jx + dx];
+            vec2 p = vec2(q0 + ivec2(jx, jy));
+            float cst;
+            uint al = 0u;
+            if (i == fbi) {
+                cst = pc.f1.x;
+            } else {
+                bool okA = l1(fat(0, p + oa) - u) <= thr;
+                bool okB = l1(fat(1, p + ob) + u) <= thr;
+                if (okA && okB) {
+                    cst = max(0.0, e - pc.f3.x * clamp(l1(u - pc.f3.yz) * 0.5, 0.0, 1.0));
+                } else if (okA) {
+                    cst = pc.f0.z;
+                    al = 1u;
+                } else if (okB) {
+                    cst = pc.f0.z;
+                    al = 2u;
+                } else {
+                    cst = e + pc.f0.w;
+                }
+            }
+            cost[i][j] = cst;
+            am[j] |= al << (2 * i);
+            va[i][j] = PA[j] - t * dy;
+            vb[i][j] = PB[j] + (1.0 - t) * dy;
+        }
+    }
+    float wA[NC][4], wB[NC][4];
+    for (int j = 0; j < 4; j++) {
+        float mc = 1e30;
+        for (int i = 0; i < nc; i++)
+            mc = min(mc, cost[i][j]);
+        float sw = 0.0, wt[NC];
+        for (int i = 0; i < nc; i++) {
+            wt[i] = (pc.f1.y + cw[i][j]) * exp(-(cost[i][j] - mc) / pc.f0.y);
+            sw += wt[i];
+        }
+        float f = fbn[j] > 0.0 ? fbs[j] / fbn[j] : 0.0;
+        float acc = 0.0;
+        for (int i = 0; i < nc; i++) {
+            float w = (1.0 - f) * wt[i] / sw + (i == fbi ? f : 0.0);
+            uint c = (am[j] >> (2 * i)) & 3u;
+            float al = c == 0u ? t : float(c - 1u);
+            wA[i][j] = w * (1.0 - al);
+            wB[i][j] = w * al;
+            acc += wA[i][j] * va[i][j] + wB[i][j] * vb[i][j];
+        }
+        ivec2 p = q0 + ivec2(j & 1, j >> 1);
+        if (p.x < W && p.y < H)
+            imageStore(oY, p, vec4(acc));
+    }
+
+    vec2 dcc = illum_at(q0, bxA, byA).yz;
+    int sx = pc.i1.z, sy = pc.i1.w;
+    int CW = pc.i1.x, CH = pc.i1.y;
+    vec2 cinv = 1.0 / vec2(CW, CH);
+    vec2 cs = vec2(1 << sx, 1 << sy);
+    for (int cy = 0; cy < (2 >> sy); cy++)
+        for (int cx = 0; cx < (2 >> sx); cx++) {
+            ivec2 cp = (q0 >> ivec2(sx, sy)) + ivec2(cx, cy);
+            if (cp.x >= CW || cp.y >= CH)
+                continue;
+            vec2 pc2 = vec2(cp) + 0.5;
+            vec4 acc = vec4(0.0);
+            float nrm = 1.0 / float((1 << sx) * (1 << sy));
+            for (int i = 0; i < nc; i++) {
+                float ca = 0.0, cb = 0.0;
+                for (int yy = 0; yy < (1 << sy); yy++)
+                    for (int xx = 0; xx < (1 << sx); xx++) {
+                        int j = ((cy << sy) + yy) * 2 + (cx << sx) + xx;
+                        ca += wA[i][j];
+                        cb += wB[i][j];
+                    }
+                ca *= nrm;
+                cb *= nrm;
+                vec2 u = cu[i];
+                vec2 oa = i == fbi ? vec2(0.0) : -t * u / cs;
+                vec2 ob = i == fbi ? vec2(0.0) : (1.0 - t) * u / cs;
+#ifdef NV
+                acc.xy += ca * (textureLod(AC1, (pc2 + oa) * cinv, 0.0).rg - t * dcc) + cb * (textureLod(BC1, (pc2 + ob) * cinv, 0.0).rg + (1.0 - t) * dcc);
+#else
+                acc.x += ca * (textureLod(AC1, (pc2 + oa) * cinv, 0.0).r - t * dcc.x) + cb * (textureLod(BC1, (pc2 + ob) * cinv, 0.0).r + (1.0 - t) * dcc.x);
+                acc.y += ca * (textureLod(AC2, (pc2 + oa) * cinv, 0.0).r - t * dcc.y) + cb * (textureLod(BC2, (pc2 + ob) * cinv, 0.0).r + (1.0 - t) * dcc.y);
+#endif
+            }
+#ifdef NV
+            imageStore(oC1, cp, vec4(acc.xy, 0.0, 0.0));
+#else
+            imageStore(oC1, cp, vec4(acc.x));
+            imageStore(oC2, cp, vec4(acc.y));
+#endif
+        }
+}

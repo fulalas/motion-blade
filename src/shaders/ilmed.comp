@@ -1,0 +1,29 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer I { vec4 iv[]; };
+layout(std430, binding = 1) writeonly buffer O { vec4 o[]; };
+
+void main()
+{
+    int bw = pc.i0.x, bh = pc.i0.y;
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= bw * bh)
+        return;
+    int bx = id % bw, by = id / bw;
+    vec3 v[9];
+    for (int k = 0; k < 9; k++) {
+        v[k] = iv[bidx(ivec2(bx + k % 3 - 1, by + k / 3 - 1), ivec2(bw, bh))].xyz;
+    }
+    vec3 r = vec3(0.0);
+    for (int ch = 0; ch < 3; ch++)
+        for (int i = 0; i < 9; i++) {
+            int lt = 0;
+            for (int j = 0; j < 9; j++)
+                lt += int(v[j][ch] < v[i][ch] || (v[j][ch] == v[i][ch] && j < i));
+            if (lt == 4)
+                r[ch] = v[i][ch];
+        }
+    o[id] = vec4(r, 0.0);
+}

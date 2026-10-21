@@ -1,0 +1,94 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_KHR_shader_subgroup_clustered : enable
+#include "common.glsl"
+#include "sad.glsl"
+layout(local_size_x = 64) in;
+layout(binding = 0) uniform sampler2D A;
+layout(binding = 1) uniform sampler2D B;
+layout(std430, binding = 2) readonly buffer FA { vec4 fa[]; };
+layout(std430, binding = 3) readonly buffer FB { vec4 fb[]; };
+layout(std430, binding = 4) readonly buffer Cnt { uint cnt[]; };
+layout(std430, binding = 5) readonly buffer Slots { vec2 slots[]; };
+layout(std430, binding = 6) readonly buffer TPrev { vec4 tp[]; };
+layout(std430, binding = 7) writeonly buffer TOut { vec4 to[]; };
+
+int bw, bh;
+
+vec2 fat(int which, vec2 p)
+{
+    int i = bidx(ivec2(floor(p / 8.0)), ivec2(bw, bh));
+    return which == 0 ? fa[i].xy : fb[i].xy;
+}
+
+vec2 cl[16];
+int n;
+
+void add(vec2 v)
+{
+    for (int k = 0; k < n; k++)
+        if (cl[k] == v)
+            return;
+    cl[n++] = v;
+}
+
+void main()
+{
+    bw = pc.i0.x;
+    bh = pc.i0.y;
+    int lane = int(gl_LocalInvocationID.x) & 15;
+    int id = int(gl_WorkGroupID.x) * 4 + (int(gl_LocalInvocationID.x) >> 4);
+    if (id >= bw * bh)
+        return;
+    int bx = id % bw, by = id / bw;
+    g_inv = 1.0 / vec2(pc.i0.zw);
+    float t = pc.f0.x;
+    n = 0;
+    int ns = int(min(cnt[id], 4u));
+    for (int i = 0; i < ns; i++)
+        add(slots[id * 4 + i]);
+    add(fa[id].xy);
+    add(-fb[id].xy);
+    if (pc.i1.x == 0) {
+        ivec2 d[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+        for (int k = 0; k < 4; k++) {
+            int q = bidx(ivec2(bx, by) + d[k], ivec2(bw, bh));
+            add(fa[q].xy);
+            add(-fb[q].xy);
+        }
+    } else {
+        add(tp[id].xy);
+        ivec2 d[8] = ivec2[8](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1),
+                              ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1), ivec2(1, 1));
+        for (int k = 0; k < 8; k++) {
+            add(tp[bidx(ivec2(bx, by) + d[k], ivec2(bw, bh))].xy);
+        }
+    }
+    vec2 row0 = vec2(bx * 8 - 4, by * 8 - 4 + lane) + 0.5;
+    vec2 c = vec2(bx * 8 + 4, by * 8 + 4);
+    float best_c = 1e30, best_m = 0.0;
+    vec2 best_v = vec2(0.0);
+    int q = nbr3(lane, ivec2(bx, by), ivec2(bw, bh));
+    set_dc_w(lane < 9 ? max(abs(fa[q].w), abs(fb[q].w)) : 1e30);
+    for (int i = 0; i < n; i++) {
+        vec2 u = cl[i];
+        float ra[16], rb[16];
+        row16(A, row0 - t * u, ra);
+        row16(B, row0 + (1.0 - t) * u, rb);
+        float s = zsad(ra, rb);
+        float thr = pc.f0.z * 0.25 + l1(u) / 8.0;
+        bool okA = l1(fat(0, c - t * u) - u) <= thr;
+        bool okB = l1(fat(1, c + (1.0 - t) * u) + u) <= thr;
+        float cost = s + pc.f0.y * float(int(!okA) + int(!okB));
+        if (okA && okB)
+            cost -= pc.f0.w * clamp(l1(u - pc.f1.xy) * 0.5, 0.0, 1.0);
+        if (cost < best_c) {
+            best_c = cost;
+            best_v = u;
+            best_m = g_ml;
+        }
+    }
+    float dcm = block_dc(best_m);
+    if (lane == 0)
+        to[id] = vec4(best_v, best_c, dcm);
+}
