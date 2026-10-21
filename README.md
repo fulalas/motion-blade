@@ -24,3 +24,18 @@ The player is `build/mpv`.
 
 The compiled shaders (`video/filter/memc/shaders/*.h`) are included, so `glslc` is not needed
 to build. After editing a `.comp`/`.glsl` file, run `video/filter/memc/shaders/gen.sh` (needs `glslc`).
+
+## Windows (static)
+
+Cross-build from Linux with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (UCRT, x86_64):
+extract it into a work folder, then run from this folder (needs meson, ninja, cmake, nasm, git,
+curl, zip):
+
+```sh
+ci/build-mingw64-static.sh ../winbuild
+```
+
+It downloads and builds FFmpeg, libplacebo, libass, LuaJIT and the other dependencies as static
+libraries, and writes `../winbuild/mpv-memc-windows-x86_64.zip`. The only non-system DLL
+`mpv.exe` needs is `vulkan-1.dll`, which comes with the GPU driver. The zip has a
+`portable_config/mpv.conf` that turns on `memc`.

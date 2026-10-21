@@ -37,6 +37,9 @@ static const uint32_t spv_sel[] =
 static const uint32_t spv_conf[] =
 #include "shaders/conf.h"
     ;
+static const uint32_t spv_cutdec[] =
+#include "shaders/cutdec.h"
+    ;
 static const uint32_t spv_illum[] =
 #include "shaders/illum.h"
     ;
@@ -89,9 +92,9 @@ typedef struct {
 } pcs;
 
 typedef struct {
-    float pen_parent, pen_temporal, pen_update, pen_zero, pen_cross, lam_full, dc_lo, dc_hi;
+    float pen_parent, pen_temporal, pen_update, pen_zero, pen_cross, pen_len, lam_full, dc_lo, dc_hi;
     int coarse_r, iters, iters0, refine, sel_passes;
-    float pen_inc, sigma, pen_occ, pen_bad, wprior, cthr, pen_fb, fb_spread;
+    float pen_inc, sigma, pen_occ, pen_bad, wprior, cthr, pen_fb, fb_spread, fb_avg;
     float fg_sel, fg_pix, fb_ilo, fb_ihi;
     double scut, scut_rel, zcut_rel, zcut_min;
 } params;
@@ -109,8 +112,7 @@ typedef struct {
     VkQueryPool qp;
     vbuf up, down, statcopy;
     vimg oy, oc1, oc2;
-    int busy, has_out, first_of_pair, nq;
-    double cut_thr, zcut_thr;
+    int busy, has_out, nq;
     const char *qname[64];
     double gpu_ms;
 } slot;
@@ -135,17 +137,17 @@ struct memc_ctx {
     double prof_ms[16];
     const char *prof_name[16];
     int prof_n;
-    vpipe p_down, p_norm, p_full, p_iter, p_refine, p_proj, p_sel, p_conf, p_illum, p_ilmed, p_interp;
+    vpipe p_down, p_norm, p_full, p_iter, p_refine, p_proj, p_sel, p_conf, p_cutdec, p_illum, p_ilmed, p_interp;
     gframe fr[2];
     vbuf fa[MAXLEV], fb[MAXLEV], pfa[MAXLEV], pfb[MAXLEV], tmp[MAXLEV];
     int lw[MAXLEV], lh[MAXLEV], bw[MAXLEV], bh[MAXLEV];
-    vbuf cnt, slots, tf0, tf1, stat, dummy, fbw, ill0, ill1;
+    vbuf cnt, slots, tf0, tf1, stat, dummy, fbw, ill0, ill1, hist;
     size_t off[3], rowb[3], rows[3];
     params p;
     memc_stats st;
     int nfr, ib, me_valid, have_prev, lnorm, recording;
     vbuf *last_tf;
-    double err_ema, z_ema, pair_thr, pair_zthr;
+    int hist_clear;
     int ok;
 };
 
@@ -388,7 +390,6 @@ static int cmd_begin(memc_ctx *c)
     vkCmdWriteTimestamp(S(c)->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, S(c)->qp, 0);
     S(c)->nq = 0;
     S(c)->has_out = 0;
-    S(c)->first_of_pair = 0;
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT,
                           VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
     vkCmdPipelineBarrier(S(c)->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0,
@@ -557,11 +558,12 @@ static int vk_init(memc_ctx *c)
     PIPE(p_down, spv_down, "SI");
     PIPE(p_norm, spv_norm, "SI");
     PIPE(p_full, spv_full, "SSB");
-    PIPE(p_iter, spv_iter, "SSBBBBB");
+    PIPE(p_iter, spv_iter, "SSBBBBBB");
     PIPE(p_refine, spv_refine, "SSBB");
     PIPE(p_proj, spv_proj, "BBB");
     PIPE(p_sel, spv_sel, "SSBBBBBB");
     PIPE(p_conf, spv_conf, "BBBB");
+    PIPE(p_cutdec, spv_cutdec, "BB");
     PIPE(p_illum, spv_illum, "SSSSBB");
     PIPE(p_ilmed, spv_ilmed, "BB");
     const char *ti = "SSSSSSBBBIIISSBBB";
@@ -611,7 +613,7 @@ static int res_init(memc_ctx *c)
     int nb = c->bw[0] * c->bh[0];
     if (buf_create(c, &c->cnt, (VkDeviceSize)nb * 4, 0) || buf_create(c, &c->slots, (VkDeviceSize)nb * 4 * 8, 0) ||
         buf_create(c, &c->tf0, (VkDeviceSize)nb * 16, 0) || buf_create(c, &c->tf1, (VkDeviceSize)nb * 16, 0) ||
-        buf_create(c, &c->stat, 64, 1) || buf_create(c, &c->dummy, 64, 0) ||
+        buf_create(c, &c->stat, 64, 1) || buf_create(c, &c->dummy, 64, 0) || buf_create(c, &c->hist, 128, 0) ||
         buf_create(c, &c->fbw, (VkDeviceSize)nb * 4, 0) || buf_create(c, &c->ill0, (VkDeviceSize)nb * 16, 0) ||
         buf_create(c, &c->ill1, (VkDeviceSize)nb * 16, 0))
         return -1;
@@ -731,15 +733,16 @@ static void estimate(memc_ctx *c, int dir)
             int flags = (have ? 1 : 0) | (L < top ? 2 : 0) | (c->have_prev ? 4 : 0) | (dir ? 8 : 0);
             pcs pc = {{c->bw[L], c->bh[L], c->lw[L], c->lh[L], L < top ? c->bw[L + 1] : 1, L < top ? c->bh[L + 1] : 1,
                        flags, it + L * 16 + dir * 256},
-                      {c->p.pen_parent, c->p.pen_temporal, c->p.pen_update, c->p.pen_zero, c->p.pen_cross}};
+                      {c->p.pen_parent, c->p.pen_temporal, c->p.pen_update, c->p.pen_zero, c->p.pen_cross, c->p.pen_len}};
             set_dc(c, &pc);
-            vres r[7] = {{X, NULL},
+            vres r[8] = {{X, NULL},
                          {Y, NULL},
                          {NULL, &F[L]},
                          {NULL, &c->tmp[L]},
                          {NULL, L < top ? &F[L + 1] : &c->dummy},
                          {NULL, c->have_prev ? &T[L] : &c->dummy},
-                         {NULL, dir ? &c->fa[L] : &c->dummy}};
+                         {NULL, dir ? &c->fa[L] : &c->dummy},
+                         {NULL, &c->hist}};
             dispatch(c, &c->p_iter, r, &pc, (uint32_t)(nb + 3) / 4, 1);
             static const char *const iter_names[MAXLEV] = {"iter_L0", "iter_L1", "iter_L2", "iter_L3", "iter_L4", "iter_L5"};
             if (c->prof && S(c)->nq > 0)
@@ -762,25 +765,17 @@ static void run_me(memc_ctx *c)
 {
     cmd_begin(c);
     vkCmdFillBuffer(S(c)->cb, c->stat.buf, 0, VK_WHOLE_SIZE, 0);
+    if (c->hist_clear)
+        vkCmdFillBuffer(S(c)->cb, c->hist.buf, 0, VK_WHOLE_SIZE, 0);
+    c->hist_clear = 0;
     barrier(c);
     estimate(c, 0);
     estimate(c, 1);
+    pcs pc = {{0}, {(float)(1.0 / ((double)c->bw[0] * c->bh[0] * 256)), (float)c->p.scut, (float)c->p.scut_rel,
+                    (float)c->p.zcut_rel, (float)c->p.zcut_min}};
+    vres r[2] = {{NULL, &c->stat}, {NULL, &c->hist}};
+    dispatch(c, &c->p_cutdec, r, &pc, 1, 1);
     c->me_valid = 1;
-}
-
-static double cut_threshold(memc_ctx *c)
-{
-    double thr = c->p.scut;
-    if (c->err_ema > 0) {
-        double rel = c->p.scut_rel * c->err_ema + 4;
-        thr = fmin(thr, fmax(10, rel));
-    }
-    return thr;
-}
-
-static double zcut_threshold(memc_ctx *c)
-{
-    return c->z_ema > 0 ? fmax(c->p.zcut_rel * c->z_ema, c->p.zcut_min) : 0;
 }
 
 static void read_out(memc_ctx *c, const slot *sl, memc_image *dst)
@@ -797,14 +792,8 @@ int memc_submit(memc_ctx *c, double t)
     if (!c->ok || c->nfr < 2)
         return -1;
     cmd_begin(c);
-    int first = 0;
-    if (!c->me_valid) {
+    if (!c->me_valid)
         run_me(c);
-        c->pair_thr = cut_threshold(c);
-        c->pair_zthr = zcut_threshold(c);
-        first = 1;
-    }
-    double cut_sum = c->pair_thr * c->bw[0] * c->bh[0] * 256, zcut_sum = c->pair_zthr * c->bw[0] * c->bh[0] * 256;
     gframe *A = &c->fr[c->ib ^ 1], *B = &c->fr[c->ib];
     int bw = c->bw[0], bh = c->bh[0], nb = bw * bh;
     vkCmdFillBuffer(S(c)->cb, c->cnt.buf, 0, VK_WHOLE_SIZE, 0);
@@ -828,7 +817,7 @@ int memc_submit(memc_ctx *c, double t)
     }
     c->last_tf = tfin;
     {
-        pcs pc = {{bw, bh}, {0, 0, c->p.fb_spread, 0, (float)t, c->p.fb_ilo, c->p.fb_ihi}};
+        pcs pc = {{bw, bh}, {0, 0, c->p.fb_spread, c->p.fb_avg, (float)t, c->p.fb_ilo, c->p.fb_ihi}};
         vres r[4] = {{NULL, tfin}, {NULL, &c->fbw}, {NULL, &c->fa[0]}, {NULL, &c->fb[0]}};
         dispatch(c, &c->p_conf, r, &pc, (uint32_t)(nb + 63) / 64, 1);
     }
@@ -843,8 +832,8 @@ int memc_submit(memc_ctx *c, double t)
     }
     {
         pcs pc = {{c->fmt.w, c->fmt.h, bw, bh, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y},
-                  {(float)t, c->p.sigma, c->p.pen_occ, c->p.pen_bad, c->p.pen_fb, c->p.wprior, c->p.cthr, (float)cut_sum,
-                   luma_scale(c), (float)zcut_sum, 0, 0, c->p.fg_pix, 0, 0}};
+                  {(float)t, c->p.sigma, c->p.pen_occ, c->p.pen_bad, c->p.pen_fb, c->p.wprior, c->p.cthr, 0,
+                   luma_scale(c), 0, 0, 0, c->p.fg_pix, 0, 0}};
         vres r[17] = {{&A->y, NULL},  {&B->y, NULL},  {&A->c1, NULL},   {&B->c1, NULL},
                       {ac2, NULL},    {bc2, NULL},    {NULL, tfin},  {NULL, &c->fa[0]},
                       {NULL, &c->fb[0]}, {&S(c)->oy, NULL}, {&S(c)->oc1, NULL}, {c->fmt.nv ? &S(c)->oc1 : &S(c)->oc2, NULL},
@@ -857,9 +846,6 @@ int memc_submit(memc_ctx *c, double t)
         copy_i2b(c, &S(c)->oc2, &S(c)->down, c->off[2]);
     VkBufferCopy bc = {0, 0, 64};
     vkCmdCopyBuffer(S(c)->cb, c->stat.buf, S(c)->statcopy.buf, 1, &bc);
-    S(c)->first_of_pair = first;
-    S(c)->cut_thr = c->pair_thr;
-    S(c)->zcut_thr = c->pair_zthr;
     return cmd_end(c, 1);
 }
 
@@ -903,12 +889,7 @@ int memc_retrieve(memc_ctx *c, memc_image *dst)
     slot *sl = &c->sl[i];
     slot_wait(c, i);
     double e = ((uint32_t *)sl->statcopy.map)[0] / ((double)c->bw[0] * c->bh[0] * 256);
-    double z = ((uint32_t *)sl->statcopy.map)[1] / ((double)c->bw[0] * c->bh[0] * 256);
-    int ecut = e > sl->cut_thr, cut = ecut && z > sl->zcut_thr;
-    if (sl->first_of_pair && !ecut)
-        c->err_ema = c->err_ema > 0 ? c->err_ema * 0.8 + e * 0.2 : e;
-    if (sl->first_of_pair && !cut)
-        c->z_ema = c->z_ema > 0 ? c->z_ema * 0.8 + z * 0.2 : z;
+    int cut = ((uint32_t *)sl->statcopy.map)[2] != 0;
     c->st.mean_err = e;
     c->st.scene_cut = cut;
     c->st.me_ms = 0;
@@ -933,8 +914,7 @@ void memc_reset(memc_ctx *c)
     c->nfr = 0;
     c->me_valid = 0;
     c->have_prev = 0;
-    c->err_ema = 0;
-    c->z_ema = 0;
+    c->hist_clear = 1;
     c->st.scene_cut = 0;
 }
 
@@ -945,6 +925,7 @@ static void default_params(params *p)
     p->pen_update = 16;
     p->pen_zero = 8;
     p->pen_cross = 4;
+    p->pen_len = 4;
     p->lam_full = 2;
     p->dc_lo = 0.5f;
     p->dc_hi = 1;
@@ -955,12 +936,13 @@ static void default_params(params *p)
     p->sel_passes = 1;
     p->pen_inc = 256;
     p->sigma = 24;
-    p->pen_occ = 96;
+    p->pen_occ = 384;
     p->pen_bad = 256;
     p->wprior = 0.25f;
     p->cthr = 8;
     p->pen_fb = 1e6f;
     p->fb_spread = 0.7f;
+    p->fb_avg = 1;
     p->fb_ilo = 2;
     p->fb_ihi = 6;
     p->fg_sel = 1024;
@@ -975,9 +957,9 @@ int memc_set_param(memc_ctx *c, const char *name, double v)
 {
     params *p = &c->p;
 #define P_(N) if (!strcmp(name, #N)) { p->N = v; return 0; }
-    P_(pen_parent) P_(pen_temporal) P_(pen_update) P_(pen_zero) P_(pen_cross) P_(lam_full) P_(dc_lo) P_(dc_hi)
+    P_(pen_parent) P_(pen_temporal) P_(pen_update) P_(pen_zero) P_(pen_cross) P_(pen_len) P_(lam_full) P_(dc_lo) P_(dc_hi)
     P_(coarse_r) P_(iters) P_(iters0) P_(refine) P_(sel_passes) P_(pen_inc) P_(sigma) P_(pen_occ) P_(pen_bad)
-    P_(wprior) P_(cthr) P_(pen_fb) P_(fb_spread) P_(fg_sel) P_(fg_pix) P_(fb_ilo) P_(fb_ihi) P_(scut) P_(scut_rel) P_(zcut_rel) P_(zcut_min)
+    P_(wprior) P_(cthr) P_(pen_fb) P_(fb_spread) P_(fb_avg) P_(fg_sel) P_(fg_pix) P_(fb_ilo) P_(fb_ihi) P_(scut) P_(scut_rel) P_(zcut_rel) P_(zcut_min)
 #undef P_
     return -1;
 }
@@ -1032,6 +1014,7 @@ void memc_destroy(memc_ctx *c)
         buf_free(c, &c->fbw);
         buf_free(c, &c->ill0);
         buf_free(c, &c->ill1);
+        buf_free(c, &c->hist);
         pipe_free(c, &c->p_down);
         pipe_free(c, &c->p_norm);
         pipe_free(c, &c->p_full);
@@ -1040,6 +1023,7 @@ void memc_destroy(memc_ctx *c)
         pipe_free(c, &c->p_proj);
         pipe_free(c, &c->p_sel);
         pipe_free(c, &c->p_conf);
+        pipe_free(c, &c->p_cutdec);
         pipe_free(c, &c->p_illum);
         pipe_free(c, &c->p_ilmed);
         pipe_free(c, &c->p_interp);
@@ -1069,8 +1053,9 @@ memc_ctx *memc_create(const memc_format *fmt, int threads)
     c->nplanes = fmt->nv ? 2 : 3;
     c->lnorm = c->bps == 2 && fmt->depth < 16;
     default_params(&c->p);
+    c->hist_clear = 1;
     int nlev = 1;
-    while (nlev < MAXLEV && (fmt->w >> nlev) >= 200 && (fmt->h >> nlev) >= 64)
+    while (nlev < MAXLEV && (fmt->w >> nlev) >= 64 && (fmt->h >> nlev) >= 64)
         nlev++;
     c->nlev = nlev;
     for (int L = 0; L < nlev; L++) {

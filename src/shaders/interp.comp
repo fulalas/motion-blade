@@ -49,10 +49,19 @@ vec4 illum_at(ivec2 q0, int bxA, int byA)
     return s / max(s.w, 1e-6);
 }
 
-vec2 fat(int which, vec2 p)
+float okf(int which, vec2 p, vec2 u, float thr)
 {
-    int i = bidx(ivec2(floor(p / 8.0)), ivec2(bw, bh));
-    return which == 0 ? fa[i].xy : fb[i].xy;
+    vec2 q = (p - 3.5) / 8.0;
+    ivec2 b0 = ivec2(floor(q));
+    vec2 fr = q - vec2(b0);
+    float s = 0.0;
+    for (int k = 0; k < 4; k++) {
+        int i = bidx(b0 + ivec2(k & 1, k >> 1), ivec2(bw, bh));
+        vec2 v = which == 0 ? fa[i].xy - u : fb[i].xy + u;
+        float w = ((k & 1) != 0 ? fr.x : 1.0 - fr.x) * ((k >> 1) != 0 ? fr.y : 1.0 - fr.y);
+        s += l1(v) <= thr ? w : 0.0;
+    }
+    return s;
 }
 
 void main()
@@ -65,7 +74,7 @@ void main()
         return;
     float t = pc.f0.x;
     vec2 inv = 1.0 / vec2(W, H);
-    if (float(stat[0]) > pc.f1.w && float(stat[1]) > pc.f2.y) {
+    if (stat[2] != 0u) {
         bool useA = t < 0.5;
         for (int j = 0; j < 4; j++) {
             ivec2 p = q0 + ivec2(j & 1, j >> 1);
@@ -130,6 +139,9 @@ void main()
         vec2 u = cu[i];
         vec2 oa = i == fbi ? vec2(0.0) : -t * u;
         vec2 ob = i == fbi ? vec2(0.0) : (1.0 - t) * u;
+        float thr = pc.f1.z * 0.25 + l1(u) / 8.0;
+        vec2 pq = vec2(q0) + 0.5;
+        float sA = i == fbi ? 0.0 : okf(0, pq + oa, u, thr), sB = i == fbi ? 0.0 : okf(1, pq + ob, u, thr);
         float D[16], PA[4], PB[4];
         for (int y = 0; y < 4; y++)
             for (int x = 0; x < 4; x++) {
@@ -142,7 +154,6 @@ void main()
                     PB[(y - 1) * 2 + x - 1] = textureLod(BY, (p + ob) * inv, 0.0).r;
                 }
             }
-        float thr = pc.f1.z * 0.25 + l1(u) / 8.0;
         for (int j = 0; j < 4; j++) {
             int jx = j & 1, jy = j >> 1;
             float e = 0.0;
@@ -155,22 +166,13 @@ void main()
             if (i == fbi) {
                 cst = pc.f1.x;
             } else {
-                bool okA = l1(fat(0, p + oa) - u) <= thr;
-                bool okB = l1(fat(1, p + ob) + u) <= thr;
-                if (okA && okB) {
-                    cst = max(0.0, e - pc.f3.x * clamp(l1(u - pc.f3.yz) * 0.5, 0.0, 1.0));
-                } else if (okA) {
-                    cst = pc.f0.z;
-                    al = 1u;
-                } else if (okB) {
-                    cst = pc.f0.z;
-                    al = 2u;
-                } else {
-                    cst = e + pc.f0.w;
-                }
+                float qa = round(sA * (1.0 - sB) * 7.0), qb = round((1.0 - sA) * sB * 7.0);
+                cst = sA * sB * max(0.0, e - pc.f3.x * clamp(l1(u - pc.f3.yz) * 0.5, 0.0, 1.0)) +
+                      (qa + qb) / 7.0 * pc.f0.z + (1.0 - sA) * (1.0 - sB) * (e + pc.f0.w);
+                al = uint(qa) | (uint(qb) << 3);
             }
             cost[i][j] = cst;
-            am[j] |= al << (2 * i);
+            am[j] |= al << (6 * i);
             va[i][j] = PA[j] - t * dy;
             vb[i][j] = PB[j] + (1.0 - t) * dy;
         }
@@ -189,8 +191,9 @@ void main()
         float acc = 0.0;
         for (int i = 0; i < nc; i++) {
             float w = (1.0 - f) * wt[i] / sw + (i == fbi ? f : 0.0);
-            uint c = (am[j] >> (2 * i)) & 3u;
-            float al = c == 0u ? t : float(c - 1u);
+            uint c = (am[j] >> (6 * i)) & 63u;
+            float qa = float(c & 7u) / 7.0, qb = float(c >> 3) / 7.0;
+            float al = t * (1.0 - qa - qb) + qb;
             wA[i][j] = w * (1.0 - al);
             wB[i][j] = w * al;
             acc += wA[i][j] * va[i][j] + wB[i][j] * vb[i][j];

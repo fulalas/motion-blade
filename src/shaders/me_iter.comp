@@ -10,6 +10,7 @@ layout(std430, binding = 3) writeonly buffer Out { vec4 o[]; };
 layout(std430, binding = 4) readonly buffer Parent { vec4 par[]; };
 layout(std430, binding = 5) readonly buffer Temporal { vec4 tmp[]; };
 layout(std430, binding = 6) readonly buffer Cross { vec4 crs[]; };
+layout(std430, binding = 7) readonly buffer Hist { float hist[]; };
 
 int bw, bh;
 
@@ -86,7 +87,7 @@ void main()
         add(parent_at(px, qy), pc.f0.x);
         add(parent_at(qx, qy), pc.f0.x);
     }
-    if ((flags & 4) != 0)
+    if ((flags & 4) != 0 && hist[22] == 0.0)
         add(tmp[id].xy, pc.f0.y);
     if ((flags & 8) != 0)
         add(-crs[id].xy, pc.f1.x);
@@ -95,8 +96,9 @@ void main()
     vec2 best_v = vec2(0.0);
     for (int i = 0; i < n; i++) {
         float s = sad_y(Y, cl[i]);
-        if (s + pen[i] < best_c) {
-            best_c = s + pen[i];
+        float c = s + pen[i] + pc.f1.y * l1(cl[i]);
+        if (c < best_c) {
+            best_c = c;
             best_s = s;
             best_m = g_ml;
             best_v = cl[i];
@@ -109,8 +111,9 @@ void main()
     for (int k = 0; k < 2; k++) {
         vec2 v = base + (k == 0 ? d1 : d2);
         float s = sad_y(Y, v);
-        if (s + pc.f0.z < best_c) {
-            best_c = s + pc.f0.z;
+        float c = s + pc.f0.z + pc.f1.y * l1(v);
+        if (c < best_c) {
+            best_c = c;
             best_s = s;
             best_m = g_ml;
             best_v = v;
