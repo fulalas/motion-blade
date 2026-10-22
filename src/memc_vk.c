@@ -96,7 +96,9 @@ typedef struct {
     float pen_parent, pen_temporal, pen_update, pen_zero, pen_cross, pen_len, lam_full, dc_lo, dc_hi;
     int coarse_r, iters, iters0, refine, sel_passes;
     float pen_inc, sigma, pen_occ, pen_bad, wprior, cthr, pen_fb, fb_spread, fb_avg;
-    float fg_sel, fg_pix, fb_ilo, fb_ihi;
+    float fg_sel, fg_pix, fb_ilo, fb_ihi, pen_one, one_rel, one_min, one_tex, one_sw, pen_fbm, unc_min;
+    int uncov, unc_cont;
+    int la;
     double scut, scut_rel, zcut_rel, zcut_min;
 } params;
 
@@ -106,6 +108,7 @@ typedef struct {
 } gframe;
 
 #define NSLOT (MEMC_MAX_PENDING + 1)
+#define NFR 4
 
 typedef struct {
     VkCommandBuffer cb;
@@ -139,15 +142,15 @@ struct memc_ctx {
     const char *prof_name[16];
     int prof_n;
     vpipe p_down, p_norm, p_full, p_iter, p_refine, p_proj, p_sel, p_conf, p_cutdec, p_illum, p_ilmed, p_interp;
-    gframe fr[2];
-    vbuf fa[MAXLEV], fb[MAXLEV], pfa[MAXLEV], pfb[MAXLEV], tmp[MAXLEV];
+    gframe fr[NFR];
+    vbuf fa[MAXLEV], fb[MAXLEV], pfa[MAXLEV], pfb[MAXLEV], tmp[MAXLEV], qfa, qfb;
     int lw[MAXLEV], lh[MAXLEV], bw[MAXLEV], bh[MAXLEV];
-    vbuf slots, tf0, tf1, stat, dummy, fbw, ill0, ill1, hist;
+    vbuf slots, tf0, tf1, stat, pstat, qstat, dummy, fbw, ill0, ill1, hist;
     size_t off[3], rowb[3], rows[3];
     params p;
     memc_stats st;
-    int nfr, ib, me_valid, have_prev, lnorm, recording;
-    vbuf *last_tf;
+    int nfr, ib, me_valid, have_prev, have_q, eos, lnorm, recording;
+    vbuf *last_tf, last_fa, last_fb;
     int hist_clear;
     int ok;
     uint32_t sg_size;
@@ -621,7 +624,7 @@ static int vk_init(memc_ctx *c)
     PIPE_SG(p_iter, spv_iter, "SSBBBBBB");
     PIPE_SG(p_refine, spv_refine, "SSBB");
     PIPE(p_proj, spv_proj, "BB");
-    PIPE_SG(p_sel, spv_sel, "SSBBBBB");
+    PIPE_SG(p_sel, spv_sel, "SSSSBBBBBBBBB");
     PIPE(p_conf, spv_conf, "BBBB");
     PIPE(p_cutdec, spv_cutdec, "BB");
     PIPE(p_illum, spv_illum, "SSSSBB");
@@ -648,7 +651,7 @@ static int res_init(memc_ctx *c)
     VkFormat fy = c->bps == 1 ? VK_FORMAT_R8_UNORM : VK_FORMAT_R16_UNORM;
     VkFormat fc = c->fmt.nv ? (c->bps == 1 ? VK_FORMAT_R8G8_UNORM : VK_FORMAT_R16G16_UNORM) : fy;
     int W = c->fmt.w, H = c->fmt.h;
-    for (int k = 0; k < 2; k++) {
+    for (int k = 0; k < NFR; k++) {
         gframe *f = &c->fr[k];
         if (img_create(c, &f->y, W, H, fy) < 0 || img_create(c, &f->c1, c->cw, c->ch, fc) < 0)
             return -1;
@@ -672,6 +675,9 @@ static int res_init(memc_ctx *c)
             return -1;
     }
     int nb = c->bw[0] * c->bh[0];
+    if (buf_create(c, &c->qfa, (VkDeviceSize)nb * 16, 0) || buf_create(c, &c->qfb, (VkDeviceSize)nb * 16, 0) ||
+        buf_create(c, &c->pstat, 64, 1) || buf_create(c, &c->qstat, 64, 1))
+        return -1;
     if (buf_create(c, &c->slots, (VkDeviceSize)nb * 4 * 4, 0) ||
         buf_create(c, &c->tf0, (VkDeviceSize)nb * 16, 0) || buf_create(c, &c->tf1, (VkDeviceSize)nb * 16, 0) ||
         buf_create(c, &c->stat, 64, 1) || buf_create(c, &c->dummy, 64, 0) || buf_create(c, &c->hist, 128, 0) ||
@@ -694,7 +700,7 @@ static int res_init(memc_ctx *c)
             return -1;
     if (cmd_begin(c) < 0)
         return -1;
-    for (int k = 0; k < 2; k++) {
+    for (int k = 0; k < NFR; k++) {
         to_general(c, &c->fr[k].y);
         to_general(c, &c->fr[k].c1);
         if (!c->fmt.nv)
@@ -722,17 +728,36 @@ static void set_dc(const memc_ctx *c, pcs *pc)
     pc->f[15] = c->p.dc_hi;
 }
 
+static int fidx(const memc_ctx *c, int back)
+{
+    return (c->ib - back + NFR) % NFR;
+}
+
 static const vimg *lev_img(memc_ctx *c, int k, int L)
 {
     return L == 0 && !c->lnorm ? &c->fr[k].y : &c->fr[k].lev[L];
+}
+
+static void run_me(memc_ctx *c);
+
+static void rot3(vbuf *q, vbuf *p, vbuf *n)
+{
+    vbuf t = *q;
+    *q = *p;
+    *p = *n;
+    *n = t;
 }
 
 void memc_push(memc_ctx *c, const memc_image *src)
 {
     if (!c->ok)
         return;
+    c->eos = 0;
     if (c->nfr >= 2 && c->me_valid) {
-        for (int L = 0; L < c->nlev; L++) {
+        rot3(&c->qfa, &c->pfa[0], &c->fa[0]);
+        rot3(&c->qfb, &c->pfb[0], &c->fb[0]);
+        rot3(&c->qstat, &c->pstat, &c->stat);
+        for (int L = 1; L < c->nlev; L++) {
             vbuf t = c->fa[L];
             c->fa[L] = c->pfa[L];
             c->pfa[L] = t;
@@ -740,15 +765,17 @@ void memc_push(memc_ctx *c, const memc_image *src)
             c->fb[L] = c->pfb[L];
             c->pfb[L] = t;
         }
+        c->have_q = c->have_prev;
         c->have_prev = 1;
     } else {
         c->have_prev = 0;
+        c->have_q = 0;
     }
     c->me_valid = 0;
     cmd_end(c, 0);
     if (cmd_begin(c) < 0)
         return;
-    c->ib ^= 1;
+    c->ib = (c->ib + 1) % NFR;
     gframe *f = &c->fr[c->ib];
     for (int i = 0; i < c->nplanes; i++) {
         uint8_t *d = (uint8_t *)S(c)->up.map + c->off[i];
@@ -771,13 +798,21 @@ void memc_push(memc_ctx *c, const memc_image *src)
         vres r[2] = {{lev_img(c, c->ib, L - 1), NULL}, {&f->lev[L], NULL}};
         dispatch(c, &c->p_down, r, &pc, (c->lw[L] + 15) / 16, (c->lh[L] + 15) / 16);
     }
-    if (c->nfr < 2)
+    if (c->nfr < NFR)
         c->nfr++;
+    if (c->p.la && c->nfr >= 2)
+        run_me(c);
+}
+
+void memc_flush(memc_ctx *c)
+{
+    c->eos = 1;
 }
 
 static void estimate(memc_ctx *c, int dir)
 {
-    int kx = dir ? c->ib : c->ib ^ 1, ky = dir ? c->ib ^ 1 : c->ib;
+    int kp = fidx(c, 1);
+    int kx = dir ? c->ib : kp, ky = dir ? kp : c->ib;
     vbuf *F = dir ? c->fb : c->fa, *T = dir ? c->pfb : c->pfa;
     int top = c->nlev - 1;
     for (int L = top; L >= 0; L--) {
@@ -851,29 +886,48 @@ static void read_out(memc_ctx *c, const slot *sl, memc_image *dst)
 
 int memc_submit(memc_ctx *c, double t)
 {
-    if (!c->ok || c->nfr < 2 || c->fifo_n >= MEMC_MAX_PENDING)
+    int la = c->p.la && !c->eos && c->have_prev && c->me_valid;
+    if (!c->ok || c->nfr < 2 || c->fifo_n >= MEMC_MAX_PENDING || (c->p.la && !c->eos && !la))
         return -1;
     if (cmd_begin(c) < 0)
         return -1;
     if (!c->me_valid)
         run_me(c);
-    gframe *A = &c->fr[c->ib ^ 1], *B = &c->fr[c->ib];
+    int ka, kb, kc, kz, past;
+    vbuf *FA0, *FB0, *NFA, *PFB, *SC, *SP;
+    if (la) {
+        ka = fidx(c, 2), kb = fidx(c, 1), kc = fidx(c, 0), kz = fidx(c, 3);
+        FA0 = &c->pfa[0], FB0 = &c->pfb[0], NFA = &c->fa[0], PFB = &c->qfb;
+        SC = &c->pstat, SP = &c->qstat;
+        past = c->have_q;
+    } else {
+        ka = fidx(c, 1), kb = fidx(c, 0), kc = kb, kz = fidx(c, 2);
+        FA0 = &c->fa[0], FB0 = &c->fb[0], NFA = &c->dummy, PFB = &c->pfb[0];
+        SC = &c->stat, SP = &c->pstat;
+        past = c->have_prev;
+    }
+    if (!past)
+        kz = ka, PFB = &c->dummy, SP = SC;
+    c->last_fa = *FA0;
+    c->last_fb = *FB0;
+    gframe *A = &c->fr[ka], *B = &c->fr[kb];
     int bw = c->bw[0], bh = c->bh[0], nb = bw * bh;
     vkCmdFillBuffer(S(c)->cb, c->slots.buf, 0, VK_WHOLE_SIZE, 0xffffffffu);
     barrier(c);
     for (int dir = 0; dir < 2; dir++) {
         pcs pc = {{bw, bh, 0, 0, dir}, {(float)(dir ? 1 - t : t)}};
-        vres r[2] = {{NULL, dir ? &c->fb[0] : &c->fa[0]}, {NULL, &c->slots}};
+        vres r[2] = {{NULL, dir ? FB0 : FA0}, {NULL, &c->slots}};
         dispatch(c, &c->p_proj, r, &pc, (uint32_t)(nb + 63) / 64, 1);
     }
     vbuf *tfin = &c->dummy, *tfout = &c->tf0;
     for (int pass = 0; pass < c->p.sel_passes; pass++) {
-        pcs pc = {{bw, bh, c->fmt.w, c->fmt.h, pass}, {(float)t, c->p.pen_inc, c->p.cthr, c->p.fg_sel}};
+        pcs pc = {{bw, bh, c->fmt.w, c->fmt.h, pass, la, past},
+                  {(float)t, c->p.pen_inc, c->p.cthr, c->p.fg_sel, 0, 0, c->p.pen_one, c->p.one_rel, c->p.one_min, c->p.one_tex,
+                   c->p.unc_min, (float)c->p.uncov, c->p.one_sw, c->p.unc_cont * 0.01f}};
         set_dc(c, &pc);
-        vres r[7] = {{lev_img(c, c->ib ^ 1, 0), NULL}, {lev_img(c, c->ib, 0), NULL},
-                     {NULL, &c->fa[0]},      {NULL, &c->fb[0]},
-                     {NULL, &c->slots},
-                     {NULL, tfin}, {NULL, tfout}};
+        vres r[13] = {{lev_img(c, ka, 0), NULL}, {lev_img(c, kb, 0), NULL}, {lev_img(c, kc, 0), NULL},
+                      {lev_img(c, kz, 0), NULL}, {NULL, FA0}, {NULL, FB0}, {NULL, &c->slots}, {NULL, tfin},
+                      {NULL, tfout}, {NULL, NFA}, {NULL, PFB}, {NULL, &c->stat}, {NULL, SP}};
         dispatch(c, &c->p_sel, r, &pc, (uint32_t)(nb + 3) / 4, 1);
         tfin = tfout;
         tfout = tfout == &c->tf0 ? &c->tf1 : &c->tf0;
@@ -881,7 +935,7 @@ int memc_submit(memc_ctx *c, double t)
     c->last_tf = tfin;
     {
         pcs pc = {{bw, bh}, {0, 0, c->p.fb_spread, c->p.fb_avg, (float)t, c->p.fb_ilo, c->p.fb_ihi}};
-        vres r[4] = {{NULL, tfin}, {NULL, &c->fbw}, {NULL, &c->fa[0]}, {NULL, &c->fb[0]}};
+        vres r[4] = {{NULL, tfin}, {NULL, &c->fbw}, {NULL, FA0}, {NULL, FB0}};
         dispatch(c, &c->p_conf, r, &pc, (uint32_t)(nb + 63) / 64, 1);
     }
     const vimg *ac2 = c->fmt.nv ? &A->c1 : &A->c2, *bc2 = c->fmt.nv ? &B->c1 : &B->c2;
@@ -895,12 +949,12 @@ int memc_submit(memc_ctx *c, double t)
     }
     {
         pcs pc = {{c->fmt.w, c->fmt.h, bw, bh, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y},
-                  {(float)t, c->p.sigma, c->p.pen_occ, c->p.pen_bad, c->p.pen_fb, c->p.wprior, c->p.cthr, 0,
+                  {(float)t, c->p.sigma, c->p.pen_occ, c->p.pen_bad, c->p.pen_fb, c->p.wprior, c->p.cthr, c->p.pen_fbm,
                    luma_scale(c), 0, 0, 0, c->p.fg_pix, 0, 0}};
         vres r[17] = {{&A->y, NULL},  {&B->y, NULL},  {&A->c1, NULL},   {&B->c1, NULL},
-                      {ac2, NULL},    {bc2, NULL},    {NULL, tfin},  {NULL, &c->fa[0]},
-                      {NULL, &c->fb[0]}, {&S(c)->oy, NULL}, {&S(c)->oc1, NULL}, {c->fmt.nv ? &S(c)->oc1 : &S(c)->oc2, NULL},
-                      {lev_img(c, c->ib ^ 1, 0), NULL}, {lev_img(c, c->ib, 0), NULL}, {NULL, &c->stat}, {NULL, &c->fbw}, {NULL, &c->ill1}};
+                      {ac2, NULL},    {bc2, NULL},    {NULL, tfin},  {NULL, FA0},
+                      {NULL, FB0}, {&S(c)->oy, NULL}, {&S(c)->oc1, NULL}, {c->fmt.nv ? &S(c)->oc1 : &S(c)->oc2, NULL},
+                      {lev_img(c, ka, 0), NULL}, {lev_img(c, kb, 0), NULL}, {NULL, SC}, {NULL, &c->fbw}, {NULL, &c->ill1}};
         dispatch(c, &c->p_interp, r, &pc, (uint32_t)((c->fmt.w + 1) / 2 + 7) / 8, (uint32_t)((c->fmt.h + 1) / 2 + 7) / 8);
     }
     copy_i2b(c, &S(c)->oy, &S(c)->down, c->off[0]);
@@ -908,13 +962,13 @@ int memc_submit(memc_ctx *c, double t)
     if (!c->fmt.nv)
         copy_i2b(c, &S(c)->oc2, &S(c)->down, c->off[2]);
     VkBufferCopy bc = {0, 0, 64};
-    vkCmdCopyBuffer(S(c)->cb, c->stat.buf, S(c)->statcopy.buf, 1, &bc);
+    vkCmdCopyBuffer(S(c)->cb, SC->buf, S(c)->statcopy.buf, 1, &bc);
     return cmd_end(c, 1);
 }
 
 int memc_debug_field(memc_ctx *c, int which, float *out, int *w, int *h)
 {
-    vbuf *f = which == 0 ? &c->fa[0] : which == 1 ? &c->fb[0] : c->last_tf;
+    vbuf *f = which == 0 ? &c->last_fa : which == 1 ? &c->last_fb : c->last_tf;
     if (!f || !f->buf)
         return -1;
     int n = c->bw[0] * c->bh[0];
@@ -981,6 +1035,8 @@ void memc_reset(memc_ctx *c)
     c->nfr = 0;
     c->me_valid = 0;
     c->have_prev = 0;
+    c->have_q = 0;
+    c->eos = 0;
     c->hist_clear = 1;
     c->st.scene_cut = 0;
 }
@@ -1014,6 +1070,16 @@ static void default_params(params *p)
     p->fb_ihi = 6;
     p->fg_sel = 1024;
     p->fg_pix = 60;
+    p->pen_one = 512;
+    p->one_rel = 0.5f;
+    p->one_min = 2048;
+    p->one_tex = 0.75f;
+    p->one_sw = 4;
+    p->pen_fbm = 768;
+    p->unc_min = 4000;
+    p->uncov = 1;
+    p->unc_cont = 50;
+    p->la = 1;
     p->scut = 40;
     p->scut_rel = 4;
     p->zcut_rel = 2;
@@ -1030,7 +1096,7 @@ int memc_set_param(memc_ctx *c, const char *name, double v)
     }
     P_(pen_parent) P_(pen_temporal) P_(pen_update) P_(pen_zero) P_(pen_cross) P_(pen_len) P_(lam_full) P_(dc_lo) P_(dc_hi)
     P_(coarse_r) P_(iters) P_(iters0) P_(refine) P_(sel_passes) P_(pen_inc) P_(sigma) P_(pen_occ) P_(pen_bad)
-    P_(wprior) P_(cthr) P_(pen_fb) P_(fb_spread) P_(fb_avg) P_(fg_sel) P_(fg_pix) P_(fb_ilo) P_(fb_ihi) P_(scut) P_(scut_rel) P_(zcut_rel) P_(zcut_min)
+    P_(wprior) P_(cthr) P_(pen_fb) P_(fb_spread) P_(fb_avg) P_(fg_sel) P_(fg_pix) P_(pen_one) P_(one_rel) P_(one_min) P_(one_tex) P_(one_sw) P_(pen_fbm) P_(unc_min) P_(uncov) P_(unc_cont) P_(la) P_(fb_ilo) P_(fb_ihi) P_(scut) P_(scut_rel) P_(zcut_rel) P_(zcut_min)
 #undef P_
     return -1;
 }
@@ -1049,7 +1115,7 @@ void memc_destroy(memc_ctx *c)
             fprintf(stderr, "memc profile: %-10s %8.1f ms total\n", c->prof_name[k], c->prof_ms[k]);
     if (c->dev) {
         vkDeviceWaitIdle(c->dev);
-        for (int k = 0; k < 2; k++) {
+        for (int k = 0; k < NFR; k++) {
             img_free(c, &c->fr[k].y);
             img_free(c, &c->fr[k].c1);
             img_free(c, &c->fr[k].c2);
@@ -1080,6 +1146,10 @@ void memc_destroy(memc_ctx *c)
         buf_free(c, &c->tf0);
         buf_free(c, &c->tf1);
         buf_free(c, &c->stat);
+        buf_free(c, &c->pstat);
+        buf_free(c, &c->qstat);
+        buf_free(c, &c->qfa);
+        buf_free(c, &c->qfb);
         buf_free(c, &c->dummy);
         buf_free(c, &c->fbw);
         buf_free(c, &c->ill0);

@@ -34,6 +34,7 @@ memc_ctx *memc_create(const memc_format *fmt, int threads);
 void memc_destroy(memc_ctx *c);
 void memc_reset(memc_ctx *c);
 void memc_push(memc_ctx *c, const memc_image *src);
+void memc_flush(memc_ctx *c);
 int memc_interpolate(memc_ctx *c, double t, memc_image *dst);
 int memc_submit(memc_ctx *c, double t);
 int memc_retrieve(memc_ctx *c, memc_image *dst);

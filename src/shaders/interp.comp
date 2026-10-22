@@ -100,13 +100,16 @@ void main()
     int byA = (qy & 1) != 0 ? qy / 2 : qy / 2 - 1;
 
     vec2 cu[NC];
+    int cm[NC];
     float cw[NC][4];
     float fbs[4] = float[4](0.0, 0.0, 0.0, 0.0), fbn[4] = float[4](0.0, 0.0, 0.0, 0.0);
     int nc = 0;
+    bool hasm = false;
     for (int k = 0; k < 4; k++) {
         ivec2 b = ivec2(bxA + (k & 1), byA + (k >> 1));
         int bi = bidx(b, ivec2(bw, bh));
         vec2 u = tf[bi].xy;
+        int md = int(tf[bi].z);
         int ci = -1;
         for (int i = 0; i < nc; i++)
             if (cu[i] == u)
@@ -114,6 +117,8 @@ void main()
         if (ci < 0) {
             ci = nc++;
             cu[ci] = u;
+            cm[ci] = md;
+            hasm = hasm || md == M_UNC;
             for (int j = 0; j < 4; j++)
                 cw[ci][j] = 0.0;
         }
@@ -131,6 +136,7 @@ void main()
     float dcl = dy * 255.0 * pc.f2.x;
     int fbi = nc++;
     cu[fbi] = vec2(0.0);
+    cm[fbi] = 0;
     for (int j = 0; j < 4; j++)
         cw[fbi][j] = 1.0 - pc.f1.y;
 
@@ -142,7 +148,14 @@ void main()
         vec2 ob = i == fbi ? vec2(0.0) : (1.0 - t) * u;
         float thr = pc.f1.z * 0.25 + l1(u) / 8.0;
         vec2 pq = vec2(q0) + 0.5;
-        float sA = i == fbi ? 0.0 : okf(0, pq + oa, u, thr), sB = i == fbi ? 0.0 : okf(1, pq + ob, u, thr);
+        float sA = 0.0, sB = 0.0;
+        if (cm[i] != 0) {
+            sA = float(cm[i] == M_PAST);
+            sB = float(cm[i] == M_FUT || cm[i] == M_UNC);
+        } else if (i != fbi) {
+            sA = okf(0, pq + oa, u, thr);
+            sB = okf(1, pq + ob, u, thr);
+        }
         float D[16], PA[4], PB[4];
         for (int y = 0; y < 4; y++)
             for (int x = 0; x < 4; x++) {
@@ -165,7 +178,7 @@ void main()
             float cst;
             uint al = 0u;
             if (i == fbi) {
-                cst = pc.f1.x;
+                cst = hasm ? pc.f1.w : pc.f1.x;
             } else {
                 float qa = round(sA * (1.0 - sB) * 7.0), qb = round((1.0 - sA) * sB * 7.0);
                 cst = sA * sB * max(0.0, e - pc.f3.x * clamp(l1(u - pc.f3.yz) * 0.5, 0.0, 1.0)) +

@@ -37,10 +37,11 @@ struct priv {
     memc_ctx *ctx;
     int imgfmt, w, h;
     bool disabled;
-    struct mp_image *prev;
+    struct mp_image *prev, *cur;
     struct qent *outq;
     int nout, ngpu;
-    double grid, dfps;
+    double grid, dfps, last_pts;
+    bool fast;
     int64_t dfps_time;
     int expect;
 };
@@ -48,7 +49,10 @@ struct priv {
 static void clear_state(struct priv *p)
 {
     mp_image_unrefp(&p->prev);
+    mp_image_unrefp(&p->cur);
     p->grid = MP_NOPTS_VALUE;
+    p->last_pts = MP_NOPTS_VALUE;
+    p->fast = false;
     if (p->ctx)
         memc_reset(p->ctx);
     for (int i = 0; i < p->nout; i++)
@@ -81,12 +85,14 @@ static memc_image to_memc(struct mp_image *mpi)
 }
 
 static void finish_oldest_gpu(struct priv *p);
+static void flush_pending(struct mp_filter *f);
 
 static bool setup(struct mp_filter *f, struct mp_image *mpi)
 {
     struct priv *p = f->priv;
     if (p->imgfmt == mpi->imgfmt && p->w == mpi->w && p->h == mpi->h)
         return !p->disabled;
+    flush_pending(f);
     while (p->ngpu)
         finish_oldest_gpu(p);
     mp_image_unrefp(&p->prev);
@@ -193,29 +199,30 @@ static void submit_interp(struct priv *p, struct mp_image *ref, double t, double
     enqueue_ref(p, ref, pts, dur);
 }
 
-static void handle_frame(struct mp_filter *f, struct mp_image *mpi)
+static bool short_gap(double gap, double dfps)
+{
+    return dfps > 0 && gap < 1.05 / dfps;
+}
+
+static bool pair_ok(struct priv *p, double a, double b)
+{
+    double gap = b - a;
+    return a != MP_NOPTS_VALUE && b != MP_NOPTS_VALUE && gap > 0 && gap <= p->opts->max_gap &&
+           (p->opts->max_fps <= 0 || 1.0 / gap <= p->opts->max_fps);
+}
+
+static void emit_pair(struct mp_filter *f, struct mp_image *mpi)
 {
     struct priv *p = f->priv;
-    if (!setup(f, mpi)) {
-        mp_image_unrefp(&p->prev);
-        enqueue(p, MAKE_FRAME(MP_FRAME_VIDEO, mpi), false);
-        return;
-    }
-    memc_image src = to_memc(mpi);
-    if (!p->prev)
-        memc_reset(p->ctx);
-    memc_push(p->ctx, &src);
-
     struct mp_image *prev = p->prev;
     double gap = prev ? mpi->pts - prev->pts : 0;
-    bool ok = prev && prev->pts != MP_NOPTS_VALUE && mpi->pts != MP_NOPTS_VALUE && gap > 0 &&
-              gap <= p->opts->max_gap && (p->opts->max_fps <= 0 || 1.0 / gap <= p->opts->max_fps);
+    bool ok = prev && pair_ok(p, prev->pts, mpi->pts);
     double dfps = p->opts->factor ? 0 : display_fps(f);
     int n = p->opts->factor ? p->opts->factor : 2;
 
     if (dfps > 0) {
         double step = 1.0 / dfps;
-        if (!ok || gap < step * 1.05) {
+        if (!ok || short_gap(gap, dfps)) {
             enqueue_ref(p, mpi, mpi->pts, gap > 0 ? gap : step);
             p->grid = mpi->pts + step;
         } else {
@@ -249,6 +256,59 @@ static void handle_frame(struct mp_filter *f, struct mp_image *mpi)
     mp_image_unrefp(&p->prev);
     p->prev = mp_image_new_ref(mpi);
     enqueue(p, MAKE_FRAME(MP_FRAME_VIDEO, mpi), false);
+}
+
+static void flush_pending(struct mp_filter *f)
+{
+    struct priv *p = f->priv;
+    if (!p->cur)
+        return;
+    struct mp_image *b = p->cur;
+    p->cur = NULL;
+    memc_flush(p->ctx);
+    emit_pair(f, b);
+}
+
+static void handle_frame(struct mp_filter *f, struct mp_image *mpi)
+{
+    struct priv *p = f->priv;
+    if (!setup(f, mpi)) {
+        mp_image_unrefp(&p->prev);
+        enqueue(p, MAKE_FRAME(MP_FRAME_VIDEO, mpi), false);
+        return;
+    }
+    double lp = p->last_pts, gap = mpi->pts - lp, dfps = p->opts->factor ? 0 : display_fps(f);
+    p->last_pts = mpi->pts;
+    bool fast = lp != MP_NOPTS_VALUE && mpi->pts != MP_NOPTS_VALUE && gap > 0 &&
+                (short_gap(gap, dfps) || (p->opts->max_fps > 0 && 1.0 / gap > p->opts->max_fps));
+    bool bypass = fast && p->fast;
+    p->fast = fast;
+    if (bypass) {
+        flush_pending(f);
+        mp_image_unrefp(&p->prev);
+        mpi->pkt_duration = gap;
+        enqueue(p, MAKE_FRAME(MP_FRAME_VIDEO, mpi), false);
+        return;
+    }
+    if (p->prev && !fast && !pair_ok(p, lp, mpi->pts)) {
+        flush_pending(f);
+        mp_image_unrefp(&p->prev);
+    }
+    memc_image src = to_memc(mpi);
+    if (!p->prev) {
+        while (p->ngpu)
+            finish_oldest_gpu(p);
+        memc_reset(p->ctx);
+    }
+    memc_push(p->ctx, &src);
+    if (!p->prev) {
+        emit_pair(f, mpi);
+        return;
+    }
+    struct mp_image *b = p->cur;
+    p->cur = mpi;
+    if (b)
+        emit_pair(f, b);
 }
 
 static bool emit_head(struct mp_filter *f, bool block)
@@ -286,8 +346,10 @@ static void f_process(struct mp_filter *f)
         if (frame.type == MP_FRAME_VIDEO) {
             handle_frame(f, frame.data);
         } else if (frame.type != MP_FRAME_NONE) {
-            if (frame.type == MP_FRAME_EOF)
+            if (frame.type == MP_FRAME_EOF) {
+                flush_pending(f);
                 mp_image_unrefp(&p->prev);
+            }
             enqueue(p, frame, false);
         }
         mp_filter_internal_mark_progress(f);
@@ -321,6 +383,7 @@ static struct mp_filter *f_create(struct mp_filter *parent, void *options)
     p->pool = mp_image_pool_new(p);
     p->vo_opts_cache = m_config_cache_alloc(p, f->global, &vo_sub_opts);
     p->grid = MP_NOPTS_VALUE;
+    p->last_pts = MP_NOPTS_VALUE;
     p->expect = 1;
 
     struct mp_autoconvert *conv = mp_autoconvert_create(f);

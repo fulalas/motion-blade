@@ -20,6 +20,8 @@ float raw(int bx, int by)
     bx = clamp(bx, 0, bw - 1);
     by = clamp(by, 0, bh - 1);
     vec2 u = tf[by * bw + bx].xy;
+    if (tf[by * bw + bx].z != 0.0)
+        return 0.0;
     float t = pc.f1.x;
     vec2 c = vec2(bx * 8 + 4, by * 8 + 4);
     float ia = l1(fat(0, c - t * u) - u);
@@ -36,6 +38,10 @@ void main()
     if (id >= bw * bh)
         return;
     int bx = id % bw, by = id / bw;
+    if (int(tf[id].z) == M_UNC) {
+        fb[id] = 0.0;
+        return;
+    }
     float r[7][7];
     for (int y = 0; y < 7; y++)
         for (int x = 0; x < 7; x++)
