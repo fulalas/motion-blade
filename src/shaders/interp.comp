@@ -126,7 +126,8 @@ void main()
             fbn[j] += w2.x * w2.y;
         }
     }
-    float dy = illum_at(q0, bxA, byA).x;
+    vec4 il = illum_at(q0, bxA, byA);
+    float dy = il.x;
     float dcl = dy * 255.0 * pc.f2.x;
     int fbi = nc++;
     cu[fbi] = vec2(0.0);
@@ -203,7 +204,7 @@ void main()
             imageStore(oY, p, vec4(acc));
     }
 
-    vec2 dcc = illum_at(q0, bxA, byA).yz;
+    vec2 dcc = il.yz;
     int sx = pc.i1.z, sy = pc.i1.w;
     int CW = pc.i1.x, CH = pc.i1.y;
     vec2 cinv = 1.0 / vec2(CW, CH);

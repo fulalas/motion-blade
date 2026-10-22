@@ -42,8 +42,8 @@ void main()
     if (lane == 0) {
         f[id] = vec4(bv, best, dcm);
         if (pc.i1.x != 0) {
-            atomicAdd(stat[0], uint(best_sad));
-            atomicAdd(stat[1], uint(best_z));
+            atomicAdd(stat[0], uint(best_sad * (1.0 / 16.0) + 0.5));
+            atomicAdd(stat[1], uint(best_z * (1.0 / 16.0) + 0.5));
         }
     }
 }

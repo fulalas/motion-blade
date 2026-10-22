@@ -3,7 +3,8 @@
 src_dir=$PWD
 work=$(readlink -f "${1:?workdir}")
 TARGET=x86_64-w64-mingw32
-toolchain=$(ls -d "$work"/llvm-mingw-*-ucrt-*/ | head -1)
+toolchain=$(ls -d "$work"/llvm-mingw-*-ucrt-*/ 2>/dev/null | head -1)
+[ -n "$toolchain" ] || { echo "no llvm-mingw-*-ucrt-* folder in $work" >&2; exit 1; }
 export PATH="$toolchain/bin:$PATH"
 prefix="$work/prefix"
 mkdir -p "$prefix" "$work/src"

@@ -12,6 +12,7 @@
 
 #define MAXLEV 6
 #define BS 8
+#define STAT_SCALE 16.0
 
 static const uint32_t spv_down[] =
 #include "shaders/down.h"
@@ -141,7 +142,7 @@ struct memc_ctx {
     gframe fr[2];
     vbuf fa[MAXLEV], fb[MAXLEV], pfa[MAXLEV], pfb[MAXLEV], tmp[MAXLEV];
     int lw[MAXLEV], lh[MAXLEV], bw[MAXLEV], bh[MAXLEV];
-    vbuf cnt, slots, tf0, tf1, stat, dummy, fbw, ill0, ill1, hist;
+    vbuf slots, tf0, tf1, stat, dummy, fbw, ill0, ill1, hist;
     size_t off[3], rowb[3], rows[3];
     params p;
     memc_stats st;
@@ -149,6 +150,7 @@ struct memc_ctx {
     vbuf *last_tf;
     int hist_clear;
     int ok;
+    uint32_t sg_size;
 };
 
 #define S(c) (&(c)->sl[(c)->cur])
@@ -246,7 +248,8 @@ static void img_free(memc_ctx *c, vimg *im)
     memset(im, 0, sizeof(*im));
 }
 
-static int pipe_create(memc_ctx *c, vpipe *p, const uint32_t *code, size_t size, const char *types, const char *name)
+static int pipe_create(memc_ctx *c, vpipe *p, const uint32_t *code, size_t size, const char *types, const char *name,
+                       int sg)
 {
     memset(p, 0, sizeof(*p));
     if (strlen(types) >= sizeof(p->types))
@@ -279,6 +282,10 @@ static int pipe_create(memc_ctx *c, vpipe *p, const uint32_t *code, size_t size,
     VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     ci.stage = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0,
                                                  VK_SHADER_STAGE_COMPUTE_BIT, sm, "main", NULL};
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT rs = {
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT, NULL, c->sg_size};
+    if (sg && c->sg_size)
+        ci.stage.pNext = &rs;
     ci.layout = p->pl;
     VkResult r = vkCreateComputePipelines(c->dev, VK_NULL_HANDLE, 1, &ci, NULL, &p->p);
     vkDestroyShaderModule(c->dev, sm, NULL);
@@ -366,26 +373,35 @@ static void slot_wait(memc_ctx *c, int i)
     sl->gpu_ms = (double)(ts[1] - ts[0]) * c->ts_period / 1e6;
 }
 
+static int in_fifo(const memc_ctx *c, int i)
+{
+    for (int k = 0; k < c->fifo_n; k++)
+        if (c->fifo[k] == i)
+            return 1;
+    return 0;
+}
+
 static int cmd_begin(memc_ctx *c)
 {
     if (c->recording)
         return 0;
-    int i = c->next_slot;
-    for (int k = 0; k < c->fifo_n; k++)
-        if (c->fifo[k] == i) {
-            slot_wait(c, i);
-            memmove(&c->fifo[k], &c->fifo[k + 1], (size_t)(c->fifo_n - k - 1) * sizeof(int));
-            c->fifo_n--;
-            break;
-        }
+    int i = -1;
+    for (int k = 0; k < NSLOT && i < 0; k++)
+        if (!in_fifo(c, (c->next_slot + k) % NSLOT))
+            i = (c->next_slot + k) % NSLOT;
+    if (i < 0)
+        return -1;
     slot_wait(c, i);
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL,
+                                   VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
+    if (vkResetCommandBuffer(c->sl[i].cb, 0) != VK_SUCCESS || vkBeginCommandBuffer(c->sl[i].cb, &bi) != VK_SUCCESS) {
+        fprintf(stderr, "memc: could not begin command buffer\n");
+        c->ok = 0;
+        return -1;
+    }
     c->cur = i;
     c->next_slot = (i + 1) % NSLOT;
     c->recording = 1;
-    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL,
-                                   VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
-    VK(vkResetCommandBuffer(S(c)->cb, 0));
-    VK(vkBeginCommandBuffer(S(c)->cb, &bi));
     vkCmdResetQueryPool(S(c)->cb, S(c)->qp, 0, 66);
     vkCmdWriteTimestamp(S(c)->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, S(c)->qp, 0);
     S(c)->nq = 0;
@@ -404,13 +420,14 @@ static int cmd_end(memc_ctx *c, int has_out)
     c->recording = 0;
     slot *sl = S(c);
     vkCmdWriteTimestamp(sl->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, sl->qp, 1);
-    if (vkEndCommandBuffer(sl->cb) != VK_SUCCESS)
-        return -1;
     VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &sl->cb;
-    if (vkQueueSubmit(c->q, 1, &si, sl->fence) != VK_SUCCESS)
+    if (vkEndCommandBuffer(sl->cb) != VK_SUCCESS || vkQueueSubmit(c->q, 1, &si, sl->fence) != VK_SUCCESS) {
+        fprintf(stderr, "memc: could not submit command buffer\n");
+        c->ok = 0;
         return -1;
+    }
     sl->busy = 1;
     sl->has_out = has_out;
     if (has_out)
@@ -500,17 +517,54 @@ static int vk_init(memc_ctx *c)
     uint32_t next = 0;
     vkEnumerateDeviceExtensionProperties(c->pd, NULL, &next, NULL);
     VkExtensionProperties *exts = calloc(next ? next : 1, sizeof(*exts));
+    if (!exts)
+        return -1;
     vkEnumerateDeviceExtensionProperties(c->pd, NULL, &next, exts);
-    int has_prio = 0;
-    for (uint32_t i = 0; i < next; i++)
+    int has_prio = 0, has_sgctl = 0;
+    for (uint32_t i = 0; i < next; i++) {
         if (!strcmp(exts[i].extensionName, VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME))
             has_prio = 1;
+        if (!strcmp(exts[i].extensionName, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME))
+            has_sgctl = 1;
+    }
     free(exts);
+
+    if (pp.apiVersion < VK_API_VERSION_1_1) {
+        fprintf(stderr, "memc: %s does not support Vulkan 1.1\n", pp.deviceName);
+        return -1;
+    }
+    VkPhysicalDeviceSubgroupSizeControlPropertiesEXT sgc = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES_EXT};
+    VkPhysicalDeviceSubgroupProperties sgp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
+                                              has_sgctl ? &sgc : NULL};
+    VkPhysicalDeviceProperties2 pp2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &sgp};
+    vkGetPhysicalDeviceProperties2(c->pd, &pp2);
+    VkSubgroupFeatureFlags need = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_CLUSTERED_BIT;
+    if ((sgp.supportedOperations & need) != need || !(sgp.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT)) {
+        fprintf(stderr, "memc: %s lacks clustered subgroup operations\n", pp.deviceName);
+        return -1;
+    }
+    uint32_t sg_min = has_sgctl ? sgc.minSubgroupSize : sgp.subgroupSize;
+    int can_req = has_sgctl && (sgc.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT);
+    if (sg_min >= 16 && can_req && sgc.minSubgroupSize <= 32 && sgc.maxSubgroupSize >= 32 &&
+        sgc.maxComputeWorkgroupSubgroups >= 2) {
+        c->sg_size = 32;
+    } else if (sg_min < 16) {
+        if (!can_req || sgc.maxSubgroupSize < 16 || sgc.maxComputeWorkgroupSubgroups < 4) {
+            fprintf(stderr, "memc: %s cannot run 16-wide subgroups\n", pp.deviceName);
+            return -1;
+        }
+        c->sg_size = 16;
+    }
+
     float pri = 1;
     VkDeviceQueueGlobalPriorityCreateInfoKHR gp = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR, NULL,
                                                    VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR};
     VkDeviceQueueCreateInfo qci = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, c->qf, 1, &pri};
-    const char *ext[] = {VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME};
+    const char *ext[3] = {VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
+    uint32_t next_base = 1;
+    VkPhysicalDeviceSubgroupSizeControlFeaturesEXT sgf = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT, NULL, VK_TRUE, VK_FALSE};
     VkPhysicalDeviceFeatures feat = {0};
     feat.shaderStorageImageExtendedFormats = VK_TRUE;
     VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
@@ -518,15 +572,20 @@ static int vk_init(memc_ctx *c)
     dci.pQueueCreateInfos = &qci;
     dci.ppEnabledExtensionNames = ext;
     dci.pEnabledFeatures = &feat;
+    if (c->sg_size) {
+        ext[next_base++] = VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME;
+        dci.pNext = &sgf;
+    }
     VkResult res = VK_ERROR_INITIALIZATION_FAILED;
     if (has_prio) {
         qci.pNext = &gp;
-        dci.enabledExtensionCount = 2;
+        ext[next_base] = VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME;
+        dci.enabledExtensionCount = next_base + 1;
         res = vkCreateDevice(c->pd, &dci, NULL, &c->dev);
     }
     if (res != VK_SUCCESS) {
         qci.pNext = NULL;
-        dci.enabledExtensionCount = 1;
+        dci.enabledExtensionCount = next_base;
         VK(vkCreateDevice(c->pd, &dci, NULL, &c->dev));
     }
     if (getenv("MEMC_VERBOSE"))
@@ -554,14 +613,15 @@ static int vk_init(memc_ctx *c)
     VK(vkCreateSampler(c->dev, &sci, NULL, &c->smp));
     c->prof = getenv("MEMC_PROFILE") != NULL;
 
-#define PIPE(P, S, T) do { if (pipe_create(c, &c->P, S, sizeof(S), T, #P) < 0) return -1; } while (0)
+#define PIPE(P, S, T) do { if (pipe_create(c, &c->P, S, sizeof(S), T, #P, 0) < 0) return -1; } while (0)
+#define PIPE_SG(P, S, T) do { if (pipe_create(c, &c->P, S, sizeof(S), T, #P, 1) < 0) return -1; } while (0)
     PIPE(p_down, spv_down, "SI");
     PIPE(p_norm, spv_norm, "SI");
     PIPE(p_full, spv_full, "SSB");
-    PIPE(p_iter, spv_iter, "SSBBBBBB");
-    PIPE(p_refine, spv_refine, "SSBB");
-    PIPE(p_proj, spv_proj, "BBB");
-    PIPE(p_sel, spv_sel, "SSBBBBBB");
+    PIPE_SG(p_iter, spv_iter, "SSBBBBBB");
+    PIPE_SG(p_refine, spv_refine, "SSBB");
+    PIPE(p_proj, spv_proj, "BB");
+    PIPE_SG(p_sel, spv_sel, "SSBBBBB");
     PIPE(p_conf, spv_conf, "BBBB");
     PIPE(p_cutdec, spv_cutdec, "BB");
     PIPE(p_illum, spv_illum, "SSSSBB");
@@ -579,6 +639,7 @@ static int vk_init(memc_ctx *c)
             PIPE(p_interp, spv_interp16, ti);
     }
 #undef PIPE
+#undef PIPE_SG
     return 0;
 }
 
@@ -611,7 +672,7 @@ static int res_init(memc_ctx *c)
             return -1;
     }
     int nb = c->bw[0] * c->bh[0];
-    if (buf_create(c, &c->cnt, (VkDeviceSize)nb * 4, 0) || buf_create(c, &c->slots, (VkDeviceSize)nb * 4 * 8, 0) ||
+    if (buf_create(c, &c->slots, (VkDeviceSize)nb * 4 * 4, 0) ||
         buf_create(c, &c->tf0, (VkDeviceSize)nb * 16, 0) || buf_create(c, &c->tf1, (VkDeviceSize)nb * 16, 0) ||
         buf_create(c, &c->stat, 64, 1) || buf_create(c, &c->dummy, 64, 0) || buf_create(c, &c->hist, 128, 0) ||
         buf_create(c, &c->fbw, (VkDeviceSize)nb * 4, 0) || buf_create(c, &c->ill0, (VkDeviceSize)nb * 16, 0) ||
@@ -685,7 +746,8 @@ void memc_push(memc_ctx *c, const memc_image *src)
     }
     c->me_valid = 0;
     cmd_end(c, 0);
-    cmd_begin(c);
+    if (cmd_begin(c) < 0)
+        return;
     c->ib ^= 1;
     gframe *f = &c->fr[c->ib];
     for (int i = 0; i < c->nplanes; i++) {
@@ -771,7 +833,7 @@ static void run_me(memc_ctx *c)
     barrier(c);
     estimate(c, 0);
     estimate(c, 1);
-    pcs pc = {{0}, {(float)(1.0 / ((double)c->bw[0] * c->bh[0] * 256)), (float)c->p.scut, (float)c->p.scut_rel,
+    pcs pc = {{0}, {(float)(STAT_SCALE / ((double)c->bw[0] * c->bh[0] * 256)), (float)c->p.scut, (float)c->p.scut_rel,
                     (float)c->p.zcut_rel, (float)c->p.zcut_min}};
     vres r[2] = {{NULL, &c->stat}, {NULL, &c->hist}};
     dispatch(c, &c->p_cutdec, r, &pc, 1, 1);
@@ -789,27 +851,28 @@ static void read_out(memc_ctx *c, const slot *sl, memc_image *dst)
 
 int memc_submit(memc_ctx *c, double t)
 {
-    if (!c->ok || c->nfr < 2)
+    if (!c->ok || c->nfr < 2 || c->fifo_n >= MEMC_MAX_PENDING)
         return -1;
-    cmd_begin(c);
+    if (cmd_begin(c) < 0)
+        return -1;
     if (!c->me_valid)
         run_me(c);
     gframe *A = &c->fr[c->ib ^ 1], *B = &c->fr[c->ib];
     int bw = c->bw[0], bh = c->bh[0], nb = bw * bh;
-    vkCmdFillBuffer(S(c)->cb, c->cnt.buf, 0, VK_WHOLE_SIZE, 0);
+    vkCmdFillBuffer(S(c)->cb, c->slots.buf, 0, VK_WHOLE_SIZE, 0xffffffffu);
     barrier(c);
     for (int dir = 0; dir < 2; dir++) {
         pcs pc = {{bw, bh, 0, 0, dir}, {(float)(dir ? 1 - t : t)}};
-        vres r[3] = {{NULL, dir ? &c->fb[0] : &c->fa[0]}, {NULL, &c->cnt}, {NULL, &c->slots}};
+        vres r[2] = {{NULL, dir ? &c->fb[0] : &c->fa[0]}, {NULL, &c->slots}};
         dispatch(c, &c->p_proj, r, &pc, (uint32_t)(nb + 63) / 64, 1);
     }
     vbuf *tfin = &c->dummy, *tfout = &c->tf0;
     for (int pass = 0; pass < c->p.sel_passes; pass++) {
         pcs pc = {{bw, bh, c->fmt.w, c->fmt.h, pass}, {(float)t, c->p.pen_inc, c->p.cthr, c->p.fg_sel}};
         set_dc(c, &pc);
-        vres r[8] = {{lev_img(c, c->ib ^ 1, 0), NULL}, {lev_img(c, c->ib, 0), NULL},
+        vres r[7] = {{lev_img(c, c->ib ^ 1, 0), NULL}, {lev_img(c, c->ib, 0), NULL},
                      {NULL, &c->fa[0]},      {NULL, &c->fb[0]},
-                     {NULL, &c->cnt},        {NULL, &c->slots},
+                     {NULL, &c->slots},
                      {NULL, tfin}, {NULL, tfout}};
         dispatch(c, &c->p_sel, r, &pc, (uint32_t)(nb + 3) / 4, 1);
         tfin = tfout;
@@ -856,12 +919,16 @@ int memc_debug_field(memc_ctx *c, int which, float *out, int *w, int *h)
         return -1;
     int n = c->bw[0] * c->bh[0];
     vbuf tmp;
-    if (buf_create(c, &tmp, (VkDeviceSize)n * 16, 1) < 0)
+    if (buf_create(c, &tmp, (VkDeviceSize)n * 16, 1) < 0 || cmd_begin(c) < 0) {
+        buf_free(c, &tmp);
         return -1;
-    cmd_begin(c);
+    }
     VkBufferCopy bc = {0, 0, (VkDeviceSize)n * 16};
     vkCmdCopyBuffer(S(c)->cb, f->buf, tmp.buf, 1, &bc);
-    cmd_submit(c);
+    if (cmd_submit(c) < 0) {
+        buf_free(c, &tmp);
+        return -1;
+    }
     memcpy(out, tmp.map, (size_t)n * 16);
     *w = c->bw[0];
     *h = c->bh[0];
@@ -888,7 +955,7 @@ int memc_retrieve(memc_ctx *c, memc_image *dst)
     c->fifo_n--;
     slot *sl = &c->sl[i];
     slot_wait(c, i);
-    double e = ((uint32_t *)sl->statcopy.map)[0] / ((double)c->bw[0] * c->bh[0] * 256);
+    double e = ((uint32_t *)sl->statcopy.map)[0] * STAT_SCALE / ((double)c->bw[0] * c->bh[0] * 256);
     int cut = ((uint32_t *)sl->statcopy.map)[2] != 0;
     c->st.mean_err = e;
     c->st.scene_cut = cut;
@@ -957,6 +1024,10 @@ int memc_set_param(memc_ctx *c, const char *name, double v)
 {
     params *p = &c->p;
 #define P_(N) if (!strcmp(name, #N)) { p->N = v; return 0; }
+    if (!strcmp(name, "sel_passes") || !strcmp(name, "iters0")) {
+        if (v < 1)
+            return -1;
+    }
     P_(pen_parent) P_(pen_temporal) P_(pen_update) P_(pen_zero) P_(pen_cross) P_(pen_len) P_(lam_full) P_(dc_lo) P_(dc_hi)
     P_(coarse_r) P_(iters) P_(iters0) P_(refine) P_(sel_passes) P_(pen_inc) P_(sigma) P_(pen_occ) P_(pen_bad)
     P_(wprior) P_(cthr) P_(pen_fb) P_(fb_spread) P_(fb_avg) P_(fg_sel) P_(fg_pix) P_(fb_ilo) P_(fb_ihi) P_(scut) P_(scut_rel) P_(zcut_rel) P_(zcut_min)
@@ -1005,7 +1076,6 @@ void memc_destroy(memc_ctx *c)
             buf_free(c, &c->pfb[L]);
             buf_free(c, &c->tmp[L]);
         }
-        buf_free(c, &c->cnt);
         buf_free(c, &c->slots);
         buf_free(c, &c->tf0);
         buf_free(c, &c->tf1);
@@ -1041,7 +1111,8 @@ void memc_destroy(memc_ctx *c)
 memc_ctx *memc_create(const memc_format *fmt, int threads)
 {
     (void)threads;
-    if (fmt->w < 64 || fmt->h < 64 || fmt->depth < 8 || fmt->depth > 16)
+    if (fmt->w < 64 || fmt->h < 64 || fmt->depth < 8 || fmt->depth > 16 || fmt->cshift_x < 0 || fmt->cshift_x > 1 ||
+        fmt->cshift_y < 0 || fmt->cshift_y > 1)
         return NULL;
     memc_ctx *c = calloc(1, sizeof(*c));
     if (!c)

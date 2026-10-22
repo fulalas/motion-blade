@@ -2,8 +2,9 @@
 
 ## Version
 
-`MEMC_VERSION` holds the version of the memc filter (`major.minor.patch`). It is separate from
-mpv's own `MPV_VERSION`, which must not be changed.
+The plain text file `MEMC_VERSION` at the root of this repository holds the version of the memc
+filter (`major.minor.patch`, one line). It is separate from mpv's own `MPV_VERSION`, which must not
+be changed.
 
 Every commit that changes code must increase it by one step:
 

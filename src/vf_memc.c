@@ -31,14 +31,14 @@ struct qent {
 
 struct priv {
     struct opts *opts;
-    struct mp_vo_opts *vo_opts;
+    struct m_config_cache *vo_opts_cache;
     struct mp_pin *in;
     struct mp_image_pool *pool;
     memc_ctx *ctx;
     int imgfmt, w, h;
     bool disabled;
     struct mp_image *prev;
-    struct qent outq[MAXQ];
+    struct qent *outq;
     int nout, ngpu;
     double grid, dfps;
     int64_t dfps_time;
@@ -80,12 +80,17 @@ static memc_image to_memc(struct mp_image *mpi)
     return im;
 }
 
+static void finish_oldest_gpu(struct priv *p);
+
 static bool setup(struct mp_filter *f, struct mp_image *mpi)
 {
     struct priv *p = f->priv;
     if (p->imgfmt == mpi->imgfmt && p->w == mpi->w && p->h == mpi->h)
         return !p->disabled;
-    clear_state(p);
+    while (p->ngpu)
+        finish_oldest_gpu(p);
+    mp_image_unrefp(&p->prev);
+    p->grid = MP_NOPTS_VALUE;
     memc_destroy(p->ctx);
     p->ctx = NULL;
     p->disabled = true;
@@ -125,11 +130,7 @@ static bool setup(struct mp_filter *f, struct mp_image *mpi)
 
 static void enqueue(struct priv *p, struct mp_frame frame, bool gpu)
 {
-    if (p->nout == MAXQ) {
-        mp_frame_unref(&frame);
-        return;
-    }
-    p->outq[p->nout++] = (struct qent){frame, gpu};
+    MP_TARRAY_APPEND(p, p->outq, p->nout, ((struct qent){frame, gpu}));
     if (gpu)
         p->ngpu++;
 }
@@ -151,8 +152,10 @@ static void finish_oldest_gpu(struct priv *p)
 static double display_fps(struct mp_filter *f)
 {
     struct priv *p = f->priv;
-    if (p->vo_opts && p->vo_opts->display_fps_override > 0)
-        return p->vo_opts->display_fps_override;
+    m_config_cache_update(p->vo_opts_cache);
+    struct mp_vo_opts *vo_opts = p->vo_opts_cache->opts;
+    if (vo_opts->display_fps_override > 0)
+        return vo_opts->display_fps_override;
     int64_t now = mp_time_ns();
     if (!p->dfps_time || now - p->dfps_time > MP_TIME_S_TO_NS(10)) {
         struct mp_stream_info *info = mp_filter_find_stream_info(f);
@@ -177,7 +180,7 @@ static void submit_interp(struct priv *p, struct mp_image *ref, double t, double
     struct mp_image *out = mp_image_pool_get(p->pool, ref->imgfmt, ref->w, ref->h);
     if (out) {
         mp_image_copy_attributes(out, ref);
-        while (memc_pending(p->ctx) >= MEMC_MAX_PENDING)
+        while (memc_pending(p->ctx) >= MEMC_MAX_PENDING && p->ngpu)
             finish_oldest_gpu(p);
         if (memc_submit(p->ctx, t) == 0) {
             out->pts = pts;
@@ -316,7 +319,7 @@ static struct mp_filter *f_create(struct mp_filter *parent, void *options)
     struct priv *p = f->priv;
     p->opts = talloc_steal(p, options);
     p->pool = mp_image_pool_new(p);
-    p->vo_opts = mp_get_config_group(p, f->global, &vo_sub_opts);
+    p->vo_opts_cache = m_config_cache_alloc(p, f->global, &vo_sub_opts);
     p->grid = MP_NOPTS_VALUE;
     p->expect = 1;
 

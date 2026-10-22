@@ -3,8 +3,7 @@
 #include "common.glsl"
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer F { vec4 f[]; };
-layout(std430, binding = 1) buffer Cnt { uint cnt[]; };
-layout(std430, binding = 2) writeonly buffer Slots { vec2 slots[]; };
+layout(std430, binding = 1) buffer Keys { uint keys[]; };
 
 void main()
 {
@@ -18,7 +17,7 @@ void main()
     if (any(lessThan(q, ivec2(0))) || q.x >= bw || q.y >= bh)
         return;
     int qi = q.y * bw + q.x;
-    uint s = atomicAdd(cnt[qi], 1u);
-    if (s < 4u)
-        slots[qi * 4 + int(s)] = pc.i1.x != 0 ? -v : v;
+    uint key = uint(id) * 2u + uint(pc.i1.x != 0);
+    for (int k = 0; k < 4 && key != 0xffffffffu; k++)
+        key = max(key, atomicMin(keys[qi * 4 + k], key));
 }

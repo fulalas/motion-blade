@@ -8,10 +8,9 @@ layout(binding = 0) uniform sampler2D A;
 layout(binding = 1) uniform sampler2D B;
 layout(std430, binding = 2) readonly buffer FA { vec4 fa[]; };
 layout(std430, binding = 3) readonly buffer FB { vec4 fb[]; };
-layout(std430, binding = 4) readonly buffer Cnt { uint cnt[]; };
-layout(std430, binding = 5) readonly buffer Slots { vec2 slots[]; };
-layout(std430, binding = 6) readonly buffer TPrev { vec4 tp[]; };
-layout(std430, binding = 7) writeonly buffer TOut { vec4 to[]; };
+layout(std430, binding = 4) readonly buffer Keys { uint keys[]; };
+layout(std430, binding = 5) readonly buffer TPrev { vec4 tp[]; };
+layout(std430, binding = 6) writeonly buffer TOut { vec4 to[]; };
 
 int bw, bh;
 
@@ -44,9 +43,13 @@ void main()
     g_inv = 1.0 / vec2(pc.i0.zw);
     float t = pc.f0.x;
     n = 0;
-    int ns = int(min(cnt[id], 4u));
-    for (int i = 0; i < ns; i++)
-        add(slots[id * 4 + i]);
+    for (int i = 0; i < 4; i++) {
+        uint key = keys[id * 4 + i];
+        if (key == 0xffffffffu)
+            break;
+        int src = int(key >> 1);
+        add((key & 1u) != 0u ? -fb[src].xy : fa[src].xy);
+    }
     add(fa[id].xy);
     add(-fb[id].xy);
     if (pc.i1.x == 0) {
