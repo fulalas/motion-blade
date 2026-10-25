@@ -1,0 +1,82 @@
+--- a/meson.build
++++ b/meson.build
+@@ -1311,7 +1311,12 @@
+     sources += files('video/out/hwdec/hwdec_vulkan.c',
+                      'video/out/vulkan/context.c',
+                      'video/out/vulkan/utils.c',
+-                     'video/filter/vf_gpu_vulkan.c')
++                     'video/filter/vf_gpu_vulkan.c',
++                     'video/filter/vf_memc.c',
++                     'video/filter/memc/memc_vk.c')
++    subdir('video/filter/memc/shaders')
++    sources += memc_shaders
++    dependencies += declare_dependency(include_directories: include_directories('video/filter/memc'))
+ endif
+ 
+ if features['vulkan'] and features['android']
+--- a/filters/user_filters.c
++++ b/filters/user_filters.c
+@@ -103,6 +103,9 @@
+ #if (HAVE_GL && HAVE_EGL) || HAVE_VULKAN
+     &vf_gpu,
+ #endif
++#if HAVE_VULKAN
++    &vf_memc,
++#endif
+ };
+ 
+ static bool get_vf_desc(struct m_obj_desc *dst, int index)
+--- a/filters/user_filters.h
++++ b/filters/user_filters.h
+@@ -37,3 +37,4 @@
+ extern const struct mp_user_filter_entry vf_d3d11vpp;
+ extern const struct mp_user_filter_entry vf_fingerprint;
+ extern const struct mp_user_filter_entry vf_gpu;
++extern const struct mp_user_filter_entry vf_memc;
+--- a/etc/input.conf
++++ b/etc/input.conf
+@@ -178,6 +178,7 @@
+ #Ctrl+v loadfile ${clipboard/text} append-play; show-text '+ ${clipboard/text}' # append the copied path
+ #DEL script-binding osc/visibility      # cycle OSC visibility between never, auto (mouse-move) and always
+ #ctrl+h cycle-values hwdec "no" "auto"  # toggle hardware decoding
++#Ctrl+m cycle-values vf "memc=factor=2" "memc=factor=3" "memc=factor=4" "" "memc=factor=auto"; show-text "Interpolation: ${?vf==(empty):off}${!vf==(empty):${=vf}}" # cycle motion interpolation
+ #F8 show-text ${playlist}               # show the playlist
+ #F9 show-text ${track-list}             # show the list of video, audio and sub tracks
+ #g ignore
+--- a/DOCS/man/vf.rst
++++ b/DOCS/man/vf.rst
+@@ -865,3 +865,34 @@
+         Do not use this with ``--vo=gpu``. It will apply filtering twice, since
+         most ``--vo=gpu`` options are unconditionally applied to the ``gpu``
+         filter. There is no mechanism in mpv to prevent this.
++
++``memc=...``
++    Motion-compensated frame interpolation on the GPU with Vulkan. New frames
++    are computed between the source frames, so motion looks smoother on
++    displays with a higher refresh rate than the video.
++
++    The filter works on frames in system memory. With hardware decoding, use a
++    copy mode such as ``--hwdec=auto-copy``. Supported formats are 8 to 16 bit
++    YUV with 4:2:0, 4:2:2 or 4:4:4 chroma, planar or semi-planar (``nv12``,
++    ``p010``). Other formats and frames smaller than 64x64 pass through
++    unchanged, as does everything when no suitable Vulkan device is found.
++
++    The filter holds one source frame back, so it can see where objects that
++    are hidden in one frame move next. Audio stays in sync.
++
++    Sub-options:
++
++    ``factor=<auto|2-8>``
++        ``auto`` (default) outputs one frame per display refresh, using the
++        display refresh rate or ``--display-fps-override``. Videos with a frame
++        rate at or above the refresh rate pass through. A number multiplies the
++        frame rate by that factor.
++
++    ``max-fps=<0-1000>``
++        Do not interpolate videos above this frame rate (default: 0, no limit).
++
++    ``max-gap=<0-10>``
++        Do not interpolate between frames that are more than this many seconds
++        apart (default: 0.25).
++
++    Example: ``--vf=memc --hwdec=auto-copy --video-sync=display-resample``

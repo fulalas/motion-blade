@@ -3,8 +3,7 @@
 ## Version
 
 The plain text file `MEMC_VERSION` at the root of this repository holds the version of the memc
-filter (`major.minor.patch`, one line). It is separate from mpv's own `MPV_VERSION`, which must not
-be changed.
+filter (`major.minor.patch`, one line). It is separate from mpv's own `MPV_VERSION`.
 
 Every commit that changes code must increase it by one step:
 
@@ -17,8 +16,7 @@ Commits that only touch documentation do not change the version.
 
 ## Tests
 
-The development copy and tools live in `../mpv-memc` (copy changes here with
-`../mpv-memc/mpv/apply.sh .`). Before committing a change to the filter, run
-`../mpv-memc/tools/regress.sh` with no mpv running. It must print PASS. If a result changes on purpose
-(better quality, or an accepted trade-off), say so in the commit and save the new numbers with
-`../mpv-memc/tools/regress.sh --update`.
+Our code is in `src/`. Never edit the `mpv/` submodule; changes mpv needs go in `patches/mpv.patch`.
+Before committing a change to the filter, run `make` and `tools/regress.sh` with no mpv running. It
+must print PASS. If a result changes on purpose (better quality, or an accepted trade-off), say so in
+the commit and save the new numbers with `tools/regress.sh --update`.

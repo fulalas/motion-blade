@@ -1,0 +1,13 @@
+#!/bin/bash
+D=${MEMC_DATA:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)/samples}; T=$(dirname "$(readlink -f "$0")"); m=${LIGHT:-flicker}
+F=${TMPDIR:-/tmp}/memc-flick
+[ "$F" -nt "$T/flick.c" ] || gcc -O2 -o "$F" "$T/flick.c" -lm || exit 1
+mkdir -p "$D/light"
+clips=""
+for f in crowd_run_1080p50 park_joy_1080p50 shields_720p50 bbb_meadow_still_1080p60 bbb_butterfly_bunny_1080p60; do
+  o=$D/light/${m}_$f.mkv
+  [ -f "$o" ] || { ffmpeg -nostdin -v error -i "$D/suite/$f.mkv" -frames:v 41 -f yuv4mpegpipe - | "$F" /dev/stdin /dev/stdout $m |
+    ffmpeg -v error -f yuv4mpegpipe -i - -c:v ffv1 -level 3 -slices 16 -y "$o.part.mkv" && mv "$o.part.mkv" "$o"; rm -f "$o.part.mkv"; }
+  clips="$clips light/${m}_$f:41"
+done
+CLIPS=$clips exec "$T/suite.sh" "$@"

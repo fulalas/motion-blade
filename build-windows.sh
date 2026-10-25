@@ -1,7 +1,9 @@
 #!/bin/bash -e
 
-src_dir=$PWD
-work=$(readlink -f "${1:?workdir}")
+root=$(cd "$(dirname "$0")" && pwd)
+src_dir=$("$root/tools/mpv-src.sh")
+[ -d "$root/../deps/bin" ] && PATH="$root/../deps/bin:$PATH"
+work=$(readlink -f "${1:-$root/winbuild}")
 TARGET=x86_64-w64-mingw32
 toolchain=$(ls -d "$work"/llvm-mingw-*-ucrt-*/ 2>/dev/null | head -1)
 [ -n "$toolchain" ] || { echo "no llvm-mingw-*-ucrt-* folder in $work" >&2; exit 1; }
@@ -236,7 +238,7 @@ vf=memc
 hwdec=auto-copy
 video-sync=display-resample
 EOF
-cp "$src_dir/BUILD-MEMC.md" "$src_dir/MEMC_VERSION" "$out/"
+cp "$root/README.md" "$root/MEMC_VERSION" "$out/"
 printf '@echo off\r\nstart "" "%%~dp0mpv.exe" --vf=memc --hwdec=auto-copy --video-sync=display-resample %%*\r\n' >"$out/run.bat"
 (cd "$work" && zip -qr9 "$out.zip" "$(basename "$out")")
 echo "=== done: $out.zip"
