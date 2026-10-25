@@ -1,0 +1,98 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+#include "sad.glsl"
+layout(local_size_x = 64) in;
+layout(binding = 0) uniform sampler2D X;
+layout(binding = 1) uniform sampler2D Y;
+layout(std430, binding = 2) readonly buffer F { vec4 f[]; };
+layout(std430, binding = 3) writeonly buffer Out { vec4 o[]; };
+layout(std430, binding = 4) readonly buffer T { vec4 tv[]; };
+
+shared uint cnt;
+shared int lid[64];
+
+void main()
+{
+    int bw = pc.i0.x, bh = pc.i0.y, nb = bw * bh;
+    int t = int(gl_LocalInvocationID.x);
+    if (t == 0)
+        cnt = 0u;
+    barrier();
+    int id = int(gl_WorkGroupID.x) * 64 + t;
+    if (id < nb) {
+        if (f[id].z > pc.f2.w)
+            lid[atomicAdd(cnt, 1u)] = id;
+        else
+            o[id] = f[id];
+    }
+    barrier();
+    int lane = t & 15, grp = t >> 4, n = int(cnt);
+    g_inv = 1.0 / vec2(pc.i0.zw);
+    for (int j = grp; j < n; j += 4) {
+        int bid = lid[j];
+        int bx = bid % bw, by = bid / bw;
+        vec4 cur = f[bid];
+        vec2 w = vec2(bx * 8 - 4, by * 8 - 4), lim = vec2(pc.i0.zw) - 16.0;
+        load_x(X, bx * 8 - 4, by * 8 - 4, lane);
+        float s0 = sad_y(Y, cur.xy);
+        float best_s = s0, best_c = s0 + pc.f1.y * l1(cur.xy);
+        vec2 best_v = cur.xy;
+        for (int k = 0; k < 25; k++) {
+            if (k == 12)
+                continue;
+            vec2 u = f[bidx(ivec2(bx + k % 5 - 2, by + k / 5 - 2), ivec2(bw, bh))].xy;
+            if (any(lessThan(w + u, vec2(0.0))) || any(greaterThan(w + u, lim)))
+                continue;
+            float s = sad_y(Y, u);
+            float c = s + pc.f1.y * l1(u);
+            if (c < best_c) {
+                best_c = c;
+                best_s = s;
+                best_v = u;
+            }
+        }
+        float R = pc.f3.x, S = pc.f3.y;
+        vec2 seed = best_v;
+        for (float dy = -R; dy <= R; dy += S)
+            for (float dx = -R; dx <= R; dx += S) {
+                vec2 u = seed + vec2(dx, dy);
+                if (any(lessThan(w + u, vec2(0.0))) || any(greaterThan(w + u, lim)))
+                    continue;
+                float s = sad_y(Y, u);
+                float c = s + pc.f1.y * l1(u);
+                if (c < best_c) {
+                    best_c = c;
+                    best_s = s;
+                    best_v = u;
+                }
+            }
+        seed = best_v;
+        for (int k = 0; k < 8; k++) {
+            const ivec2 dirs[8] = ivec2[8](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1),
+                                           ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1), ivec2(1, 1));
+            vec2 u = seed + vec2(dirs[k]);
+            float s = sad_y(Y, u);
+            float c = s + pc.f1.y * l1(u);
+            if (c < best_c) {
+                best_c = c;
+                best_s = s;
+                best_v = u;
+            }
+        }
+        bool ok = best_s < pc.f2.x * s0 && s0 - best_s > pc.f2.y;
+        if (ok && pc.i1.x != 0) {
+            vec2 u = best_v;
+            if (pc.i1.y == 0) {
+                ok = l1(tv[bid].xy + u) <= pc.f1.z * l1(u) + pc.f1.w;
+            } else {
+                vec2 q = vec2(bx * 8 + 4, by * 8 + 4) + u;
+                ok = l1(tv[bidx(ivec2(floor(q / 8.0)), ivec2(bw, bh))].xy + u) <= pc.f1.z * l1(u) + pc.f1.w;
+            }
+        }
+        float s = sad_y(Y, ok ? best_v : cur.xy);
+        float dcm = block_dc(g_ml);
+        if (lane == 0)
+            o[bid] = ok ? vec4(best_v, best_s, dcm) : cur;
+    }
+}

@@ -17,6 +17,7 @@ layout(std430, binding = 9) readonly buffer NFA { vec4 nfa[]; };
 layout(std430, binding = 10) readonly buffer PFB { vec4 pfb[]; };
 layout(std430, binding = 11) readonly buffer SN { uint sn[]; };
 layout(std430, binding = 12) readonly buffer SP { uint sp[]; };
+layout(std430, binding = 13) readonly buffer Ext { uint ek[]; };
 
 int bw, bh;
 
@@ -26,7 +27,7 @@ vec2 fat(int which, vec2 p)
     return which == 0 ? fa[i].xy : which == 1 ? fb[i].xy : which == 2 ? nfa[i].xy : pfb[i].xy;
 }
 
-vec2 cl[17];
+vec2 cl[19];
 
 float zsad_bc(vec2 p, vec2 u, float t)
 {
@@ -74,10 +75,34 @@ void main()
         int src = int(key >> 1);
         add((key & 1u) != 0u ? -fb[src].xy : fa[src].xy);
     }
-    add(fa[id].xy);
-    add(-fb[id].xy);
+    int nk = n;
     bool fut = pc.i1.y != 0 && sn[2] == 0u;
     bool past = pc.i1.z != 0 && sp[2] == 0u;
+    add(fa[id].xy);
+    add(-fb[id].xy);
+    if (ek[id * 4] != 0xffffffffu) {
+        vec2 cc = vec2(bx * 8 + 4, by * 8 + 4);
+        bool nsup = false;
+        for (int i = 0; i < n; i++) {
+            vec2 u = cl[i];
+            float tol = float(pc.i2.x) * 0.01 * l1(u) + float(pc.i2.y) * 0.01, th = pc.f0.z * 0.25 + l1(u) / 8.0;
+            vec2 pa = cc - t * u, pb = cc + (1.0 - t) * u;
+            nsup = nsup || (past && fut && l1(fat(0, pa) - u) <= th && l1(fat(1, pb) + u) <= th &&
+                            l1(fat(3, pa) + u) <= tol && l1(fat(2, pb) - u) <= tol);
+        }
+        for (int i = 0; i < 2 && !nsup; i++) {
+            uint key = ek[id * 4 + i];
+            if (key == 0xffffffffu)
+                break;
+            int src = int(key >> 1);
+            vec2 u = (key & 1u) != 0u ? nfa[src].xy : -pfb[src].xy;
+            float tol = float(pc.i2.x) * 0.01 * l1(u) + float(pc.i2.y) * 0.01;
+            float th = pc.f0.z * 0.25 + l1(u) / 8.0;
+            bool own = (key & 1u) != 0u ? l1(fat(1, cc + (1.0 - t) * u) + u) <= th : l1(fat(0, cc - t * u) - u) <= th;
+            if (past && fut && (own || (l1(fat(3, cc - t * u) + u) <= tol && l1(fat(2, cc + (1.0 - t) * u) - u) <= tol)))
+                add(u);
+        }
+    }
     int n2 = n;
     if (pc.i1.x == 0) {
         ivec2 d[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
@@ -101,7 +126,20 @@ void main()
     int best_mode = 0;
     int q = nbr3(lane, ivec2(bx, by), ivec2(bw, bh));
     set_dc_w(lane < 9 ? max(abs(fa[q].w), abs(fb[q].w)) : 1e30);
-    float cs[6];
+    float cs[8];
+    bool anysup = false;
+    if (pc.i1.w != 0 && past && fut) {
+        for (int i = 0; i < n2; i++) {
+            vec2 u = cl[i];
+            float tol = float(pc.i2.x) * 0.01 * l1(u) + float(pc.i2.y) * 0.01;
+            if (l1(u) >= float(pc.i2.w) * 0.01 &&
+                l1(fat(3, c - t * u) + u) <= tol && l1(fat(2, c + (1.0 - t) * u) - u) <= tol)
+                anysup = true;
+        }
+    }
+    float bs_c = 1e30;
+    vec2 bs_v = vec2(0.0);
+    bool best_sup = true;
     for (int i = 0; i < n2; i++) {
         vec2 u = cl[i];
         float ra[16], rb[16];
@@ -112,14 +150,67 @@ void main()
         float thr = pc.f0.z * 0.25 + l1(u) / 8.0;
         bool okA = l1(fat(0, c - t * u) - u) <= thr;
         bool okB = l1(fat(1, c + (1.0 - t) * u) + u) <= thr;
-        float cost = s + pc.f0.y * float(int(!okA) + int(!okB));
-        if (okA && okB)
+        bool sup = true, sup2 = false;
+        float pen = float(int(!okA) + int(!okB));
+        if (anysup && l1(u) >= float(pc.i2.w) * 0.01) {
+            float tol = float(pc.i2.x) * 0.01 * l1(u) + float(pc.i2.y) * 0.01;
+            bool ps = l1(fat(3, c - t * u) + u) <= tol, fs = l1(fat(2, c + (1.0 - t) * u) - u) <= tol;
+            sup = ps || fs;
+            sup2 = ps && fs;
+            if (sup2 && pc.i3.z != 0)
+                pen = 0.0;
+        }
+        float cost = s + pc.f0.y * pen;
+        if (anysup && l1(u) >= float(pc.i2.w) * 0.01) {
+            if (!sup)
+                cost += float(pc.i2.z);
+            else if (cost < bs_c) {
+                bs_c = cost;
+                bs_v = u;
+            }
+        }
+        bool kb = false;
+        if (anysup && pc.i3.y != 0 && i < nk && l1(u) >= float(pc.i2.w) * 0.01) {
+            float tol = float(pc.i2.x) * 0.01 * l1(u) + float(pc.i2.y) * 0.01;
+            kb = l1(fat(3, c - t * u) + u) <= tol && l1(fat(2, c + (1.0 - t) * u) - u) <= tol;
+        }
+        if ((okA && okB && sup) || kb)
             cost -= pc.f0.w * clamp(l1(u - pc.f1.xy) * 0.5, 0.0, 1.0);
         cs[i] = okB && !okA ? cost : -1.0;
         if (cost < best_c) {
             best_c = cost;
             best_v = u;
             best_m = m2;
+            best_sup = sup;
+        }
+    }
+    if (anysup && !best_sup && bs_c < 1e29 && pc.i3.x > 0) {
+        float R = float(pc.i3.x);
+        for (int pass = 0; pass < 2; pass++) {
+            vec2 base = pass == 0 ? bs_v : best_v;
+            float st = pass == 0 ? 2.0 : 1.0, rr = pass == 0 ? R : 1.0;
+            for (float dy = -rr; dy <= rr; dy += st)
+            for (float dx = -rr; dx <= rr; dx += st) {
+                vec2 u = base + vec2(dx, dy);
+                float ra[16], rb[16];
+                row16(A, row0 - t * u, ra);
+                row16(B, row0 + (1.0 - t) * u, rb);
+                float s = zsad(ra, rb);
+                float m2 = g_ml;
+                float thr = pc.f0.z * 0.25 + l1(u) / 8.0;
+                bool okA = l1(fat(0, c - t * u) - u) <= thr;
+                bool okB = l1(fat(1, c + (1.0 - t) * u) + u) <= thr;
+                float tol = float(pc.i2.x) * 0.01 * l1(u) + float(pc.i2.y) * 0.01;
+                bool sup2 = l1(fat(3, c - t * u) + u) <= tol && l1(fat(2, c + (1.0 - t) * u) - u) <= tol;
+                float cost = s + pc.f0.y * ((sup2 && pc.i3.z != 0) ? 0.0 : float(int(!okA) + int(!okB)));
+                if (okA && okB)
+                    cost -= pc.f0.w * clamp(l1(u - pc.f1.xy) * 0.5, 0.0, 1.0);
+                if (cost < best_c) {
+                    best_c = cost;
+                    best_v = u;
+                    best_m = m2;
+                }
+            }
         }
     }
     if (pc.f2.w > 0.0 && past && fut && best_c > pc.f2.z) {

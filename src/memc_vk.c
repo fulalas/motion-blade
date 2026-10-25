@@ -29,6 +29,12 @@ static const uint32_t spv_iter[] =
 static const uint32_t spv_refine[] =
 #include "shaders/me_refine.h"
     ;
+static const uint32_t spv_cross[] =
+#include "shaders/me_cross.h"
+    ;
+static const uint32_t spv_local[] =
+#include "shaders/me_local.h"
+    ;
 static const uint32_t spv_proj[] =
 #include "shaders/tproj.h"
     ;
@@ -97,7 +103,9 @@ typedef struct {
     int coarse_r, iters, iters0, refine, sel_passes;
     float pen_inc, sigma, pen_occ, pen_bad, wprior, cthr, pen_fb, fb_spread, fb_avg;
     float fg_sel, fg_pix, fb_ilo, fb_ihi, pen_one, one_rel, one_min, one_tex, one_sw, pen_fbm, unc_min;
-    int uncov, unc_cont;
+    int uncov, unc_cont, xfix, tsup, xloc, tex, tref, kbon, twaive, xchk;
+    float tsup_rel, tsup_abs, tsup_pen, tsup_min, xbad, xr, xs;
+    float pen_xfix, xrel, xabs, xmin;
     int la;
     double scut, scut_rel, zcut_rel, zcut_min;
 } params;
@@ -141,16 +149,16 @@ struct memc_ctx {
     double prof_ms[16];
     const char *prof_name[16];
     int prof_n;
-    vpipe p_down, p_norm, p_full, p_iter, p_refine, p_proj, p_sel, p_conf, p_cutdec, p_illum, p_ilmed, p_interp;
+    vpipe p_down, p_norm, p_full, p_iter, p_refine, p_cross, p_local, p_proj, p_sel, p_conf, p_cutdec, p_illum, p_ilmed, p_interp;
     gframe fr[NFR];
     vbuf fa[MAXLEV], fb[MAXLEV], pfa[MAXLEV], pfb[MAXLEV], tmp[MAXLEV], qfa, qfb;
     int lw[MAXLEV], lh[MAXLEV], bw[MAXLEV], bh[MAXLEV];
-    vbuf slots, tf0, tf1, stat, pstat, qstat, dummy, fbw, ill0, ill1, hist;
+    vbuf slots, xkeys, eslots, tf0, tf1, stat, pstat, qstat, dummy, fbw, ill0, ill1, hist;
     size_t off[3], rowb[3], rows[3];
     params p;
     memc_stats st;
     int nfr, ib, me_valid, have_prev, have_q, eos, lnorm, recording;
-    vbuf *last_tf, last_fa, last_fb;
+    vbuf *last_tf, last_fa, last_fb, last_nfa, last_pfb;
     int hist_clear;
     int ok;
     uint32_t sg_size;
@@ -624,7 +632,9 @@ static int vk_init(memc_ctx *c)
     PIPE_SG(p_iter, spv_iter, "SSBBBBBB");
     PIPE_SG(p_refine, spv_refine, "SSBB");
     PIPE(p_proj, spv_proj, "BB");
-    PIPE_SG(p_sel, spv_sel, "SSSSBBBBBBBBB");
+    PIPE_SG(p_cross, spv_cross, "SSBBBB");
+    PIPE_SG(p_local, spv_local, "SSBBB");
+    PIPE_SG(p_sel, spv_sel, "SSSSBBBBBBBBBB");
     PIPE(p_conf, spv_conf, "BBBB");
     PIPE(p_cutdec, spv_cutdec, "BB");
     PIPE(p_illum, spv_illum, "SSSSBB");
@@ -678,7 +688,8 @@ static int res_init(memc_ctx *c)
     if (buf_create(c, &c->qfa, (VkDeviceSize)nb * 16, 0) || buf_create(c, &c->qfb, (VkDeviceSize)nb * 16, 0) ||
         buf_create(c, &c->pstat, 64, 1) || buf_create(c, &c->qstat, 64, 1))
         return -1;
-    if (buf_create(c, &c->slots, (VkDeviceSize)nb * 4 * 4, 0) ||
+    if (buf_create(c, &c->slots, (VkDeviceSize)nb * 4 * 4, 0) || buf_create(c, &c->xkeys, (VkDeviceSize)nb * 4 * 4, 0) ||
+        buf_create(c, &c->eslots, (VkDeviceSize)nb * 4 * 4, 0) ||
         buf_create(c, &c->tf0, (VkDeviceSize)nb * 16, 0) || buf_create(c, &c->tf1, (VkDeviceSize)nb * 16, 0) ||
         buf_create(c, &c->stat, 64, 1) || buf_create(c, &c->dummy, 64, 0) || buf_create(c, &c->hist, 128, 0) ||
         buf_create(c, &c->fbw, (VkDeviceSize)nb * 4, 0) || buf_create(c, &c->ill0, (VkDeviceSize)nb * 16, 0) ||
@@ -858,6 +869,45 @@ static void estimate(memc_ctx *c, int dir)
     }
 }
 
+static void cross_fix(memc_ctx *c, int dir)
+{
+    int bw = c->bw[0], bh = c->bh[0], nb = bw * bh;
+    int kp = fidx(c, 1);
+    vkCmdFillBuffer(S(c)->cb, c->xkeys.buf, 0, VK_WHOLE_SIZE, 0xffffffffu);
+    barrier(c);
+    {
+        pcs pc = {{bw, bh, 0, 0, 0}, {1.0f}};
+        vres r[2] = {{NULL, dir ? &c->fa[0] : &c->fb[0]}, {NULL, &c->xkeys}};
+        dispatch(c, &c->p_proj, r, &pc, (uint32_t)(nb + 63) / 64, 1);
+    }
+    vbuf *F = dir ? c->fb : c->fa;
+    pcs pc = {{bw, bh, c->lw[0], c->lh[0]}, {0, 0, 0, 0, c->p.pen_xfix, c->p.pen_len, 0, 0, c->p.xrel, c->p.xabs, c->p.xmin}};
+    set_dc(c, &pc);
+    vres r[6] = {{lev_img(c, dir ? c->ib : kp, 0), NULL}, {lev_img(c, dir ? kp : c->ib, 0), NULL}, {NULL, &F[0]},
+                 {NULL, &c->tmp[0]}, {NULL, dir ? &c->fa[0] : &c->fb[0]}, {NULL, &c->xkeys}};
+    dispatch(c, &c->p_cross, r, &pc, (uint32_t)(nb + 63) / 64, 1);
+    vbuf t = F[0];
+    F[0] = c->tmp[0];
+    c->tmp[0] = t;
+}
+
+static void local_fix(memc_ctx *c, int dir)
+{
+    int bw = c->bw[0], bh = c->bh[0], nb = bw * bh;
+    int kp = fidx(c, 1);
+    vbuf *F = dir ? c->fb : c->fa;
+    int chk = c->p.xchk && (dir || c->have_prev);
+    pcs pc = {{bw, bh, c->lw[0], c->lh[0], chk, dir},
+              {0, 0, 0, 0, 0, c->p.pen_len, c->p.tsup_rel, c->p.tsup_abs, c->p.xrel, c->p.xabs, 0, c->p.xbad, c->p.xr, c->p.xs}};
+    set_dc(c, &pc);
+    vres r[5] = {{lev_img(c, dir ? c->ib : kp, 0), NULL}, {lev_img(c, dir ? kp : c->ib, 0), NULL}, {NULL, &F[0]},
+                 {NULL, &c->tmp[0]}, {NULL, dir ? &c->fa[0] : (c->have_prev ? &c->pfb[0] : &c->dummy)}};
+    dispatch(c, &c->p_local, r, &pc, (uint32_t)(nb + 63) / 64, 1);
+    vbuf t = F[0];
+    F[0] = c->tmp[0];
+    c->tmp[0] = t;
+}
+
 static void run_me(memc_ctx *c)
 {
     cmd_begin(c);
@@ -868,6 +918,10 @@ static void run_me(memc_ctx *c)
     barrier(c);
     estimate(c, 0);
     estimate(c, 1);
+    for (int dir = 0; dir < c->p.xfix; dir++)
+        cross_fix(c, dir);
+    for (int dir = 0; dir < 2 && c->p.xloc; dir++)
+        local_fix(c, dir);
     pcs pc = {{0}, {(float)(STAT_SCALE / ((double)c->bw[0] * c->bh[0] * 256)), (float)c->p.scut, (float)c->p.scut_rel,
                     (float)c->p.zcut_rel, (float)c->p.zcut_min}};
     vres r[2] = {{NULL, &c->stat}, {NULL, &c->hist}};
@@ -910,10 +964,20 @@ int memc_submit(memc_ctx *c, double t)
         kz = ka, PFB = &c->dummy, SP = SC;
     c->last_fa = *FA0;
     c->last_fb = *FB0;
+    c->last_nfa = *NFA;
+    c->last_pfb = *PFB;
     gframe *A = &c->fr[ka], *B = &c->fr[kb];
     int bw = c->bw[0], bh = c->bh[0], nb = bw * bh;
     vkCmdFillBuffer(S(c)->cb, c->slots.buf, 0, VK_WHOLE_SIZE, 0xffffffffu);
+    vkCmdFillBuffer(S(c)->cb, c->eslots.buf, 0, VK_WHOLE_SIZE, 0xffffffffu);
     barrier(c);
+    for (int dir = 0; dir < 2 && c->p.tex; dir++) {
+        if (dir == 0 ? !past : !la)
+            continue;
+        pcs pc = {{bw, bh, 0, 0, dir}, {(float)(dir ? -(1 - t) : -t)}};
+        vres r[2] = {{NULL, dir ? NFA : PFB}, {NULL, &c->eslots}};
+        dispatch(c, &c->p_proj, r, &pc, (uint32_t)(nb + 63) / 64, 1);
+    }
     for (int dir = 0; dir < 2; dir++) {
         pcs pc = {{bw, bh, 0, 0, dir}, {(float)(dir ? 1 - t : t)}};
         vres r[2] = {{NULL, dir ? FB0 : FA0}, {NULL, &c->slots}};
@@ -921,13 +985,13 @@ int memc_submit(memc_ctx *c, double t)
     }
     vbuf *tfin = &c->dummy, *tfout = &c->tf0;
     for (int pass = 0; pass < c->p.sel_passes; pass++) {
-        pcs pc = {{bw, bh, c->fmt.w, c->fmt.h, pass, la, past},
+        pcs pc = {{bw, bh, c->fmt.w, c->fmt.h, pass, la, past, c->p.tsup, (int)lrintf(c->p.tsup_rel * 100), (int)lrintf(c->p.tsup_abs * 100), (int)c->p.tsup_pen, (int)lrintf(c->p.tsup_min * 100), c->p.tref, c->p.kbon, c->p.twaive},
                   {(float)t, c->p.pen_inc, c->p.cthr, c->p.fg_sel, 0, 0, c->p.pen_one, c->p.one_rel, c->p.one_min, c->p.one_tex,
                    c->p.unc_min, (float)c->p.uncov, c->p.one_sw, c->p.unc_cont * 0.01f}};
         set_dc(c, &pc);
-        vres r[13] = {{lev_img(c, ka, 0), NULL}, {lev_img(c, kb, 0), NULL}, {lev_img(c, kc, 0), NULL},
+        vres r[14] = {{lev_img(c, ka, 0), NULL}, {lev_img(c, kb, 0), NULL}, {lev_img(c, kc, 0), NULL},
                       {lev_img(c, kz, 0), NULL}, {NULL, FA0}, {NULL, FB0}, {NULL, &c->slots}, {NULL, tfin},
-                      {NULL, tfout}, {NULL, NFA}, {NULL, PFB}, {NULL, &c->stat}, {NULL, SP}};
+                      {NULL, tfout}, {NULL, NFA}, {NULL, PFB}, {NULL, &c->stat}, {NULL, SP}, {NULL, &c->eslots}};
         dispatch(c, &c->p_sel, r, &pc, (uint32_t)(nb + 3) / 4, 1);
         tfin = tfout;
         tfout = tfout == &c->tf0 ? &c->tf1 : &c->tf0;
@@ -968,7 +1032,7 @@ int memc_submit(memc_ctx *c, double t)
 
 int memc_debug_field(memc_ctx *c, int which, float *out, int *w, int *h)
 {
-    vbuf *f = which == 0 ? &c->last_fa : which == 1 ? &c->last_fb : c->last_tf;
+    vbuf *f = which == 0 ? &c->last_fa : which == 1 ? &c->last_fb : which == 2 ? c->last_tf : which == 3 ? &c->last_nfa : &c->last_pfb;
     if (!f || !f->buf)
         return -1;
     int n = c->bw[0] * c->bh[0];
@@ -1079,6 +1143,25 @@ static void default_params(params *p)
     p->unc_min = 4000;
     p->uncov = 1;
     p->unc_cont = 50;
+    p->xfix = 2;
+    p->tsup = 1;
+    p->xloc = 1;
+    p->tex = 1;
+    p->tref = 8;
+    p->kbon = 0;
+    p->twaive = 1;
+    p->xchk = 1;
+    p->xbad = 1500;
+    p->xr = 4;
+    p->xs = 2;
+    p->tsup_rel = 0.25f;
+    p->tsup_abs = 4;
+    p->tsup_pen = 512;
+    p->tsup_min = 8;
+    p->pen_xfix = 4;
+    p->xrel = 0.7f;
+    p->xabs = 400;
+    p->xmin = 4;
     p->la = 1;
     p->scut = 40;
     p->scut_rel = 4;
@@ -1096,7 +1179,7 @@ int memc_set_param(memc_ctx *c, const char *name, double v)
     }
     P_(pen_parent) P_(pen_temporal) P_(pen_update) P_(pen_zero) P_(pen_cross) P_(pen_len) P_(lam_full) P_(dc_lo) P_(dc_hi)
     P_(coarse_r) P_(iters) P_(iters0) P_(refine) P_(sel_passes) P_(pen_inc) P_(sigma) P_(pen_occ) P_(pen_bad)
-    P_(wprior) P_(cthr) P_(pen_fb) P_(fb_spread) P_(fb_avg) P_(fg_sel) P_(fg_pix) P_(pen_one) P_(one_rel) P_(one_min) P_(one_tex) P_(one_sw) P_(pen_fbm) P_(unc_min) P_(uncov) P_(unc_cont) P_(la) P_(fb_ilo) P_(fb_ihi) P_(scut) P_(scut_rel) P_(zcut_rel) P_(zcut_min)
+    P_(wprior) P_(cthr) P_(pen_fb) P_(fb_spread) P_(fb_avg) P_(fg_sel) P_(fg_pix) P_(pen_one) P_(one_rel) P_(one_min) P_(one_tex) P_(one_sw) P_(pen_fbm) P_(unc_min) P_(uncov) P_(unc_cont) P_(xfix) P_(tsup) P_(xloc) P_(tex) P_(tref) P_(kbon) P_(twaive) P_(xchk) P_(xbad) P_(xr) P_(xs) P_(tsup_rel) P_(tsup_abs) P_(tsup_pen) P_(tsup_min) P_(pen_xfix) P_(xrel) P_(xabs) P_(xmin) P_(la) P_(fb_ilo) P_(fb_ihi) P_(scut) P_(scut_rel) P_(zcut_rel) P_(zcut_min)
 #undef P_
     return -1;
 }
@@ -1143,6 +1226,8 @@ void memc_destroy(memc_ctx *c)
             buf_free(c, &c->tmp[L]);
         }
         buf_free(c, &c->slots);
+        buf_free(c, &c->xkeys);
+        buf_free(c, &c->eslots);
         buf_free(c, &c->tf0);
         buf_free(c, &c->tf1);
         buf_free(c, &c->stat);
@@ -1161,6 +1246,8 @@ void memc_destroy(memc_ctx *c)
         pipe_free(c, &c->p_iter);
         pipe_free(c, &c->p_refine);
         pipe_free(c, &c->p_proj);
+        pipe_free(c, &c->p_cross);
+        pipe_free(c, &c->p_local);
         pipe_free(c, &c->p_sel);
         pipe_free(c, &c->p_conf);
         pipe_free(c, &c->p_cutdec);

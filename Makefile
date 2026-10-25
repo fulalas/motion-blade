@@ -6,7 +6,7 @@ GFLAGS = -O --target-env=vulkan1.1 -mfmt=c
 
 S = src/shaders
 O = build/eval/shaders
-SH = $(O)/conf.h $(O)/down.h $(O)/norm.h $(O)/me_full.h $(O)/me_iter.h $(O)/me_refine.h $(O)/tproj.h $(O)/tsel.h $(O)/illum.h $(O)/ilmed.h $(O)/cutdec.h \
+SH = $(O)/conf.h $(O)/down.h $(O)/norm.h $(O)/me_full.h $(O)/me_iter.h $(O)/me_refine.h $(O)/me_cross.h $(O)/me_local.h $(O)/tproj.h $(O)/tsel.h $(O)/illum.h $(O)/ilmed.h $(O)/cutdec.h \
      $(O)/interp8.h $(O)/interp16.h $(O)/interp8nv.h $(O)/interp16nv.h
 
 all: eval_vk
