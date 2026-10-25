@@ -17,6 +17,7 @@ typedef struct memc_format {
     int depth;
     int cshift_x, cshift_y;
     int nv;
+    int lsb_pad;
 } memc_format;
 
 typedef struct memc_image {
@@ -25,12 +26,12 @@ typedef struct memc_image {
 } memc_image;
 
 typedef struct memc_stats {
-    double me_ms, interp_ms;
+    double interp_ms;
     double mean_err;
     int scene_cut;
 } memc_stats;
 
-memc_ctx *memc_create(const memc_format *fmt, int threads);
+memc_ctx *memc_create(const memc_format *fmt);
 void memc_destroy(memc_ctx *c);
 void memc_reset(memc_ctx *c);
 void memc_push(memc_ctx *c, const memc_image *src);

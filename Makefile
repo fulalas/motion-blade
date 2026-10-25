@@ -1,6 +1,6 @@
 CC ?= gcc
 CFLAGS ?= -O2 -march=native -Wall -Wextra -Wno-missing-field-initializers -g
-LDLIBS = -lm -lpthread
+LDLIBS = -lm
 GLSLC ?= $(if $(wildcard ../deps/bin/glslc),../deps/bin/glslc,glslc)
 GFLAGS = -O --target-env=vulkan1.1 -mfmt=c
 

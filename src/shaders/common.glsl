@@ -9,6 +9,8 @@ layout(push_constant) uniform PC {
 
 float l1(vec2 a) { return abs(a.x) + abs(a.y); }
 
+float cons_thr(float cthr, vec2 u) { return cthr * 0.25 + l1(u) / 8.0; }
+
 int bidx(ivec2 b, ivec2 n)
 {
     b = clamp(b, ivec2(0), n - 1);

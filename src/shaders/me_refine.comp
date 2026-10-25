@@ -39,11 +39,22 @@ void main()
         }
     }
     float dcm = block_dc(best_m);
+    float bm = 0.0;
+    if (pc.i1.z != 0) {
+        for (int x = 0; x < 16; x++)
+            bm += xr[x];
+        bm = subgroupClusteredAdd(bm, 16) * (255.0 / 256.0);
+    }
     if (lane == 0) {
         f[id] = vec4(bv, best, dcm);
         if (pc.i1.x != 0) {
             atomicAdd(stat[0], uint(best_sad * (1.0 / 16.0) + 0.5));
             atomicAdd(stat[1], uint(best_z * (1.0 / 16.0) + 0.5));
+        }
+        if (pc.i1.z != 0) {
+            int o = pc.i1.w * 2;
+            atomicAdd(stat[3 + o], uint(bm + 0.5));
+            atomicAdd(stat[4 + o], uint(bm * bm * (1.0 / 16.0) + 0.5));
         }
     }
 }

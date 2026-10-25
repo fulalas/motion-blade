@@ -32,10 +32,14 @@ static int read_y4m(const char *path, seq *s, int maxn, int skip)
         piped ? pclose(fp) : fclose(fp);
         return -1;
     }
-    char *p = strstr(s->hdr, " W");
-    s->w = atoi(p + 2);
-    p = strstr(s->hdr, " H");
-    s->h = atoi(p + 2);
+    char *pw = strstr(s->hdr, " W"), *ph = strstr(s->hdr, " H"), *pc = strstr(s->hdr, " C");
+    s->w = pw ? atoi(pw + 2) : 0;
+    s->h = ph ? atoi(ph + 2) : 0;
+    if (s->w <= 0 || s->h <= 0 || s->w % 2 || s->h % 2 || (pc && (strncmp(pc + 2, "420", 3) || strstr(pc, "p1")))) {
+        fprintf(stderr, "%s: needs 8-bit 4:2:0 with even width and height\n", path);
+        piped ? pclose(fp) : fclose(fp);
+        return -1;
+    }
     size_t fsz = (size_t)s->w * s->h * 3 / 2;
     s->f = calloc(maxn, sizeof(*s->f));
     s->n = 0;
@@ -177,7 +181,8 @@ static void to_fmt(conv *cv, int fm, const uint8_t *src, int w, int h)
 static int rd16(const uint8_t *p, int fm)
 {
     int v = *(const uint16_t *)p;
-    return fm == 2 ? (v + 128) / 257 : (v + 2) >> 2;
+    v = fm == 2 ? (v + 128) / 257 : (v + 2) >> 2;
+    return v > 255 ? 255 : v;
 }
 
 static void from_fmt(const conv *cv, int fm, uint8_t *dst, int w, int h)
@@ -224,11 +229,15 @@ static void put_vec(FILE *fp, float x, float y, float scale)
     fwrite(px, 1, 3, fp);
 }
 
-static void dump_fields(memc_ctx *c, const char *path)
+static void dump_fields(memc_ctx *c, const char *path, int fw, int fh)
 {
-    float *f = malloc(sizeof(float) * 4 * 512 * 512);
-    int w, h;
     FILE *fp = fopen(path, "wb");
+    if (!fp) {
+        fprintf(stderr, "cannot write %s\n", path);
+        return;
+    }
+    float *f = malloc(sizeof(float) * 4 * (size_t)((fw + 7) / 8) * ((fh + 7) / 8));
+    int w, h;
     for (int which = 0; which < 3; which++) {
         if (memc_debug_field(c, which, f, &w, &h) < 0)
             break;
@@ -244,14 +253,14 @@ static void dump_fields(memc_ctx *c, const char *path)
 static void usage(void)
 {
     fprintf(stderr, "eval in.y4m|in.mkv [-n frames] [-skip k] [-step s] [-mode memc|blend|repeat] [-cmp full.y4m]\n"
-                    "     [-o out.y4m] [-p name=value]... [-threads n] [-q]\n");
+                    "     [-o out.y4m] [-p name=value]... [-q]\n");
     exit(1);
 }
 
 int main(int argc, char **argv)
 {
     const char *in = NULL, *out = NULL, *cmp = NULL, *mode = "memc";
-    int maxn = 1000, step = 2, threads = 0, quiet = 0, skip = 0, nometric = 0, repeat = 1, fm = 0, dumpk = -1;
+    int maxn = 1000, step = 2, quiet = 0, skip = 0, nometric = 0, repeat = 1, fm = 0, dumpk = -1;
     char *params[64];
     int np = 0;
     for (int i = 1; i < argc; i++) {
@@ -261,8 +270,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-mode") && i + 1 < argc) mode = argv[++i];
         else if (!strcmp(argv[i], "-cmp") && i + 1 < argc) cmp = argv[++i];
         else if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
-        else if (!strcmp(argv[i], "-p") && i + 1 < argc) params[np++] = argv[++i];
-        else if (!strcmp(argv[i], "-threads") && i + 1 < argc) threads = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-p") && i + 1 < argc && np < 64) params[np++] = argv[++i];
         else if (!strcmp(argv[i], "-q")) quiet = 1;
         else if (!strcmp(argv[i], "-dump") && i + 1 < argc) dumpk = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-fmt") && i + 1 < argc) {
@@ -285,6 +293,10 @@ int main(int argc, char **argv)
         fprintf(stderr, "cannot read %s\n", cmp);
         return 1;
     }
+    if (cmp && (sc.w != s.w || sc.h != s.h)) {
+        fprintf(stderr, "%s and %s differ in size\n", in, cmp);
+        return 1;
+    }
     int w = s.w, h = s.h;
     size_t ysz = (size_t)w * h, fsz = ysz * 3 / 2;
     memc_format fmt = {w, h, fm == 2 ? 16 : fm == 3 ? 10 : 8, 1, 1, fm == 1 || fm == 2};
@@ -294,7 +306,11 @@ int main(int argc, char **argv)
         conv_alloc(&cb, fm, w, h);
         conv_alloc(&co, fm, w, h);
     }
-    memc_ctx *c = memc_create(&fmt, threads);
+    memc_ctx *c = memc_create(&fmt);
+    if (!c) {
+        fprintf(stderr, "memc_create failed\n");
+        return 1;
+    }
     for (int i = 0; i < np; i++) {
         char *eq = strchr(params[i], '=');
         if (!eq) usage();
@@ -308,11 +324,11 @@ int main(int argc, char **argv)
     if (fo)
         fputs(s.hdr, fo);
     uint8_t *res = malloc(fsz);
-    double swb = 0, spc = 0, sp = 0, ss = 0, sme = 0, sit = 0, worst = 99;
+    double swb = 0, spc = 0, sp = 0, ss = 0, sit = 0, worst = 99;
     int cnt = 0, worsti = -1, la = 1;
     for (int i = 0; i < np; i++)
         if (!strcmp(params[i], "la"))
-            la = atoi(params[i] + 3);
+            la = atof(params[i] + 3) != 0;
     double wall0 = 0;
     {
         struct timespec ts;
@@ -347,15 +363,19 @@ int main(int argc, char **argv)
             const uint8_t *R = res;
             memc_stats st = {0};
             if (cmp) {
+                if (k * step + m >= sc.n) {
+                    fprintf(stderr, "%s has only %d frames\n", cmp, sc.n);
+                    return 1;
+                }
                 R = sc.f[k * step + m];
             } else if (!strcmp(mode, "memc")) {
                 memc_image io = {{res, res + ysz, res + ysz + ysz / 4}, {w, w / 2, w / 2}};
-                if (fm) {
-                    memc_interpolate(c, t, &co.im);
-                    from_fmt(&co, fm, res, w, h);
-                } else {
-                    memc_interpolate(c, t, &io);
+                if (memc_interpolate(c, t, fm ? &co.im : &io) < 0) {
+                    fprintf(stderr, "interpolation failed at frame %d\n", k * step + m);
+                    return 1;
                 }
+                if (fm)
+                    from_fmt(&co, fm, res, w, h);
                 memc_get_stats(c, &st);
             } else if (!strcmp(mode, "blend")) {
                 for (size_t i = 0; i < fsz; i++)
@@ -364,19 +384,18 @@ int main(int argc, char **argv)
                 memcpy(res, t < 0.5 ? A : B, fsz);
             }
             if (k * step + m == dumpk && !strcmp(mode, "memc")) {
-                dump_fields(c, "/tmp/memc-out/fields.ppm");
+                dump_fields(c, "/tmp/memc-out/fields.ppm", w, h);
             }
             const uint8_t *T = s.f[k * step + m];
             double p = nometric ? 0 : psnr(R, T, ysz), q = nometric ? 0 : ssim(R, T, w, h);
             double wb = nometric ? 0 : worst_blocks(R, T, w, h);
             if (!quiet)
-                printf("frame %3d  local %6.2f  psnr %6.2f  ssim %.4f  me %6.2fms  interp %6.2fms  err %.1f%s\n",
-                       k * step + m, wb, p, q, st.me_ms, st.interp_ms, st.mean_err, st.scene_cut ? " CUT" : "");
+                printf("frame %3d  local %6.2f  psnr %6.2f  ssim %.4f  gpu %6.2fms  err %.1f%s\n",
+                       k * step + m, wb, p, q, st.interp_ms, st.mean_err, st.scene_cut ? " CUT" : "");
             sp += p;
             spc += nometric ? 0 : psnr(R + ysz, T + ysz, ysz / 2);
             swb += wb;
             ss += q;
-            sme += st.me_ms;
             sit += st.interp_ms;
             if (p < worst) {
                 worst = p;
@@ -394,8 +413,8 @@ int main(int argc, char **argv)
             printf("wall %.2f ms per interpolated frame\n", (ts.tv_sec * 1e3 + ts.tv_nsec / 1e6 - wall0) / cnt);
     }
     printf("MEAN local %.3f | chroma psnr %.3f | ", swb / cnt, spc / cnt);
-    printf("MEAN psnr %.3f ssim %.4f  worst %.2f@%d  me %.2fms interp %.2fms  (%d frames)\n", sp / cnt, ss / cnt,
-           worst, worsti, sme / cnt, sit / cnt, cnt);
+    printf("MEAN psnr %.3f ssim %.4f  worst %.2f@%d  gpu %.2fms  (%d frames)\n", sp / cnt, ss / cnt, worst, worsti,
+           sit / cnt, cnt);
     if (fo)
         fclose(fo);
     memc_destroy(c);

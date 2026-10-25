@@ -98,7 +98,8 @@ Scripts:
 
 - `tools/fetch-data.sh`: downloads and makes `suite/` and the `bbb_*` film clips (downloads ~1.2 GB,
   keeps ~0.9 GB).
-  The siren, Passengers, bmx and sdr clips are not downloadable.
+  The siren, Passengers, concert, motion graphics, bmx and sdr clips are not
+  downloadable.
 - `tools/regress.sh [--update]`: regression check (about 1 minute). Compares quality (suite, light
   changes, other pixel formats), scene cuts, speed per frame and per GPU pass, and the `interp` register
   count against `tools/baseline.txt`, and prints FAIL for anything worse than the tolerances. `--update`
@@ -107,4 +108,4 @@ Scripts:
 - `tools/suite.sh [eval args]`: scores all clips (local / PSNR / SSIM / chroma PSNR), e.g. `tools/suite.sh -p fg_pix=30`.
 - `tools/flicker.sh [eval args]`: same, on clips with added light changes. `LIGHT=flicker` (default, red light on alternate frames), `LIGHT=fade` (fade to dark), `LIGHT=flash` (single-frame white flashes).
 - `tools/cmp.sh suite/clip frame w:h:x:y out.png other.y4m...`: side-by-side crop of truth and outputs.
-- Cut test: `ffmpeg -i ../samples/film/passengers_breakfast_11_cuts_1080p24.mkv -f yuv4mpegpipe - | ./eval_vk /dev/stdin -n 2000 | grep -c CUT` (expect 11).
+- Cut test: `ffmpeg -i ../samples/film/passengers_breakfast_11_cuts_1080p24.mkv -pix_fmt yuv420p -f yuv4mpegpipe - | ./eval_vk /dev/stdin -n 2000 | grep -c CUT` (expect 11).

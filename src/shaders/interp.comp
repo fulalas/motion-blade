@@ -49,6 +49,16 @@ vec4 illum_at(ivec2 q0, int bxA, int byA)
     return s / max(s.w, 1e-6);
 }
 
+float outq(float v)
+{
+#ifdef DEPTH16
+    v = min(v, pc.f2.y);
+    if (pc.f2.z > 0.0)
+        v = round(v / pc.f2.z) * pc.f2.z;
+#endif
+    return v;
+}
+
 float okf(int which, vec2 p, vec2 u, float thr)
 {
     vec2 q = (p - 3.5) / 8.0;
@@ -146,7 +156,7 @@ void main()
         vec2 u = cu[i];
         vec2 oa = i == fbi ? vec2(0.0) : -t * u;
         vec2 ob = i == fbi ? vec2(0.0) : (1.0 - t) * u;
-        float thr = pc.f1.z * 0.25 + l1(u) / 8.0;
+        float thr = cons_thr(pc.f1.z, u);
         vec2 pq = vec2(q0) + 0.5;
         float sA = 0.0, sB = 0.0;
         if (cm[i] != 0) {
@@ -156,32 +166,42 @@ void main()
             sA = okf(0, pq + oa, u, thr);
             sB = okf(1, pq + ob, u, thr);
         }
+        bool fb = i == fbi;
         float D[16], PA[4], PB[4];
         for (int y = 0; y < 4; y++)
             for (int x = 0; x < 4; x++) {
                 vec2 p = vec2(q0 + ivec2(x - 1, y - 1)) + 0.5;
+#ifdef DEPTH16
                 float a = textureLod(AL, (p + oa) * inv, 0.0).r;
                 float b = textureLod(BL, (p + ob) * inv, 0.0).r;
+#else
+                float a = textureLod(AY, (p + oa) * inv, 0.0).r;
+                float b = textureLod(BY, (p + ob) * inv, 0.0).r;
+#endif
                 D[y * 4 + x] = abs((a - b) * 255.0 - dcl);
                 if (x >= 1 && x <= 2 && y >= 1 && y <= 2) {
+#ifdef DEPTH16
                     PA[(y - 1) * 2 + x - 1] = textureLod(AY, (p + oa) * inv, 0.0).r;
                     PB[(y - 1) * 2 + x - 1] = textureLod(BY, (p + ob) * inv, 0.0).r;
+#else
+                    PA[(y - 1) * 2 + x - 1] = a;
+                    PB[(y - 1) * 2 + x - 1] = b;
+#endif
                 }
             }
         for (int j = 0; j < 4; j++) {
             int jx = j & 1, jy = j >> 1;
+            float cst;
+            uint al = 0u;
             float e = 0.0;
             for (int dy = 0; dy < 3; dy++)
                 for (int dx = 0; dx < 3; dx++)
                     e += D[(jy + dy) * 4 + jx + dx];
-            vec2 p = vec2(q0 + ivec2(jx, jy));
-            float cst;
-            uint al = 0u;
-            if (i == fbi) {
+            if (fb) {
                 cst = hasm ? pc.f1.w : pc.f1.x;
             } else {
                 float qa = round(sA * (1.0 - sB) * 7.0), qb = round((1.0 - sA) * sB * 7.0);
-                cst = sA * sB * max(0.0, e - pc.f3.x * clamp(l1(u - pc.f3.yz) * 0.5, 0.0, 1.0)) +
+                cst = sA * sB * max(0.0, e - pc.f3.x * clamp(l1(u) * 0.5, 0.0, 1.0)) +
                       (qa + qb) / 7.0 * pc.f0.z + (1.0 - sA) * (1.0 - sB) * (e + pc.f0.w);
                 al = uint(qa) | (uint(qb) << 3);
             }
@@ -214,7 +234,7 @@ void main()
         }
         ivec2 p = q0 + ivec2(j & 1, j >> 1);
         if (p.x < W && p.y < H)
-            imageStore(oY, p, vec4(acc));
+            imageStore(oY, p, vec4(outq(acc)));
     }
 
     vec2 dcc = il.yz;
@@ -251,10 +271,10 @@ void main()
 #endif
             }
 #ifdef NV
-            imageStore(oC1, cp, vec4(acc.xy, 0.0, 0.0));
+            imageStore(oC1, cp, vec4(outq(acc.x), outq(acc.y), 0.0, 0.0));
 #else
-            imageStore(oC1, cp, vec4(acc.x));
-            imageStore(oC2, cp, vec4(acc.y));
+            imageStore(oC1, cp, vec4(outq(acc.x)));
+            imageStore(oC2, cp, vec4(outq(acc.y)));
 #endif
         }
 }

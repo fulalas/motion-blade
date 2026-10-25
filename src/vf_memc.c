@@ -116,6 +116,7 @@ static bool setup(struct mp_filter *f, struct mp_image *mpi)
         .depth = reg.component_size == 1 ? 8 : 16 - (reg.component_pad < 0 ? -reg.component_pad : 0),
         .cshift_x = reg.chroma_xs,
         .cshift_y = reg.chroma_ys,
+        .lsb_pad = reg.component_pad > 0 ? reg.component_pad : 0,
     };
     if (reg.num_planes == 2 && reg.planes[0].num_components == 1 && reg.planes[1].num_components == 2) {
         fmt.nv = 1;
@@ -124,7 +125,7 @@ static bool setup(struct mp_filter *f, struct mp_image *mpi)
         MP_WARN(f, "unsupported plane layout %s, passing through\n", mp_imgfmt_to_name(mpi->imgfmt));
         return false;
     }
-    p->ctx = memc_create(&fmt, 0);
+    p->ctx = memc_create(&fmt);
     if (!p->ctx) {
         MP_ERR(f, "could not initialize Vulkan interpolator, passing through\n");
         return false;

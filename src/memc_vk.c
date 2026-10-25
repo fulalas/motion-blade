@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <vulkan/vulkan.h>
 
 #define MAXLEV 6
@@ -77,7 +76,6 @@ typedef struct {
     VkBuffer buf;
     VkDeviceMemory mem;
     void *map;
-    VkDeviceSize size;
 } vbuf;
 
 typedef struct {
@@ -103,11 +101,12 @@ typedef struct {
     int coarse_r, iters, iters0, refine, sel_passes;
     float pen_inc, sigma, pen_occ, pen_bad, wprior, cthr, pen_fb, fb_spread, fb_avg;
     float fg_sel, fg_pix, fb_ilo, fb_ihi, pen_one, one_rel, one_min, one_tex, one_sw, pen_fbm, unc_min;
-    int uncov, unc_cont, xfix, tsup, xloc, tex, tref, kbon, twaive, xchk;
-    float tsup_rel, tsup_abs, tsup_pen, tsup_min, xbad, xr, xs;
+    int uncov, unc_cont, xfix, tsup, xloc, tex, tref, twaive, xchk;
+    float tsup_rel, tsup_abs, tsup_pen, tsup_min, xbad, xnoise, xr, xs;
     float pen_xfix, xrel, xabs, xmin;
     int la;
     double scut, scut_rel, zcut_rel, zcut_min;
+    float cut_sd, cut_kmin;
 } params;
 
 typedef struct {
@@ -122,9 +121,9 @@ typedef struct {
     VkCommandBuffer cb;
     VkFence fence;
     VkQueryPool qp;
-    vbuf up, down, statcopy;
-    vimg oy, oc1, oc2;
-    int busy, has_out, nq;
+    vbuf down, statcopy;
+    int busy, nq;
+    unsigned serial;
     const char *qname[64];
     double gpu_ms;
 } slot;
@@ -146,19 +145,24 @@ struct memc_ctx {
     float ts_period;
     PFN_vkCmdPushDescriptorSetKHR pushdesc;
     int prof;
-    double prof_ms[16];
-    const char *prof_name[16];
+    double prof_ms[32];
+    const char *prof_name[32];
     int prof_n;
     vpipe p_down, p_norm, p_full, p_iter, p_refine, p_cross, p_local, p_proj, p_sel, p_conf, p_cutdec, p_illum, p_ilmed, p_interp;
     gframe fr[NFR];
-    vbuf fa[MAXLEV], fb[MAXLEV], pfa[MAXLEV], pfb[MAXLEV], tmp[MAXLEV], qfa, qfb;
+    vbuf fa[MAXLEV], fb[MAXLEV], pfa[MAXLEV], pfb[MAXLEV], tmp[MAXLEV], qfb;
     int lw[MAXLEV], lh[MAXLEV], bw[MAXLEV], bh[MAXLEV];
     vbuf slots, xkeys, eslots, tf0, tf1, stat, pstat, qstat, dummy, fbw, ill0, ill1, hist;
     size_t off[3], rowb[3], rows[3];
     params p;
     memc_stats st;
     int nfr, ib, me_valid, have_prev, have_q, eos, lnorm, recording;
-    vbuf *last_tf, last_fa, last_fb, last_nfa, last_pfb;
+    vbuf *last_tf, last_fa, last_fb;
+    vimg oy, oc1, oc2;
+    vbuf up[2];
+    int up_k, up_slot[2];
+    unsigned up_serial[2], serial;
+    uint32_t max_groups;
     int hist_clear;
     int ok;
     uint32_t sg_size;
@@ -185,7 +189,6 @@ static int memtype(memc_ctx *c, uint32_t bits, VkMemoryPropertyFlags want, VkMem
 static int buf_create(memc_ctx *c, vbuf *b, VkDeviceSize size, int host)
 {
     memset(b, 0, sizeof(*b));
-    b->size = size;
     VkBufferCreateInfo bc = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bc.size = size;
     bc.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -324,6 +327,13 @@ static void barrier(memc_ctx *c)
                          NULL);
 }
 
+static void host_barrier(memc_ctx *c)
+{
+    VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT};
+    vkCmdPipelineBarrier(S(c)->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0,
+                         NULL);
+}
+
 static void dispatch(memc_ctx *c, const vpipe *p, const vres *res, const pcs *pc, uint32_t gx, uint32_t gy)
 {
     int n = (int)strlen(p->types);
@@ -376,9 +386,9 @@ static void slot_wait(memc_ctx *c, int i)
         int j = 0;
         while (j < c->prof_n && strcmp(c->prof_name[j], sl->qname[k]))
             j++;
-        if (j == c->prof_n && j < 16)
+        if (j == c->prof_n && j < 32)
             c->prof_name[c->prof_n++] = sl->qname[k];
-        if (j < 16)
+        if (j < 32)
             c->prof_ms[j] += ms;
     }
     sl->gpu_ms = (double)(ts[1] - ts[0]) * c->ts_period / 1e6;
@@ -416,7 +426,6 @@ static int cmd_begin(memc_ctx *c)
     vkCmdResetQueryPool(S(c)->cb, S(c)->qp, 0, 66);
     vkCmdWriteTimestamp(S(c)->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, S(c)->qp, 0);
     S(c)->nq = 0;
-    S(c)->has_out = 0;
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT,
                           VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
     vkCmdPipelineBarrier(S(c)->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0,
@@ -440,7 +449,7 @@ static int cmd_end(memc_ctx *c, int has_out)
         return -1;
     }
     sl->busy = 1;
-    sl->has_out = has_out;
+    sl->serial = ++c->serial;
     if (has_out)
         c->fifo[c->fifo_n++] = c->cur;
     return 0;
@@ -488,7 +497,11 @@ static int vk_init(memc_ctx *c)
     VK(vkCreateInstance(&ii, NULL, &c->inst));
     uint32_t np = 16;
     VkPhysicalDevice pds[16];
-    VK(vkEnumeratePhysicalDevices(c->inst, &np, pds));
+    VkResult er = vkEnumeratePhysicalDevices(c->inst, &np, pds);
+    if (er != VK_SUCCESS && er != VK_INCOMPLETE) {
+        fprintf(stderr, "memc: vkEnumeratePhysicalDevices failed (%d)\n", er);
+        return -1;
+    }
     int best = -1, score = -1;
     for (uint32_t i = 0; i < np; i++) {
         VkPhysicalDeviceProperties pp;
@@ -508,7 +521,9 @@ static int vk_init(memc_ctx *c)
     VkPhysicalDeviceProperties pp;
     vkGetPhysicalDeviceProperties(c->pd, &pp);
     c->ts_period = pp.limits.timestampPeriod;
-    if (getenv("MEMC_VERBOSE"))
+    c->max_groups = pp.limits.maxComputeWorkGroupCount[0];
+    int verbose = getenv("MEMC_VERBOSE") != NULL;
+    if (verbose)
         fprintf(stderr, "memc: using %s\n", pp.deviceName);
     vkGetPhysicalDeviceMemoryProperties(c->pd, &c->mp);
     uint32_t nq = 16;
@@ -599,7 +614,7 @@ static int vk_init(memc_ctx *c)
         dci.enabledExtensionCount = next_base;
         VK(vkCreateDevice(c->pd, &dci, NULL, &c->dev));
     }
-    if (getenv("MEMC_VERBOSE"))
+    if (verbose)
         fprintf(stderr, "memc: queue family %u%s\n", c->qf, res == VK_SUCCESS ? ", low priority" : "");
     vkGetDeviceQueue(c->dev, c->qf, 0, &c->q);
     c->pushdesc = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->dev, "vkCmdPushDescriptorSetKHR");
@@ -633,7 +648,7 @@ static int vk_init(memc_ctx *c)
     PIPE_SG(p_refine, spv_refine, "SSBB");
     PIPE(p_proj, spv_proj, "BB");
     PIPE_SG(p_cross, spv_cross, "SSBBBB");
-    PIPE_SG(p_local, spv_local, "SSBBB");
+    PIPE_SG(p_local, spv_local, "SSBBBB");
     PIPE_SG(p_sel, spv_sel, "SSSSBBBBBBBBBB");
     PIPE(p_conf, spv_conf, "BBBB");
     PIPE(p_cutdec, spv_cutdec, "BB");
@@ -671,13 +686,10 @@ static int res_init(memc_ctx *c)
             if (img_create(c, &f->lev[L], c->lw[L], c->lh[L], VK_FORMAT_R16_SFLOAT) < 0)
                 return -1;
     }
-    for (int i = 0; i < NSLOT; i++) {
-        slot *sl = &c->sl[i];
-        if (img_create(c, &sl->oy, W, H, fy) < 0 || img_create(c, &sl->oc1, c->cw, c->ch, fc) < 0)
-            return -1;
-        if (!c->fmt.nv && img_create(c, &sl->oc2, c->cw, c->ch, fc) < 0)
-            return -1;
-    }
+    if (img_create(c, &c->oy, W, H, fy) < 0 || img_create(c, &c->oc1, c->cw, c->ch, fc) < 0)
+        return -1;
+    if (!c->fmt.nv && img_create(c, &c->oc2, c->cw, c->ch, fc) < 0)
+        return -1;
     for (int L = 0; L < c->nlev; L++) {
         VkDeviceSize sz = (VkDeviceSize)c->bw[L] * c->bh[L] * 16;
         if (buf_create(c, &c->fa[L], sz, 0) || buf_create(c, &c->fb[L], sz, 0) || buf_create(c, &c->pfa[L], sz, 0) ||
@@ -685,13 +697,13 @@ static int res_init(memc_ctx *c)
             return -1;
     }
     int nb = c->bw[0] * c->bh[0];
-    if (buf_create(c, &c->qfa, (VkDeviceSize)nb * 16, 0) || buf_create(c, &c->qfb, (VkDeviceSize)nb * 16, 0) ||
-        buf_create(c, &c->pstat, 64, 1) || buf_create(c, &c->qstat, 64, 1))
+    if (buf_create(c, &c->qfb, (VkDeviceSize)nb * 16, 0) || buf_create(c, &c->pstat, 64, 0) ||
+        buf_create(c, &c->qstat, 64, 0))
         return -1;
     if (buf_create(c, &c->slots, (VkDeviceSize)nb * 4 * 4, 0) || buf_create(c, &c->xkeys, (VkDeviceSize)nb * 4 * 4, 0) ||
         buf_create(c, &c->eslots, (VkDeviceSize)nb * 4 * 4, 0) ||
         buf_create(c, &c->tf0, (VkDeviceSize)nb * 16, 0) || buf_create(c, &c->tf1, (VkDeviceSize)nb * 16, 0) ||
-        buf_create(c, &c->stat, 64, 1) || buf_create(c, &c->dummy, 64, 0) || buf_create(c, &c->hist, 128, 0) ||
+        buf_create(c, &c->stat, 64, 0) || buf_create(c, &c->dummy, 64, 0) || buf_create(c, &c->hist, 128, 0) ||
         buf_create(c, &c->fbw, (VkDeviceSize)nb * 4, 0) || buf_create(c, &c->ill0, (VkDeviceSize)nb * 16, 0) ||
         buf_create(c, &c->ill1, (VkDeviceSize)nb * 16, 0))
         return -1;
@@ -706,9 +718,13 @@ static int res_init(memc_ctx *c)
         off += (c->rowb[i] * c->rows[i] + 255) & ~(size_t)255;
     }
     for (int i = 0; i < NSLOT; i++)
-        if (buf_create(c, &c->sl[i].up, off, 1) || buf_create(c, &c->sl[i].down, off, 1) ||
-            buf_create(c, &c->sl[i].statcopy, 64, 1))
+        if (buf_create(c, &c->sl[i].down, off, 1) || buf_create(c, &c->sl[i].statcopy, 64, 1))
             return -1;
+    for (int k = 0; k < 2; k++) {
+        if (buf_create(c, &c->up[k], off, 1))
+            return -1;
+        c->up_slot[k] = -1;
+    }
     if (cmd_begin(c) < 0)
         return -1;
     for (int k = 0; k < NFR; k++) {
@@ -719,18 +735,25 @@ static int res_init(memc_ctx *c)
         for (int L = c->lnorm ? 0 : 1; L < c->nlev; L++)
             to_general(c, &c->fr[k].lev[L]);
     }
-    for (int i = 0; i < NSLOT; i++) {
-        to_general(c, &c->sl[i].oy);
-        to_general(c, &c->sl[i].oc1);
-        if (!c->fmt.nv)
-            to_general(c, &c->sl[i].oc2);
-    }
+    to_general(c, &c->oy);
+    to_general(c, &c->oc1);
+    if (!c->fmt.nv)
+        to_general(c, &c->oc2);
     return cmd_submit(c) < 0 ? -1 : 0;
 }
 
 static float luma_scale(const memc_ctx *c)
 {
     return c->lnorm ? (float)(65535.0 / ((1 << c->fmt.depth) - 1)) : 1.0f;
+}
+
+static void out_range(const memc_ctx *c, float *maxv, float *step)
+{
+    int pad = c->fmt.lsb_pad;
+    *maxv = c->bps == 1 ? 1.0f
+            : c->lnorm  ? (float)(((1 << c->fmt.depth) - 1) / 65535.0)
+                        : (float)((65535 - ((1 << pad) - 1)) / 65535.0);
+    *step = pad ? (float)((1 << pad) / 65535.0) : 0.0f;
 }
 
 static void set_dc(const memc_ctx *c, pcs *pc)
@@ -751,6 +774,13 @@ static const vimg *lev_img(memc_ctx *c, int k, int L)
 
 static void run_me(memc_ctx *c);
 
+static void swapbuf(vbuf *a, vbuf *b)
+{
+    vbuf t = *a;
+    *a = *b;
+    *b = t;
+}
+
 static void rot3(vbuf *q, vbuf *p, vbuf *n)
 {
     vbuf t = *q;
@@ -765,16 +795,12 @@ void memc_push(memc_ctx *c, const memc_image *src)
         return;
     c->eos = 0;
     if (c->nfr >= 2 && c->me_valid) {
-        rot3(&c->qfa, &c->pfa[0], &c->fa[0]);
         rot3(&c->qfb, &c->pfb[0], &c->fb[0]);
         rot3(&c->qstat, &c->pstat, &c->stat);
-        for (int L = 1; L < c->nlev; L++) {
-            vbuf t = c->fa[L];
-            c->fa[L] = c->pfa[L];
-            c->pfa[L] = t;
-            t = c->fb[L];
-            c->fb[L] = c->pfb[L];
-            c->pfb[L] = t;
+        for (int L = 0; L < c->nlev; L++) {
+            swapbuf(&c->fa[L], &c->pfa[L]);
+            if (L)
+                swapbuf(&c->fb[L], &c->pfb[L]);
         }
         c->have_q = c->have_prev;
         c->have_prev = 1;
@@ -788,16 +814,21 @@ void memc_push(memc_ctx *c, const memc_image *src)
         return;
     c->ib = (c->ib + 1) % NFR;
     gframe *f = &c->fr[c->ib];
+    int k = c->up_k = !c->up_k;
+    if (c->up_slot[k] >= 0 && c->sl[c->up_slot[k]].serial == c->up_serial[k])
+        slot_wait(c, c->up_slot[k]);
+    c->up_slot[k] = c->cur;
+    c->up_serial[k] = c->serial + 1;
+    vbuf *up = &c->up[k];
     for (int i = 0; i < c->nplanes; i++) {
-        uint8_t *d = (uint8_t *)S(c)->up.map + c->off[i];
+        uint8_t *d = (uint8_t *)up->map + c->off[i];
         for (size_t y = 0; y < c->rows[i]; y++)
             memcpy(d + y * c->rowb[i], src->data[i] + (ptrdiff_t)y * src->stride[i], c->rowb[i]);
     }
-    cmd_begin(c);
-    copy_b2i(c, &S(c)->up, c->off[0], &f->y);
-    copy_b2i(c, &S(c)->up, c->off[1], &f->c1);
+    copy_b2i(c, up, c->off[0], &f->y);
+    copy_b2i(c, up, c->off[1], &f->c1);
     if (!c->fmt.nv)
-        copy_b2i(c, &S(c)->up, c->off[2], &f->c2);
+        copy_b2i(c, up, c->off[2], &f->c2);
     barrier(c);
     if (c->lnorm) {
         pcs pc = {{c->lw[0], c->lh[0]}, {luma_scale(c)}};
@@ -855,13 +886,11 @@ static void estimate(memc_ctx *c, int dir)
             static const char *const iter_names[MAXLEV] = {"iter_L0", "iter_L1", "iter_L2", "iter_L3", "iter_L4", "iter_L5"};
             if (c->prof && S(c)->nq > 0)
                 S(c)->qname[S(c)->nq - 1] = iter_names[L];
-            vbuf t = F[L];
-            F[L] = c->tmp[L];
-            c->tmp[L] = t;
+            swapbuf(&F[L], &c->tmp[L]);
             have = 1;
         }
         if (L <= 1 && (c->p.refine || L == 0)) {
-            pcs pc = {{c->bw[L], c->bh[L], c->lw[L], c->lh[L], L == 0 && dir == 0, c->p.refine}, {0}};
+            pcs pc = {{c->bw[L], c->bh[L], c->lw[L], c->lh[L], L == 0 && dir == 0, c->p.refine, L == 0, dir}, {0}};
             set_dc(c, &pc);
             vres r[4] = {{X, NULL}, {Y, NULL}, {NULL, &F[L]}, {NULL, &c->stat}};
             dispatch(c, &c->p_refine, r, &pc, (uint32_t)(nb + 3) / 4, 1);
@@ -882,13 +911,10 @@ static void cross_fix(memc_ctx *c, int dir)
     }
     vbuf *F = dir ? c->fb : c->fa;
     pcs pc = {{bw, bh, c->lw[0], c->lh[0]}, {0, 0, 0, 0, c->p.pen_xfix, c->p.pen_len, 0, 0, c->p.xrel, c->p.xabs, c->p.xmin}};
-    set_dc(c, &pc);
     vres r[6] = {{lev_img(c, dir ? c->ib : kp, 0), NULL}, {lev_img(c, dir ? kp : c->ib, 0), NULL}, {NULL, &F[0]},
                  {NULL, &c->tmp[0]}, {NULL, dir ? &c->fa[0] : &c->fb[0]}, {NULL, &c->xkeys}};
     dispatch(c, &c->p_cross, r, &pc, (uint32_t)(nb + 63) / 64, 1);
-    vbuf t = F[0];
-    F[0] = c->tmp[0];
-    c->tmp[0] = t;
+    swapbuf(&F[0], &c->tmp[0]);
 }
 
 static void local_fix(memc_ctx *c, int dir)
@@ -898,14 +924,11 @@ static void local_fix(memc_ctx *c, int dir)
     vbuf *F = dir ? c->fb : c->fa;
     int chk = c->p.xchk && (dir || c->have_prev);
     pcs pc = {{bw, bh, c->lw[0], c->lh[0], chk, dir},
-              {0, 0, 0, 0, 0, c->p.pen_len, c->p.tsup_rel, c->p.tsup_abs, c->p.xrel, c->p.xabs, 0, c->p.xbad, c->p.xr, c->p.xs}};
-    set_dc(c, &pc);
-    vres r[5] = {{lev_img(c, dir ? c->ib : kp, 0), NULL}, {lev_img(c, dir ? kp : c->ib, 0), NULL}, {NULL, &F[0]},
-                 {NULL, &c->tmp[0]}, {NULL, dir ? &c->fa[0] : (c->have_prev ? &c->pfb[0] : &c->dummy)}};
+              {0, 0, 0, 0, 0, c->p.pen_len, c->p.tsup_rel, c->p.tsup_abs, c->p.xrel, c->p.xabs, c->p.xnoise, c->p.xbad, c->p.xr, c->p.xs}};
+    vres r[6] = {{lev_img(c, dir ? c->ib : kp, 0), NULL}, {lev_img(c, dir ? kp : c->ib, 0), NULL}, {NULL, &F[0]},
+                 {NULL, &c->tmp[0]}, {NULL, dir ? &c->fa[0] : (c->have_prev ? &c->pfb[0] : &c->dummy)}, {NULL, &c->stat}};
     dispatch(c, &c->p_local, r, &pc, (uint32_t)(nb + 63) / 64, 1);
-    vbuf t = F[0];
-    F[0] = c->tmp[0];
-    c->tmp[0] = t;
+    swapbuf(&F[0], &c->tmp[0]);
 }
 
 static void run_me(memc_ctx *c)
@@ -922,8 +945,8 @@ static void run_me(memc_ctx *c)
         cross_fix(c, dir);
     for (int dir = 0; dir < 2 && c->p.xloc; dir++)
         local_fix(c, dir);
-    pcs pc = {{0}, {(float)(STAT_SCALE / ((double)c->bw[0] * c->bh[0] * 256)), (float)c->p.scut, (float)c->p.scut_rel,
-                    (float)c->p.zcut_rel, (float)c->p.zcut_min}};
+    pcs pc = {{c->bw[0] * c->bh[0]}, {(float)(STAT_SCALE / ((double)c->bw[0] * c->bh[0] * 256)), (float)c->p.scut, (float)c->p.scut_rel,
+                    (float)c->p.zcut_rel, (float)c->p.zcut_min, c->p.cut_sd, c->p.cut_kmin}};
     vres r[2] = {{NULL, &c->stat}, {NULL, &c->hist}};
     dispatch(c, &c->p_cutdec, r, &pc, 1, 1);
     c->me_valid = 1;
@@ -964,8 +987,6 @@ int memc_submit(memc_ctx *c, double t)
         kz = ka, PFB = &c->dummy, SP = SC;
     c->last_fa = *FA0;
     c->last_fb = *FB0;
-    c->last_nfa = *NFA;
-    c->last_pfb = *PFB;
     gframe *A = &c->fr[ka], *B = &c->fr[kb];
     int bw = c->bw[0], bh = c->bh[0], nb = bw * bh;
     vkCmdFillBuffer(S(c)->cb, c->slots.buf, 0, VK_WHOLE_SIZE, 0xffffffffu);
@@ -985,7 +1006,7 @@ int memc_submit(memc_ctx *c, double t)
     }
     vbuf *tfin = &c->dummy, *tfout = &c->tf0;
     for (int pass = 0; pass < c->p.sel_passes; pass++) {
-        pcs pc = {{bw, bh, c->fmt.w, c->fmt.h, pass, la, past, c->p.tsup, (int)lrintf(c->p.tsup_rel * 100), (int)lrintf(c->p.tsup_abs * 100), (int)c->p.tsup_pen, (int)lrintf(c->p.tsup_min * 100), c->p.tref, c->p.kbon, c->p.twaive},
+        pcs pc = {{bw, bh, c->fmt.w, c->fmt.h, pass, la, past, c->p.tsup, (int)lrintf(c->p.tsup_rel * 100), (int)lrintf(c->p.tsup_abs * 100), (int)c->p.tsup_pen, (int)lrintf(c->p.tsup_min * 100), c->p.tref, 0, c->p.twaive},
                   {(float)t, c->p.pen_inc, c->p.cthr, c->p.fg_sel, 0, 0, c->p.pen_one, c->p.one_rel, c->p.one_min, c->p.one_tex,
                    c->p.unc_min, (float)c->p.uncov, c->p.one_sw, c->p.unc_cont * 0.01f}};
         set_dc(c, &pc);
@@ -1012,27 +1033,32 @@ int memc_submit(memc_ctx *c, double t)
         dispatch(c, &c->p_ilmed, rm, &pm, (uint32_t)(nb + 63) / 64, 1);
     }
     {
+        float maxv, step;
+        out_range(c, &maxv, &step);
         pcs pc = {{c->fmt.w, c->fmt.h, bw, bh, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y},
                   {(float)t, c->p.sigma, c->p.pen_occ, c->p.pen_bad, c->p.pen_fb, c->p.wprior, c->p.cthr, c->p.pen_fbm,
-                   luma_scale(c), 0, 0, 0, c->p.fg_pix, 0, 0}};
+                   luma_scale(c), maxv, step, 0, c->p.fg_pix, 0, 0}};
         vres r[17] = {{&A->y, NULL},  {&B->y, NULL},  {&A->c1, NULL},   {&B->c1, NULL},
                       {ac2, NULL},    {bc2, NULL},    {NULL, tfin},  {NULL, FA0},
-                      {NULL, FB0}, {&S(c)->oy, NULL}, {&S(c)->oc1, NULL}, {c->fmt.nv ? &S(c)->oc1 : &S(c)->oc2, NULL},
+                      {NULL, FB0}, {&c->oy, NULL}, {&c->oc1, NULL}, {c->fmt.nv ? &c->oc1 : &c->oc2, NULL},
                       {lev_img(c, ka, 0), NULL}, {lev_img(c, kb, 0), NULL}, {NULL, SC}, {NULL, &c->fbw}, {NULL, &c->ill1}};
         dispatch(c, &c->p_interp, r, &pc, (uint32_t)((c->fmt.w + 1) / 2 + 7) / 8, (uint32_t)((c->fmt.h + 1) / 2 + 7) / 8);
     }
-    copy_i2b(c, &S(c)->oy, &S(c)->down, c->off[0]);
-    copy_i2b(c, &S(c)->oc1, &S(c)->down, c->off[1]);
+    copy_i2b(c, &c->oy, &S(c)->down, c->off[0]);
+    copy_i2b(c, &c->oc1, &S(c)->down, c->off[1]);
     if (!c->fmt.nv)
-        copy_i2b(c, &S(c)->oc2, &S(c)->down, c->off[2]);
+        copy_i2b(c, &c->oc2, &S(c)->down, c->off[2]);
     VkBufferCopy bc = {0, 0, 64};
     vkCmdCopyBuffer(S(c)->cb, SC->buf, S(c)->statcopy.buf, 1, &bc);
+    host_barrier(c);
     return cmd_end(c, 1);
 }
 
 int memc_debug_field(memc_ctx *c, int which, float *out, int *w, int *h)
 {
-    vbuf *f = which == 0 ? &c->last_fa : which == 1 ? &c->last_fb : which == 2 ? c->last_tf : which == 3 ? &c->last_nfa : &c->last_pfb;
+    if (which < 0 || which > 2)
+        return -1;
+    vbuf *f = which == 0 ? &c->last_fa : which == 1 ? &c->last_fb : c->last_tf;
     if (!f || !f->buf)
         return -1;
     int n = c->bw[0] * c->bh[0];
@@ -1043,6 +1069,7 @@ int memc_debug_field(memc_ctx *c, int which, float *out, int *w, int *h)
     }
     VkBufferCopy bc = {0, 0, (VkDeviceSize)n * 16};
     vkCmdCopyBuffer(S(c)->cb, f->buf, tmp.buf, 1, &bc);
+    host_barrier(c);
     if (cmd_submit(c) < 0) {
         buf_free(c, &tmp);
         return -1;
@@ -1077,7 +1104,6 @@ int memc_retrieve(memc_ctx *c, memc_image *dst)
     int cut = ((uint32_t *)sl->statcopy.map)[2] != 0;
     c->st.mean_err = e;
     c->st.scene_cut = cut;
-    c->st.me_ms = 0;
     c->st.interp_ms = sl->gpu_ms;
     read_out(c, sl, dst);
     return cut;
@@ -1148,10 +1174,10 @@ static void default_params(params *p)
     p->xloc = 1;
     p->tex = 1;
     p->tref = 8;
-    p->kbon = 0;
     p->twaive = 1;
     p->xchk = 1;
     p->xbad = 1500;
+    p->xnoise = 1.5f;
     p->xr = 4;
     p->xs = 2;
     p->tsup_rel = 0.25f;
@@ -1167,6 +1193,8 @@ static void default_params(params *p)
     p->scut_rel = 4;
     p->zcut_rel = 2;
     p->zcut_min = 1;
+    p->cut_sd = 45;
+    p->cut_kmin = 0.1f;
 }
 
 int memc_set_param(memc_ctx *c, const char *name, double v)
@@ -1179,7 +1207,7 @@ int memc_set_param(memc_ctx *c, const char *name, double v)
     }
     P_(pen_parent) P_(pen_temporal) P_(pen_update) P_(pen_zero) P_(pen_cross) P_(pen_len) P_(lam_full) P_(dc_lo) P_(dc_hi)
     P_(coarse_r) P_(iters) P_(iters0) P_(refine) P_(sel_passes) P_(pen_inc) P_(sigma) P_(pen_occ) P_(pen_bad)
-    P_(wprior) P_(cthr) P_(pen_fb) P_(fb_spread) P_(fb_avg) P_(fg_sel) P_(fg_pix) P_(pen_one) P_(one_rel) P_(one_min) P_(one_tex) P_(one_sw) P_(pen_fbm) P_(unc_min) P_(uncov) P_(unc_cont) P_(xfix) P_(tsup) P_(xloc) P_(tex) P_(tref) P_(kbon) P_(twaive) P_(xchk) P_(xbad) P_(xr) P_(xs) P_(tsup_rel) P_(tsup_abs) P_(tsup_pen) P_(tsup_min) P_(pen_xfix) P_(xrel) P_(xabs) P_(xmin) P_(la) P_(fb_ilo) P_(fb_ihi) P_(scut) P_(scut_rel) P_(zcut_rel) P_(zcut_min)
+    P_(wprior) P_(cthr) P_(pen_fb) P_(fb_spread) P_(fb_avg) P_(fg_sel) P_(fg_pix) P_(pen_one) P_(one_rel) P_(one_min) P_(one_tex) P_(one_sw) P_(pen_fbm) P_(unc_min) P_(uncov) P_(unc_cont) P_(xfix) P_(tsup) P_(xloc) P_(tex) P_(tref) P_(twaive) P_(xchk) P_(xbad) P_(xnoise) P_(xr) P_(xs) P_(tsup_rel) P_(tsup_abs) P_(tsup_pen) P_(tsup_min) P_(pen_xfix) P_(xrel) P_(xabs) P_(xmin) P_(la) P_(fb_ilo) P_(fb_ihi) P_(scut) P_(scut_rel) P_(zcut_rel) P_(zcut_min) P_(cut_sd) P_(cut_kmin)
 #undef P_
     return -1;
 }
@@ -1207,10 +1235,6 @@ void memc_destroy(memc_ctx *c)
         }
         for (int i = 0; i < NSLOT; i++) {
             slot *sl = &c->sl[i];
-            img_free(c, &sl->oy);
-            img_free(c, &sl->oc1);
-            img_free(c, &sl->oc2);
-            buf_free(c, &sl->up);
             buf_free(c, &sl->down);
             buf_free(c, &sl->statcopy);
             if (sl->qp)
@@ -1225,6 +1249,11 @@ void memc_destroy(memc_ctx *c)
             buf_free(c, &c->pfb[L]);
             buf_free(c, &c->tmp[L]);
         }
+        img_free(c, &c->oy);
+        img_free(c, &c->oc1);
+        img_free(c, &c->oc2);
+        buf_free(c, &c->up[0]);
+        buf_free(c, &c->up[1]);
         buf_free(c, &c->slots);
         buf_free(c, &c->xkeys);
         buf_free(c, &c->eslots);
@@ -1233,7 +1262,6 @@ void memc_destroy(memc_ctx *c)
         buf_free(c, &c->stat);
         buf_free(c, &c->pstat);
         buf_free(c, &c->qstat);
-        buf_free(c, &c->qfa);
         buf_free(c, &c->qfb);
         buf_free(c, &c->dummy);
         buf_free(c, &c->fbw);
@@ -1265,11 +1293,11 @@ void memc_destroy(memc_ctx *c)
     free(c);
 }
 
-memc_ctx *memc_create(const memc_format *fmt, int threads)
+memc_ctx *memc_create(const memc_format *fmt)
 {
-    (void)threads;
     if (fmt->w < 64 || fmt->h < 64 || fmt->depth < 8 || fmt->depth > 16 || fmt->cshift_x < 0 || fmt->cshift_x > 1 ||
-        fmt->cshift_y < 0 || fmt->cshift_y > 1)
+        fmt->cshift_y < 0 || fmt->cshift_y > 1 || fmt->lsb_pad < 0 || fmt->lsb_pad > 8 ||
+        (fmt->lsb_pad && fmt->depth != 16))
         return NULL;
     memc_ctx *c = calloc(1, sizeof(*c));
     if (!c)
@@ -1283,7 +1311,7 @@ memc_ctx *memc_create(const memc_format *fmt, int threads)
     default_params(&c->p);
     c->hist_clear = 1;
     int nlev = 1;
-    while (nlev < MAXLEV && (fmt->w >> nlev) >= 64 && (fmt->h >> nlev) >= 64)
+    while (nlev < MAXLEV && (fmt->w >> nlev) >= 48 && (fmt->h >> nlev) >= 48)
         nlev++;
     c->nlev = nlev;
     for (int L = 0; L < nlev; L++) {
@@ -1292,7 +1320,17 @@ memc_ctx *memc_create(const memc_format *fmt, int threads)
         c->bw[L] = (c->lw[L] + BS - 1) / BS;
         c->bh[L] = (c->lh[L] + BS - 1) / BS;
     }
-    if (vk_init(c) < 0 || res_init(c) < 0) {
+    if (vk_init(c) < 0) {
+        fprintf(stderr, "memc: Vulkan init failed\n");
+        memc_destroy(c);
+        return NULL;
+    }
+    if ((uint32_t)(c->bw[0] * c->bh[0] + 3) / 4 > c->max_groups) {
+        fprintf(stderr, "memc: %dx%d is too large for this GPU\n", fmt->w, fmt->h);
+        memc_destroy(c);
+        return NULL;
+    }
+    if (res_init(c) < 0) {
         fprintf(stderr, "memc: Vulkan init failed\n");
         memc_destroy(c);
         return NULL;

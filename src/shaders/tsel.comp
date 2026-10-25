@@ -37,6 +37,14 @@ float zsad_bc(vec2 p, vec2 u, float t)
     return zsad(rb, rc);
 }
 
+float tolf(vec2 u) { return float(pc.i2.x) * 0.01 * l1(u) + float(pc.i2.y) * 0.01; }
+
+bool both_sup(vec2 c, vec2 u, float t)
+{
+    float tol = tolf(u);
+    return l1(fat(3, c - t * u) + u) <= tol && l1(fat(2, c + (1.0 - t) * u) - u) <= tol;
+}
+
 float tex16(float r[16], sampler2D T, vec2 p)
 {
     float d[16];
@@ -75,7 +83,6 @@ void main()
         int src = int(key >> 1);
         add((key & 1u) != 0u ? -fb[src].xy : fa[src].xy);
     }
-    int nk = n;
     bool fut = pc.i1.y != 0 && sn[2] == 0u;
     bool past = pc.i1.z != 0 && sp[2] == 0u;
     add(fa[id].xy);
@@ -85,10 +92,9 @@ void main()
         bool nsup = false;
         for (int i = 0; i < n; i++) {
             vec2 u = cl[i];
-            float tol = float(pc.i2.x) * 0.01 * l1(u) + float(pc.i2.y) * 0.01, th = pc.f0.z * 0.25 + l1(u) / 8.0;
-            vec2 pa = cc - t * u, pb = cc + (1.0 - t) * u;
-            nsup = nsup || (past && fut && l1(fat(0, pa) - u) <= th && l1(fat(1, pb) + u) <= th &&
-                            l1(fat(3, pa) + u) <= tol && l1(fat(2, pb) - u) <= tol);
+            float th = cons_thr(pc.f0.z, u);
+            nsup = nsup || (past && fut && l1(fat(0, cc - t * u) - u) <= th && l1(fat(1, cc + (1.0 - t) * u) + u) <= th &&
+                            both_sup(cc, u, t));
         }
         for (int i = 0; i < 2 && !nsup; i++) {
             uint key = ek[id * 4 + i];
@@ -96,10 +102,9 @@ void main()
                 break;
             int src = int(key >> 1);
             vec2 u = (key & 1u) != 0u ? nfa[src].xy : -pfb[src].xy;
-            float tol = float(pc.i2.x) * 0.01 * l1(u) + float(pc.i2.y) * 0.01;
-            float th = pc.f0.z * 0.25 + l1(u) / 8.0;
+            float th = cons_thr(pc.f0.z, u);
             bool own = (key & 1u) != 0u ? l1(fat(1, cc + (1.0 - t) * u) + u) <= th : l1(fat(0, cc - t * u) - u) <= th;
-            if (past && fut && (own || (l1(fat(3, cc - t * u) + u) <= tol && l1(fat(2, cc + (1.0 - t) * u) - u) <= tol)))
+            if (past && fut && (own || both_sup(cc, u, t)))
                 add(u);
         }
     }
@@ -128,14 +133,10 @@ void main()
     set_dc_w(lane < 9 ? max(abs(fa[q].w), abs(fb[q].w)) : 1e30);
     float cs[8];
     bool anysup = false;
+    float minsup = float(pc.i2.w) * 0.01;
     if (pc.i1.w != 0 && past && fut) {
-        for (int i = 0; i < n2; i++) {
-            vec2 u = cl[i];
-            float tol = float(pc.i2.x) * 0.01 * l1(u) + float(pc.i2.y) * 0.01;
-            if (l1(u) >= float(pc.i2.w) * 0.01 &&
-                l1(fat(3, c - t * u) + u) <= tol && l1(fat(2, c + (1.0 - t) * u) - u) <= tol)
-                anysup = true;
-        }
+        for (int i = 0; i < n2 && !anysup; i++)
+            anysup = l1(cl[i]) >= minsup && both_sup(c, cl[i], t);
     }
     float bs_c = 1e30;
     vec2 bs_v = vec2(0.0);
@@ -147,21 +148,21 @@ void main()
         row16(B, row0 + (1.0 - t) * u, rb);
         float s = zsad(ra, rb);
         float m2 = g_ml;
-        float thr = pc.f0.z * 0.25 + l1(u) / 8.0;
+        float thr = cons_thr(pc.f0.z, u);
         bool okA = l1(fat(0, c - t * u) - u) <= thr;
         bool okB = l1(fat(1, c + (1.0 - t) * u) + u) <= thr;
-        bool sup = true, sup2 = false;
+        bool sup = true;
         float pen = float(int(!okA) + int(!okB));
-        if (anysup && l1(u) >= float(pc.i2.w) * 0.01) {
-            float tol = float(pc.i2.x) * 0.01 * l1(u) + float(pc.i2.y) * 0.01;
+        bool chk = anysup && l1(u) >= minsup;
+        if (chk) {
+            float tol = tolf(u);
             bool ps = l1(fat(3, c - t * u) + u) <= tol, fs = l1(fat(2, c + (1.0 - t) * u) - u) <= tol;
             sup = ps || fs;
-            sup2 = ps && fs;
-            if (sup2 && pc.i3.z != 0)
+            if (ps && fs && pc.i3.z != 0)
                 pen = 0.0;
         }
         float cost = s + pc.f0.y * pen;
-        if (anysup && l1(u) >= float(pc.i2.w) * 0.01) {
+        if (chk) {
             if (!sup)
                 cost += float(pc.i2.z);
             else if (cost < bs_c) {
@@ -169,13 +170,8 @@ void main()
                 bs_v = u;
             }
         }
-        bool kb = false;
-        if (anysup && pc.i3.y != 0 && i < nk && l1(u) >= float(pc.i2.w) * 0.01) {
-            float tol = float(pc.i2.x) * 0.01 * l1(u) + float(pc.i2.y) * 0.01;
-            kb = l1(fat(3, c - t * u) + u) <= tol && l1(fat(2, c + (1.0 - t) * u) - u) <= tol;
-        }
-        if ((okA && okB && sup) || kb)
-            cost -= pc.f0.w * clamp(l1(u - pc.f1.xy) * 0.5, 0.0, 1.0);
+        if (okA && okB && sup)
+            cost -= pc.f0.w * clamp(l1(u) * 0.5, 0.0, 1.0);
         cs[i] = okB && !okA ? cost : -1.0;
         if (cost < best_c) {
             best_c = cost;
@@ -197,14 +193,12 @@ void main()
                 row16(B, row0 + (1.0 - t) * u, rb);
                 float s = zsad(ra, rb);
                 float m2 = g_ml;
-                float thr = pc.f0.z * 0.25 + l1(u) / 8.0;
+                float thr = cons_thr(pc.f0.z, u);
                 bool okA = l1(fat(0, c - t * u) - u) <= thr;
                 bool okB = l1(fat(1, c + (1.0 - t) * u) + u) <= thr;
-                float tol = float(pc.i2.x) * 0.01 * l1(u) + float(pc.i2.y) * 0.01;
-                bool sup2 = l1(fat(3, c - t * u) + u) <= tol && l1(fat(2, c + (1.0 - t) * u) - u) <= tol;
-                float cost = s + pc.f0.y * ((sup2 && pc.i3.z != 0) ? 0.0 : float(int(!okA) + int(!okB)));
+                float cost = s + pc.f0.y * ((both_sup(c, u, t) && pc.i3.z != 0) ? 0.0 : float(int(!okA) + int(!okB)));
                 if (okA && okB)
-                    cost -= pc.f0.w * clamp(l1(u - pc.f1.xy) * 0.5, 0.0, 1.0);
+                    cost -= pc.f0.w * clamp(l1(u) * 0.5, 0.0, 1.0);
                 if (cost < best_c) {
                     best_c = cost;
                     best_v = u;
@@ -242,7 +236,7 @@ void main()
         vec2 fr = vec2(bw - 1, bh - 1) * 8.0;
         for (int i = 0; i < n; i++) {
             vec2 u = cl[i];
-            float thr = pc.f0.z * 0.25 + l1(u) / 8.0;
+            float thr = cons_thr(pc.f0.z, u);
             vec2 pa = c - t * u, pb = c + (1.0 - t) * u;
             float ia = l1(fat(0, pa) - u), ib = l1(fat(1, pb) + u);
             if (ia <= thr && ib <= thr)
