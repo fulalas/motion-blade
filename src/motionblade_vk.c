@@ -10,7 +10,6 @@
 #include <string.h>
 #include <vulkan/vulkan.h>
 #ifndef _WIN32
-#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -153,14 +152,6 @@ typedef struct {
     atomic_int busy[MAXX];
 } xpool;
 
-#define MAXIMP 128
-
-typedef struct {
-    unsigned long long dev, ino;
-    uint32_t off;
-    vimg im;
-    unsigned used;
-} impimg;
 #define NFR 4
 
 typedef struct {
@@ -172,6 +163,7 @@ typedef struct {
     void (*rel[4])(void *);
     void *relo[4];
     int nrel;
+    vimg imp[2];
     int busy, nq;
     unsigned serial;
     const char *qname[64];
@@ -184,15 +176,15 @@ struct mb_ctx {
     int x0, y0, nx0, ny0, nw, nh, nstable, seen, scan, npush, det_push;
     uint8_t *tmpl;
     size_t toff[3], trowb[3], trows[3], tsize;
-    int has_dmabuf, nx, bars_ver;
+    int has_dmabuf, nx, xnext, bars_ver;
     PFN_vkGetMemoryFdKHR getfd;
     xbuf xb[MAXX];
     xpool *xp;
     size_t xoff[3], xpitch[3], xsize;
-    int has_mod, has_foreign, gpu_in, nimp, bf_slot, bf_pending, bf_tick, bg_ver;
-    unsigned clock, bf_serial;
+    int has_mod, has_foreign, gpu_in, bf_slot, bf_pending, bf_tick, bg_ver;
+    unsigned bf_serial;
+    uint32_t imp_bits;
     PFN_vkGetMemoryFdPropertiesKHR getfdprops;
-    impimg imp[MAXIMP];
     vimg bgy, bgc;
     vbuf bflags;
     vpipe p_bars, p_agree, p_gmed, p_agspread;
@@ -431,8 +423,10 @@ static void dispatch(mb_ctx *c, const vpipe *p, const vres *res, const pcs *pc, 
     }
 }
 
-static void slot_release(slot *sl)
+static void slot_release(mb_ctx *c, slot *sl)
 {
+    for (int k = 0; k < 2; k++)
+        img_free(c, &sl->imp[k]);
     for (int k = 0; k < sl->nrel; k++)
         sl->rel[k](sl->relo[k]);
     sl->nrel = 0;
@@ -446,7 +440,7 @@ static void slot_wait(mb_ctx *c, int i)
     vkWaitForFences(c->dev, 1, &sl->fence, VK_TRUE, UINT64_MAX);
     vkResetFences(c->dev, 1, &sl->fence);
     sl->busy = 0;
-    slot_release(sl);
+    slot_release(c, sl);
     sl->gpu_ms = 0;
     uint64_t ts[66];
     if (vkGetQueryPoolResults(c->dev, sl->qp, 0, (uint32_t)(2 + sl->nq), sizeof(ts), ts, 8, VK_QUERY_RESULT_64_BIT) !=
@@ -1334,48 +1328,16 @@ static void poll_slots(mb_ctx *c)
             slot_wait(c, i);
 }
 
-static vimg *import_plane(mb_ctx *c, const mb_dmabuf_in *in, int p)
+static int import_plane(mb_ctx *c, const mb_dmabuf_in *in, int p, vimg *im)
 {
+    memset(im, 0, sizeof(*im));
 #ifdef _WIN32
     (void)c;
     (void)in;
     (void)p;
-    return NULL;
+    return -1;
 #else
     int fd = in->fd[in->obj[p]];
-    struct stat st;
-    if (fstat(fd, &st) < 0)
-        return NULL;
-    c->clock++;
-    if ((c->clock & 63) == 0) {
-        int n = 0;
-        for (int i = 0; i < c->nimp; i++) {
-            if (c->clock - c->imp[i].used > 256)
-                img_free(c, &c->imp[i].im);
-            else
-                c->imp[n++] = c->imp[i];
-        }
-        c->nimp = n;
-    }
-    int lru = 0;
-    for (int i = 0; i < c->nimp; i++) {
-        impimg *m = &c->imp[i];
-        if (m->dev == (unsigned long long)st.st_dev && m->ino == (unsigned long long)st.st_ino && m->off == in->offset[p]) {
-            m->used = c->clock;
-            return &m->im;
-        }
-        if (m->used < c->imp[lru].used)
-            lru = i;
-    }
-    impimg *m;
-    if (c->nimp < MAXIMP) {
-        m = &c->imp[c->nimp++];
-    } else {
-        vkQueueWaitIdle(c->q);
-        m = &c->imp[lru];
-        img_free(c, &m->im);
-    }
-    memset(m, 0, sizeof(*m));
     int w = p ? cdim(c->full.w, c->full.cshift_x) : c->full.w;
     int h = p ? cdim(c->full.h, c->full.cshift_y) : c->full.h;
     VkFormat fmt = plane_fmt(c, p ? 2 : 1);
@@ -1392,47 +1354,45 @@ static vimg *import_plane(mb_ctx *c, const mb_dmabuf_in *in, int p)
     ic.samples = VK_SAMPLE_COUNT_1_BIT;
     ic.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
     ic.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    m->im.w = w;
-    m->im.h = h;
-    if (vkCreateImage(c->dev, &ic, NULL, &m->im.img) != VK_SUCCESS)
+    im->w = w;
+    im->h = h;
+    if (vkCreateImage(c->dev, &ic, NULL, &im->img) != VK_SUCCESS)
         goto fail;
-    VkMemoryFdPropertiesKHR fp = {VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
-    if (c->getfdprops(c->dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fd, &fp) != VK_SUCCESS)
-        goto fail;
+    if (!c->imp_bits) {
+        VkMemoryFdPropertiesKHR fp = {VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
+        if (c->getfdprops(c->dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fd, &fp) != VK_SUCCESS)
+            goto fail;
+        c->imp_bits = fp.memoryTypeBits;
+    }
     VkMemoryRequirements mr;
-    vkGetImageMemoryRequirements(c->dev, m->im.img, &mr);
-    uint32_t bits = mr.memoryTypeBits & fp.memoryTypeBits;
+    vkGetImageMemoryRequirements(c->dev, im->img, &mr);
+    uint32_t bits = mr.memoryTypeBits & c->imp_bits;
     if (!bits)
         goto fail;
     int dfd = dup(fd);
     if (dfd < 0)
         goto fail;
-    VkMemoryDedicatedAllocateInfo da = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, NULL, m->im.img, VK_NULL_HANDLE};
+    VkMemoryDedicatedAllocateInfo da = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, NULL, im->img, VK_NULL_HANDLE};
     VkImportMemoryFdInfoKHR imi = {VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR, &da,
                                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, dfd};
     VkMemoryAllocateInfo ma = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &imi, mr.size, (uint32_t)__builtin_ctz(bits)};
-    if (vkAllocateMemory(c->dev, &ma, NULL, &m->im.mem) != VK_SUCCESS) {
+    if (vkAllocateMemory(c->dev, &ma, NULL, &im->mem) != VK_SUCCESS) {
         close(dfd);
         goto fail;
     }
-    if (vkBindImageMemory(c->dev, m->im.img, m->im.mem, 0) != VK_SUCCESS)
+    if (vkBindImageMemory(c->dev, im->img, im->mem, 0) != VK_SUCCESS)
         goto fail;
     VkImageViewCreateInfo vc = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    vc.image = m->im.img;
+    vc.image = im->img;
     vc.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vc.format = fmt;
     vc.subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    if (vkCreateImageView(c->dev, &vc, NULL, &m->im.view) != VK_SUCCESS)
+    if (vkCreateImageView(c->dev, &vc, NULL, &im->view) != VK_SUCCESS)
         goto fail;
-    m->dev = (unsigned long long)st.st_dev;
-    m->ino = (unsigned long long)st.st_ino;
-    m->off = in->offset[p];
-    m->used = c->clock;
-    return &m->im;
+    return 0;
 fail:
-    img_free(c, &m->im);
-    memset(m, 0, sizeof(*m));
-    return NULL;
+    img_free(c, im);
+    return -1;
 #endif
 }
 
@@ -1508,13 +1468,19 @@ int mb_push_dmabuf(mb_ctx *c, const mb_dmabuf_in *in)
     if (!c->ok || !c->has_mod || !c->fmt.nv)
         return -1;
     poll_slots(c);
-    vimg *py = import_plane(c, in, 0), *pu = py ? import_plane(c, in, 1) : NULL;
-    if (!pu)
-        return -1;
+    vimg im[2];
+    int ok = import_plane(c, in, 0, &im[0]) == 0;
+    ok = import_plane(c, in, 1, &im[1]) == 0 && ok;
     c->gpu_in = 1;
-    gpu_bars(c);
-    if (!c->ok || push_begin(c) < 0)
+    if (ok)
+        gpu_bars(c);
+    if (!ok || !c->ok || push_begin(c) < 0) {
+        img_free(c, &im[0]);
+        img_free(c, &im[1]);
         return -1;
+    }
+    memcpy(S(c)->imp, im, sizeof(im));
+    vimg *py = &S(c)->imp[0], *pu = &S(c)->imp[1];
     if (bg_init(c) < 0) {
         c->ok = 0;
         return -1;
@@ -1750,10 +1716,12 @@ int mb_export_init(mb_ctx *c)
 
 static int xacquire(mb_ctx *c)
 {
-    for (int i = 0; i < c->nx; i++) {
-        int z = 0;
-        if (atomic_compare_exchange_strong(&c->xp->busy[i], &z, 1))
+    for (int k = 0; k < c->nx; k++) {
+        int i = (c->xnext + k) % c->nx, z = 0;
+        if (atomic_compare_exchange_strong(&c->xp->busy[i], &z, 1)) {
+            c->xnext = (i + 1) % c->nx;
             return i;
+        }
     }
     if (c->nx >= MAXX)
         return -1;
@@ -2201,9 +2169,7 @@ void mb_destroy(mb_ctx *c)
         vkDeviceWaitIdle(c->dev);
         res_geom_free(c);
         for (int i = 0; i < NSLOT; i++)
-            slot_release(&c->sl[i]);
-        for (int i = 0; i < c->nimp; i++)
-            img_free(c, &c->imp[i].im);
+            slot_release(c, &c->sl[i]);
         img_free(c, &c->bgy);
         img_free(c, &c->bgc);
         buf_free(c, &c->bflags);
