@@ -127,7 +127,7 @@ typedef struct {
     float tsup_rel, tsup_abs, tsup_pen, tsup_min, xbad, xnoise, xr, xs;
     float pen_xfix, xrel, xabs, xmin, vm_thr, ws_lo, ws_hi, sub_thr, pen_sub, pen_sref;
     int sub_ref;
-    int la, bar_wait, bars, tz_pen;
+    int la, bar_wait, bars, tz_pen, me_half;
     float ag_lo, ag_hi, ag_flat, ag_sat, ag_sw, ag_src;
     int ag_r;
     double scut, scut_rel, zcut_rel, zcut_min;
@@ -172,7 +172,7 @@ typedef struct {
 
 struct mb_ctx {
     mb_format fmt, full;
-    int bps, cw, ch, nplanes, nlev;
+    int bps, cw, ch, nplanes, nlev, mb;
     int x0, y0, nx0, ny0, nw, nh, nstable, seen, scan, npush, det_push;
     uint8_t *tmpl;
     size_t toff[3], trowb[3], trows[3], tsize;
@@ -812,6 +812,8 @@ static void set_geom(mb_ctx *c)
     while (nlev < MAXLEV && (fmt->w >> nlev) >= 48 && (fmt->h >> nlev) >= 48)
         nlev++;
     c->nlev = nlev;
+    int h = c->p.me_half < 0 ? (long)c->full.w * c->full.h > 2500000 : c->p.me_half;
+    c->mb = h && nlev > 2 ? 1 : 0;
     for (int L = 0; L < nlev; L++) {
         c->lw[L] = (fmt->w + (1 << L) - 1) >> L;
         c->lh[L] = (fmt->h + (1 << L) - 1) >> L;
@@ -883,13 +885,13 @@ static int res_geom_init(mb_ctx *c)
         return -1;
     if (!c->fmt.nv && img_create(c, &c->oc2, c->cw, c->ch, fc) < 0)
         return -1;
-    for (int L = 0; L < c->nlev; L++) {
+    for (int L = c->mb; L < c->nlev; L++) {
         VkDeviceSize sz = (VkDeviceSize)c->bw[L] * c->bh[L] * 16;
         if (buf_create(c, &c->fa[L], sz, 0) || buf_create(c, &c->fb[L], sz, 0) || buf_create(c, &c->pfa[L], sz, 0) ||
             buf_create(c, &c->pfb[L], sz, 0) || buf_create(c, &c->tmp[L], sz, 0))
             return -1;
     }
-    int nb = c->bw[0] * c->bh[0];
+    int nb = c->bw[c->mb] * c->bh[c->mb];
     if (buf_create(c, &c->qfb, (VkDeviceSize)nb * 16, 0) || buf_create(c, &c->pstat, 64, 0) ||
         buf_create(c, &c->qstat, 64, 0))
         return -1;
@@ -942,6 +944,11 @@ static void set_dc(const mb_ctx *c, pcs *pc)
 static int fidx(const mb_ctx *c, int back)
 {
     return (c->ib - back + NFR) % NFR;
+}
+
+static int mbase(const mb_ctx *c)
+{
+    return c->mb;
 }
 
 static const vimg *lev_img(mb_ctx *c, int k, int L)
@@ -1233,11 +1240,12 @@ static int push_begin(mb_ctx *c)
     c->eos = 0;
     c->npush++;
     if (c->nfr >= 2 && c->me_valid) {
-        rot3(&c->qfb, &c->pfb[0], &c->fb[0]);
+        int B = mbase(c);
+        rot3(&c->qfb, &c->pfb[B], &c->fb[B]);
         rot3(&c->qstat, &c->pstat, &c->stat);
-        for (int L = 0; L < c->nlev; L++) {
+        for (int L = B; L < c->nlev; L++) {
             swapbuf(&c->fa[L], &c->pfa[L]);
-            if (L)
+            if (L != B)
                 swapbuf(&c->fb[L], &c->pfb[L]);
         }
         c->have_q = c->have_prev;
@@ -1520,8 +1528,8 @@ static void estimate(mb_ctx *c, int dir)
     int kp = fidx(c, 1);
     int kx = dir ? c->ib : kp, ky = dir ? kp : c->ib;
     vbuf *F = dir ? c->fb : c->fa, *T = dir ? c->pfb : c->pfa;
-    int top = c->nlev - 1;
-    for (int L = top; L >= 0; L--) {
+    int top = c->nlev - 1, B = mbase(c);
+    for (int L = top; L >= B; L--) {
         const vimg *X = lev_img(c, kx, L), *Y = lev_img(c, ky, L);
         int nb = c->bw[L] * c->bh[L];
         int have = 0;
@@ -1531,7 +1539,7 @@ static void estimate(mb_ctx *c, int dir)
             dispatch(c, &c->p_full, r, &pc, (uint32_t)nb, 1);
             have = 1;
         }
-        int niter = L == 0 ? c->p.iters0 : c->p.iters;
+        int niter = L == B ? c->p.iters0 : c->p.iters;
         for (int it = 0; it < niter; it++) {
             int flags = (have ? 1 : 0) | (L < top ? 2 : 0) | (c->have_prev ? 4 : 0) | (dir ? 8 : 0);
             pcs pc = {{c->bw[L], c->bh[L], c->lw[L], c->lh[L], L < top ? c->bw[L + 1] : 1, L < top ? c->bh[L + 1] : 1,
@@ -1553,8 +1561,8 @@ static void estimate(mb_ctx *c, int dir)
             swapbuf(&F[L], &c->tmp[L]);
             have = 1;
         }
-        if (L <= 1 && (c->p.refine || L == 0)) {
-            pcs pc = {{c->bw[L], c->bh[L], c->lw[L], c->lh[L], L == 0 && dir == 0, c->p.refine, L == 0, dir}, {0}};
+        if (L <= B + 1 && (c->p.refine || L == B)) {
+            pcs pc = {{c->bw[L], c->bh[L], c->lw[L], c->lh[L], L == B && dir == 0, c->p.refine, L == B, dir}, {0}};
             set_dc(c, &pc);
             vres r[4] = {{X, NULL}, {Y, NULL}, {NULL, &F[L]}, {NULL, &c->stat}};
             dispatch(c, &c->p_refine, r, &pc, (uint32_t)(nb + 3) / 4, 1);
@@ -1564,35 +1572,35 @@ static void estimate(mb_ctx *c, int dir)
 
 static void cross_fix(mb_ctx *c, int dir)
 {
-    int bw = c->bw[0], bh = c->bh[0], nb = bw * bh;
+    int B = mbase(c), bw = c->bw[B], bh = c->bh[B], nb = bw * bh;
     int kp = fidx(c, 1);
     vkCmdFillBuffer(S(c)->cb, c->xkeys.buf, 0, VK_WHOLE_SIZE, 0xffffffffu);
     barrier(c);
     {
         pcs pc = {{bw, bh, 0, 0, 0}, {1.0f}};
-        vres r[2] = {{NULL, dir ? &c->fa[0] : &c->fb[0]}, {NULL, &c->xkeys}};
+        vres r[2] = {{NULL, dir ? &c->fa[B] : &c->fb[B]}, {NULL, &c->xkeys}};
         dispatch(c, &c->p_proj, r, &pc, (uint32_t)(nb + 63) / 64, 1);
     }
     vbuf *F = dir ? c->fb : c->fa;
-    pcs pc = {{bw, bh, c->lw[0], c->lh[0]}, {0, 0, 0, 0, c->p.pen_xfix, c->p.pen_len, 0, 0, c->p.xrel, c->p.xabs, c->p.xmin}};
-    vres r[6] = {{lev_img(c, dir ? c->ib : kp, 0), NULL}, {lev_img(c, dir ? kp : c->ib, 0), NULL}, {NULL, &F[0]},
-                 {NULL, &c->tmp[0]}, {NULL, dir ? &c->fa[0] : &c->fb[0]}, {NULL, &c->xkeys}};
+    pcs pc = {{bw, bh, c->lw[B], c->lh[B]}, {0, 0, 0, 0, c->p.pen_xfix, c->p.pen_len, 0, 0, c->p.xrel, c->p.xabs, c->p.xmin}};
+    vres r[6] = {{lev_img(c, dir ? c->ib : kp, B), NULL}, {lev_img(c, dir ? kp : c->ib, B), NULL}, {NULL, &F[B]},
+                 {NULL, &c->tmp[B]}, {NULL, dir ? &c->fa[B] : &c->fb[B]}, {NULL, &c->xkeys}};
     dispatch(c, &c->p_cross, r, &pc, (uint32_t)(nb + 63) / 64, 1);
-    swapbuf(&F[0], &c->tmp[0]);
+    swapbuf(&F[B], &c->tmp[B]);
 }
 
 static void local_fix(mb_ctx *c, int dir)
 {
-    int bw = c->bw[0], bh = c->bh[0], nb = bw * bh;
+    int B = mbase(c), bw = c->bw[B], bh = c->bh[B], nb = bw * bh;
     int kp = fidx(c, 1);
     vbuf *F = dir ? c->fb : c->fa;
     int chk = c->p.xchk && (dir || c->have_prev);
-    pcs pc = {{bw, bh, c->lw[0], c->lh[0], chk, dir},
+    pcs pc = {{bw, bh, c->lw[B], c->lh[B], chk, dir},
               {0, 0, 0, 0, 0, c->p.pen_len, c->p.tsup_rel, c->p.tsup_abs, c->p.xrel, c->p.xabs, c->p.xnoise, c->p.xbad, c->p.xr, c->p.xs}};
-    vres r[6] = {{lev_img(c, dir ? c->ib : kp, 0), NULL}, {lev_img(c, dir ? kp : c->ib, 0), NULL}, {NULL, &F[0]},
-                 {NULL, &c->tmp[0]}, {NULL, dir ? &c->fa[0] : (c->have_prev ? &c->pfb[0] : &c->dummy)}, {NULL, &c->stat}};
+    vres r[6] = {{lev_img(c, dir ? c->ib : kp, B), NULL}, {lev_img(c, dir ? kp : c->ib, B), NULL}, {NULL, &F[B]},
+                 {NULL, &c->tmp[B]}, {NULL, dir ? &c->fa[B] : (c->have_prev ? &c->pfb[B] : &c->dummy)}, {NULL, &c->stat}};
     dispatch(c, &c->p_local, r, &pc, (uint32_t)(nb + 63) / 64, 1);
-    swapbuf(&F[0], &c->tmp[0]);
+    swapbuf(&F[B], &c->tmp[B]);
 }
 
 static void run_me(mb_ctx *c)
@@ -1609,7 +1617,8 @@ static void run_me(mb_ctx *c)
         cross_fix(c, dir);
     for (int dir = 0; dir < 2 && c->p.xloc; dir++)
         local_fix(c, dir);
-    pcs pc = {{c->bw[0] * c->bh[0]}, {(float)(STAT_SCALE / ((double)c->bw[0] * c->bh[0] * 256)), (float)c->p.scut, (float)c->p.scut_rel,
+    int B = mbase(c);
+    pcs pc = {{c->bw[B] * c->bh[B]}, {(float)(STAT_SCALE / ((double)c->bw[B] * c->bh[B] * 256)), (float)c->p.scut, (float)c->p.scut_rel,
                     (float)c->p.zcut_rel, (float)c->p.zcut_min, c->p.cut_sd, c->p.cut_kmin}};
     vres r[2] = {{NULL, &c->stat}, {NULL, &c->hist}};
     dispatch(c, &c->p_cutdec, r, &pc, 1, 1);
@@ -1822,16 +1831,16 @@ int mb_submit(mb_ctx *c, double t)
     }
     if (!c->me_valid)
         run_me(c);
-    int ka, kb, kc, kz, past;
+    int ka, kb, kc, kz, past, lb = mbase(c);
     vbuf *FA0, *FB0, *NFA, *PFB, *SC, *SP;
     if (la) {
         ka = fidx(c, 2), kb = fidx(c, 1), kc = fidx(c, 0), kz = fidx(c, 3);
-        FA0 = &c->pfa[0], FB0 = &c->pfb[0], NFA = &c->fa[0], PFB = &c->qfb;
+        FA0 = &c->pfa[lb], FB0 = &c->pfb[lb], NFA = &c->fa[lb], PFB = &c->qfb;
         SC = &c->pstat, SP = &c->qstat;
         past = c->have_q;
     } else {
         ka = fidx(c, 1), kb = fidx(c, 0), kc = kb, kz = fidx(c, 2);
-        FA0 = &c->fa[0], FB0 = &c->fb[0], NFA = &c->dummy, PFB = &c->pfb[0];
+        FA0 = &c->fa[lb], FB0 = &c->fb[lb], NFA = &c->dummy, PFB = &c->pfb[lb];
         SC = &c->stat, SP = &c->pstat;
         past = c->have_prev;
     }
@@ -1840,7 +1849,7 @@ int mb_submit(mb_ctx *c, double t)
     c->last_fa = *FA0;
     c->last_fb = *FB0;
     gframe *A = &c->fr[ka], *B = &c->fr[kb];
-    int bw = c->bw[0], bh = c->bh[0], nb = bw * bh;
+    int bw = c->bw[lb], bh = c->bh[lb], nb = bw * bh;
     vkCmdFillBuffer(S(c)->cb, c->slots.buf, 0, VK_WHOLE_SIZE, 0xffffffffu);
     vkCmdFillBuffer(S(c)->cb, c->eslots.buf, 0, VK_WHOLE_SIZE, 0xffffffffu);
     barrier(c);
@@ -1858,12 +1867,12 @@ int mb_submit(mb_ctx *c, double t)
     }
     vbuf *tfin = &c->dummy, *tfout = &c->tf0;
     for (int pass = 0; pass < c->p.sel_passes; pass++) {
-        pcs pc = {{bw, bh, c->fmt.w, c->fmt.h, pass, la, past, c->p.tsup, (int)lrintf(c->p.tsup_rel * 100), (int)lrintf(c->p.tsup_abs * 100), (int)c->p.tsup_pen, (int)lrintf(c->p.tsup_min * 100), c->p.tref, c->p.tz_pen, c->p.twaive},
+        pcs pc = {{bw, bh, c->lw[lb], c->lh[lb], pass, la, past, c->p.tsup, (int)lrintf(c->p.tsup_rel * 100), (int)lrintf(c->p.tsup_abs * 100), (int)c->p.tsup_pen, (int)lrintf(c->p.tsup_min * 100), c->p.tref, c->p.tz_pen, c->p.twaive},
                   {(float)t, c->p.pen_inc, c->p.cthr, c->p.fg_sel, 0, 0, c->p.pen_one, c->p.one_rel, c->p.one_min, c->p.one_tex,
                    c->p.unc_min, (float)c->p.uncov, c->p.one_sw, c->p.unc_cont * 0.01f}};
         set_dc(c, &pc);
-        vres r[14] = {{lev_img(c, ka, 0), NULL}, {lev_img(c, kb, 0), NULL}, {lev_img(c, kc, 0), NULL},
-                      {lev_img(c, kz, 0), NULL}, {NULL, FA0}, {NULL, FB0}, {NULL, &c->slots}, {NULL, tfin},
+        vres r[14] = {{lev_img(c, ka, lb), NULL}, {lev_img(c, kb, lb), NULL}, {lev_img(c, kc, lb), NULL},
+                      {lev_img(c, kz, lb), NULL}, {NULL, FA0}, {NULL, FB0}, {NULL, &c->slots}, {NULL, tfin},
                       {NULL, tfout}, {NULL, NFA}, {NULL, PFB}, {NULL, &c->stat}, {NULL, SP}, {NULL, &c->eslots}};
         dispatch(c, &c->p_sel, r, &pc, (uint32_t)(nb + 3) / 4, 1);
         tfin = tfout;
@@ -1883,13 +1892,14 @@ int mb_submit(mb_ctx *c, double t)
     }
     const vimg *ac2 = c->fmt.nv ? &A->c1 : &A->c2, *bc2 = c->fmt.nv ? &B->c1 : &B->c2;
     {
-        pcs pc = {{c->fmt.w, c->fmt.h, bw, bh, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y, c->fmt.nv}, {(float)t, luma_scale(c)}};
+        pcs pc = {{c->fmt.w, c->fmt.h, bw, bh, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y, c->fmt.nv, 0, 0, 0, 0, 0, 0, lb},
+                  {(float)t, luma_scale(c)}};
         vres r[6] = {{&A->c1, NULL}, {&B->c1, NULL}, {ac2, NULL}, {bc2, NULL}, {NULL, tfin}, {NULL, &c->ill0}};
         dispatch(c, &c->p_illum, r, &pc, (uint32_t)(nb + 63) / 64, 1);
         pcs pm = {{bw, bh}};
         vres rm[2] = {{NULL, &c->ill0}, {NULL, &c->ill1}};
         dispatch(c, &c->p_ilmed, rm, &pm, (uint32_t)(nb + 63) / 64, 1);
-        pcs pa = {{bw, bh, c->fmt.w, c->fmt.h, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y, c->fmt.nv},
+        pcs pa = {{bw, bh, c->fmt.w, c->fmt.h, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y, c->fmt.nv, 0, 0, 0, 0, 0, 0, lb},
                   {(float)t, 255.0f * luma_scale(c), c->p.ag_lo, c->p.ag_hi, c->p.ag_flat, 0,
                    c->bps == 1 ? 128.0f / 255.0f : c->lnorm ? (float)(1 << (c->fmt.depth - 1)) / 65535.0f : 0.5f, c->p.ag_sat}};
         pcs pg = {{bw, bh}};
@@ -1903,15 +1913,15 @@ int mb_submit(mb_ctx *c, double t)
         dispatch(c, &c->p_agspread, rs, &ps, (uint32_t)(nb + 63) / 64, 1);
     }
     {
-        pcs pc = {{bw, bh, c->fmt.w, c->fmt.h, c->p.sub_ref},
-                  {(float)t, c->p.sub_thr, c->p.pen_sub, luma_scale(c), c->p.pen_sref}};
-        vres r[5] = {{lev_img(c, ka, 0), NULL}, {lev_img(c, kb, 0), NULL}, {NULL, tfin}, {NULL, &c->tf4}, {NULL, &c->ill1}};
+        pcs pc = {{bw, bh, c->lw[lb], c->lh[lb], c->p.sub_ref},
+                  {(float)t, c->p.sub_thr / (float)(1 << lb), c->p.pen_sub, luma_scale(c), c->p.pen_sref}};
+        vres r[5] = {{lev_img(c, ka, lb), NULL}, {lev_img(c, kb, lb), NULL}, {NULL, tfin}, {NULL, &c->tf4}, {NULL, &c->ill1}};
         dispatch(c, &c->p_sub, r, &pc, (uint32_t)(nb * 4 + 63) / 64, 1);
     }
     {
         float maxv, step;
         out_range(c, &maxv, &step);
-        pcs pc = {{c->fmt.w, c->fmt.h, bw, bh, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y},
+        pcs pc = {{c->fmt.w, c->fmt.h, bw, bh, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y, 0, 0, 0, 0, 0, 0, 0, lb},
                   {(float)t, c->p.sigma, c->p.pen_occ, c->p.pen_bad, c->p.pen_fb, c->p.wprior, c->p.cthr, c->p.pen_fbm,
                    luma_scale(c), maxv, step, 0, c->p.fg_pix, c->p.ws_lo, c->p.ws_hi, c->p.ag_sw}};
         vres r[19] = {{&A->y, NULL},  {&B->y, NULL},  {&A->c1, NULL},   {&B->c1, NULL},
@@ -1951,7 +1961,7 @@ int mb_debug_field(mb_ctx *c, int which, float *out, int *w, int *h)
     vbuf *f = which == 0 ? &c->last_fa : which == 1 ? &c->last_fb : c->last_tf;
     if (!f || !f->buf)
         return -1;
-    int n = c->bw[0] * c->bh[0];
+    int n = c->bw[mbase(c)] * c->bh[mbase(c)];
     vbuf tmp;
     if (buf_create(c, &tmp, (VkDeviceSize)n * 16, 1) < 0 || cmd_begin(c) < 0) {
         buf_free(c, &tmp);
@@ -1965,8 +1975,8 @@ int mb_debug_field(mb_ctx *c, int which, float *out, int *w, int *h)
         return -1;
     }
     memcpy(out, tmp.map, (size_t)n * 16);
-    *w = c->bw[0];
-    *h = c->bh[0];
+    *w = c->bw[mbase(c)];
+    *h = c->bh[mbase(c)];
     buf_free(c, &tmp);
     return 0;
 }
@@ -1990,7 +2000,7 @@ static slot *pop_slot(mb_ctx *c, int *cut)
     c->fifo_n--;
     slot *sl = &c->sl[i];
     slot_wait(c, i);
-    double e = ((uint32_t *)sl->statcopy.map)[0] * STAT_SCALE / ((double)c->bw[0] * c->bh[0] * 256);
+    double e = ((uint32_t *)sl->statcopy.map)[0] * STAT_SCALE / ((double)c->bw[mbase(c)] * c->bh[mbase(c)] * 256);
     *cut = ((uint32_t *)sl->statcopy.map)[2] != 0;
     c->st.mean_err = e;
     c->st.scene_cut = *cut;
@@ -2123,6 +2133,7 @@ static void default_params(params *p)
     p->bar_wait = 48;
     p->bars = 1;
     p->tz_pen = 2048;
+    p->me_half = -1;
     p->ag_lo = 24;
     p->ag_hi = 48;
     p->ag_flat = 32;
@@ -2142,6 +2153,14 @@ int mb_set_param(mb_ctx *c, const char *name, double v)
 {
     params *p = &c->p;
 #define P_(N) if (!strcmp(name, #N)) { p->N = v; return 0; }
+    if (!strcmp(name, "me_half")) {
+        p->me_half = (int)v;
+        int mb = c->mb;
+        set_geom(c);
+        int nm = c->mb;
+        c->mb = mb;
+        return c->ok && nm != mb ? set_crop(c, c->x0, c->y0, c->fmt.w, c->fmt.h) : 0;
+    }
     if (!strcmp(name, "sel_passes") || !strcmp(name, "iters0")) {
         if (v < 1)
             return -1;

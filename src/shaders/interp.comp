@@ -39,16 +39,11 @@ layout(binding = 11, r8) uniform writeonly image2D oC2;
 #define NC 5
 
 int bw, bh;
+float ms;
 
-vec4 illum_at(ivec2 q0, int bxA, int byA)
+vec2 tome(vec2 p)
 {
-    vec4 s = vec4(0.0);
-    for (int k = 0; k < 4; k++) {
-        ivec2 b = ivec2(bxA + (k & 1), byA + (k >> 1));
-        vec2 w = max(vec2(0.0), 1.0 - abs(vec2(q0) + 0.5 - vec2(b * 8) - 3.5) / 8.0);
-        s += w.x * w.y * vec4(ill[bidx(b, ivec2(bw, bh))].xyz, 1.0);
-    }
-    return s / max(s.w, 1e-6);
+    return (p + 0.5) / ms - 0.5;
 }
 
 vec4 crw(float f)
@@ -136,7 +131,8 @@ float outq(float v)
 
 float okf(int which, vec2 p, vec2 u, float thr)
 {
-    vec2 q = (p - 3.5) / 8.0;
+    vec2 q = (p / ms - 3.5) / 8.0;
+    u /= ms;
     ivec2 b0 = ivec2(floor(q));
     vec2 fr = q - vec2(b0);
     float s = 0.0;
@@ -154,6 +150,8 @@ void main()
     int W = pc.i0.x, H = pc.i0.y;
     bw = pc.i0.z;
     bh = pc.i0.w;
+    int sb = pc.i3.w;
+    ms = float(1 << sb);
     ivec2 q0 = ivec2(gl_GlobalInvocationID.xy) * 2;
     if (q0.x >= W || q0.y >= H)
         return;
@@ -180,7 +178,8 @@ void main()
             }
         return;
     }
-    int qx = q0.x >> 2, qy = q0.y >> 2;
+    ivec2 qm = q0 >> sb;
+    int qx = qm.x >> 2, qy = qm.y >> 2;
     int bxA = (qx & 1) != 0 ? qx / 2 : qx / 2 - 1;
     int byA = (qy & 1) != 0 ? qy / 2 : qy / 2 - 1;
 
@@ -190,12 +189,13 @@ void main()
     float fbs[4] = float[4](0.0, 0.0, 0.0, 0.0), fbn[4] = float[4](0.0, 0.0, 0.0, 0.0), nws[4] = float[4](0.0, 0.0, 0.0, 0.0);
     int nc = 0;
     bool hasm = false;
+    vec4 il = vec4(0.0);
     for (int k = 0; k < 4; k++) {
         ivec2 b = ivec2(bxA + (k & 1), byA + (k >> 1));
         int bi = bidx(b, ivec2(bw, bh));
-        ivec2 sc = clamp(b * 2 + clamp((q0 - b * 8) >> 2, ivec2(0), ivec2(1)), ivec2(0), ivec2(bw, bh) * 2 - 1);
+        ivec2 sc = clamp(b * 2 + clamp((qm - b * 8) >> 2, ivec2(0), ivec2(1)), ivec2(0), ivec2(bw, bh) * 2 - 1);
         vec4 tv = tf[sc.y * bw * 2 + sc.x];
-        vec2 u = tv.xy;
+        vec2 u = tv.xy * ms;
         int md = int(tv.z);
         int ci = -1;
         for (int i = 0; i < nc; i++)
@@ -211,15 +211,16 @@ void main()
         }
         vec2 cb = vec2(b * 8) + 3.5;
         for (int j = 0; j < 4; j++) {
-            vec2 p = vec2(q0 + ivec2(j & 1, j >> 1));
+            vec2 p = tome(vec2(q0 + ivec2(j & 1, j >> 1)));
             vec2 w2 = max(vec2(0.0), 1.0 - abs(p - cb) / 8.0);
             cw[ci][j] += w2.x * w2.y;
             fbs[j] += w2.x * w2.y * fbw[bi];
             nws[j] += w2.x * w2.y * nwb[bi];
             fbn[j] += w2.x * w2.y;
+            il += w2.x * w2.y * vec4(ill[bi].xyz, 1.0);
         }
     }
-    vec4 il = illum_at(q0, bxA, byA);
+    il /= max(il.w, 1e-6);
     float dy = il.x;
     float dcl = dy * 255.0 * pc.f2.x;
     int fbi = nc++;
@@ -233,7 +234,7 @@ void main()
     for (int i = 0; i < nc; i++) {
         vec2 u = cu[i];
         vec2 oa = -t * u, ob = (1.0 - t) * u;
-        float thr = cons_thr(pc.f1.z, u);
+        float thr = cons_thr(pc.f1.z, u / ms);
         vec2 pq = vec2(q0) + 0.5;
         float sA = 0.0, sB = 0.0;
         if (cm[i] != 0) {
@@ -329,7 +330,7 @@ void main()
         nn[j] = fbn[j] > 0.0 ? nws[j] / fbn[j] : 0.0;
         nq += nn[j] * 0.25;
     }
-    vec2 gv = gmv[0].xy, goa = -t * gv, gob = (1.0 - t) * gv;
+    vec2 gv = gmv[0].xy * ms, goa = -t * gv, gob = (1.0 - t) * gv;
     float gsw = 0.0;
     int sx = pc.i1.z, sy = pc.i1.w;
     int CW = pc.i1.x, CH = pc.i1.y;

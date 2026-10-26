@@ -27,12 +27,13 @@ void main()
         return;
     }
     float t = pc.f0.x, sc = pc.f0.y;
-    vec2 u = gm[0].xy, inv = 1.0 / vec2(pc.i0.zw), cinv = 1.0 / vec2(pc.i1.xy), cs = vec2(1 << pc.i1.z, 1 << pc.i1.w);
-    vec2 b0 = vec2(id % bw, id / bw) * 8.0;
+    float m = float(1 << pc.i3.w);
+    vec2 u = gm[0].xy * m, inv = 1.0 / vec2(pc.i0.zw), cinv = 1.0 / vec2(pc.i1.xy), cs = vec2(1 << pc.i1.z, 1 << pc.i1.w);
+    vec2 b0 = vec2(id % bw, id / bw) * 8.0 * m;
     float dc = 0.0, sa = 0.0, sb = 0.0;
     vec2 lo = vec2(1e30), hi = vec2(-1e30);
     for (int k = 0; k < 9; k++) {
-        vec2 p = b0 + vec2(k % 3, k / 3) * 3.0 + 1.0;
+        vec2 p = b0 + (vec2(k % 3, k / 3) * 3.0 + 1.0) * m;
         vec2 pa = p - t * u, pb = p + (1.0 - t) * u;
         vec2 ca = chroma(AC1, AC2, pa / cs * cinv), cb = chroma(BC1, BC2, pb / cs * cinv);
         vec2 d = abs(ca - cb);

@@ -15,9 +15,10 @@ void main()
     int id = int(gl_GlobalInvocationID.x);
     if (id >= bw * bh)
         return;
-    vec2 b0 = vec2(id % bw, id / bw) * 8.0;
+    float m = float(1 << pc.i3.w);
+    vec2 b0 = vec2(id % bw, id / bw) * 8.0 * m;
     float t = pc.f0.x;
-    vec2 u = tf[id].xy, oa = -t * u, ob = (1.0 - t) * u;
+    vec2 u = tf[id].xy * m, oa = -t * u, ob = (1.0 - t) * u;
     ivec2 sh = pc.i1.zw;
     vec2 cs = vec2(1 << sh.x, 1 << sh.y), cinv = 1.0 / vec2(pc.i1.xy);
     vec2 c0 = b0 / cs, coa = oa / cs, cob = ob / cs;
@@ -25,7 +26,7 @@ void main()
     int nx = 4 >> sh.x, ny = 4 >> sh.y;
     for (int y = 0; y < ny; y++)
         for (int x = 0; x < nx; x++) {
-            vec2 p = c0 + vec2(2 * x + 1, 2 * y + 1);
+            vec2 p = c0 + vec2(2 * x + 1, 2 * y + 1) * m;
             vec2 ca = (p + coa) * cinv, cb = (p + cob) * cinv;
             if (pc.i2.x != 0)
                 dc += textureLod(AC1, ca, 0.0).rg - textureLod(BC1, cb, 0.0).rg;
