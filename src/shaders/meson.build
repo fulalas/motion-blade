@@ -1,7 +1,7 @@
 glslc = find_program('glslc', native: true)
 memc_glslc = [glslc, '-O', '--target-env=vulkan1.1', '-mfmt=c', '-MD', '-MF', '@DEPFILE@', '-o', '@OUTPUT@', '@INPUT@']
 memc_shaders = []
-foreach s : ['conf', 'down', 'norm', 'me_full', 'me_iter', 'me_refine', 'me_cross', 'me_local', 'tproj', 'tsel', 'illum', 'ilmed', 'cutdec']
+foreach s : ['conf', 'down', 'norm', 'me_full', 'me_iter', 'me_refine', 'me_cross', 'me_local', 'tproj', 'tsel', 'vmed', 'tsub', 'illum', 'ilmed', 'cutdec']
     memc_shaders += custom_target(s + '.h', input: s + '.comp', output: s + '.h', depfile: s + '.h.d',
                                   command: memc_glslc)
 endforeach

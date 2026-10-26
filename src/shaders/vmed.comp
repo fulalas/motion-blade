@@ -1,0 +1,39 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer TIn { vec4 ti[]; };
+layout(std430, binding = 1) writeonly buffer TOut { vec4 to[]; };
+
+void main()
+{
+    int bw = pc.i0.x, bh = pc.i0.y;
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= bw * bh)
+        return;
+    vec4 v = ti[id];
+    if (int(v.z) != 0) {
+        to[id] = v;
+        return;
+    }
+    ivec2 b = ivec2(id % bw, id / bw);
+    vec2 nv[9];
+    int n = 0;
+    for (int k = 0; k < 9; k++) {
+        vec4 q = ti[bidx(b + ivec2(k % 3 - 1, k / 3 - 1), ivec2(bw, bh))];
+        if (int(q.z) == 0)
+            nv[n++] = q.xy;
+    }
+    vec2 med = v.xy;
+    float bd = 1e30;
+    for (int i = 0; i < n; i++) {
+        float d = 0.0;
+        for (int j = 0; j < n; j++)
+            d += l1(nv[i] - nv[j]);
+        if (d < bd) {
+            bd = d;
+            med = nv[i];
+        }
+    }
+    to[id] = l1(med - v.xy) > pc.f0.x ? vec4(med, 0.0, v.w) : v;
+}

@@ -118,8 +118,10 @@ void main()
     for (int k = 0; k < 4; k++) {
         ivec2 b = ivec2(bxA + (k & 1), byA + (k >> 1));
         int bi = bidx(b, ivec2(bw, bh));
-        vec2 u = tf[bi].xy;
-        int md = int(tf[bi].z);
+        ivec2 sc = clamp(b * 2 + clamp((q0 - b * 8) >> 2, ivec2(0), ivec2(1)), ivec2(0), ivec2(bw, bh) * 2 - 1);
+        vec4 tv = tf[sc.y * bw * 2 + sc.x];
+        vec2 u = tv.xy;
+        int md = int(tv.z);
         int ci = -1;
         for (int i = 0; i < nc; i++)
             if (cu[i] == u)
@@ -203,6 +205,20 @@ void main()
                 float qa = round(sA * (1.0 - sB) * 7.0), qb = round((1.0 - sA) * sB * 7.0);
                 cst = sA * sB * max(0.0, e - pc.f3.x * clamp(l1(u) * 0.5, 0.0, 1.0)) +
                       (qa + qb) / 7.0 * pc.f0.z + (1.0 - sA) * (1.0 - sB) * (e + pc.f0.w);
+                if (pc.f3.z > 0.0) {
+                    float dm = 1e30;
+                    for (int dy = 0; dy < 3; dy++)
+                        for (int dx = 0; dx < 3; dx++)
+                            dm = min(dm, D[(jy + dy) * 4 + jx + dx]);
+                    float s7 = round(smoothstep(pc.f3.y, pc.f3.z, dm) * smoothstep(0.0, 0.25, sA * sB) * 7.0);
+                    if (t < 0.5) {
+                        qa = max(qa, s7);
+                        qb = min(qb, 7.0 - qa);
+                    } else {
+                        qb = max(qb, s7);
+                        qa = min(qa, 7.0 - qb);
+                    }
+                }
                 al = uint(qa) | (uint(qb) << 3);
             }
             cost[i][j] = cst;

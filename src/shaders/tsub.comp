@@ -1,0 +1,75 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(binding = 0) uniform sampler2D A;
+layout(binding = 1) uniform sampler2D B;
+layout(std430, binding = 2) readonly buffer TF { vec4 tf[]; };
+layout(std430, binding = 3) writeonly buffer TF4 { vec4 t4[]; };
+layout(std430, binding = 4) readonly buffer ILL { vec4 ill[]; };
+
+float dc;
+
+float cost(ivec2 cell, vec2 u)
+{
+    float t = pc.f0.x;
+    vec2 inv = 1.0 / vec2(pc.i0.zw), p0 = vec2(cell * 4) + 0.5;
+    float s = 0.0;
+    for (int k = 0; k < 16; k++) {
+        vec2 p = p0 + vec2(k & 3, k >> 2);
+        s += abs(textureLod(A, (p - t * u) * inv, 0.0).r - textureLod(B, (p + (1.0 - t) * u) * inv, 0.0).r - dc);
+    }
+    return s * 255.0;
+}
+
+void main()
+{
+    int bw = pc.i0.x, bh = pc.i0.y, cw = bw * 2;
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= cw * bh * 2)
+        return;
+    ivec2 cell = ivec2(id % cw, id / cw), b = cell >> 1;
+    vec4 own = tf[bidx(b, ivec2(bw, bh))];
+    dc = ill[bidx(b, ivec2(bw, bh))].x * pc.f0.w;
+    t4[id] = own;
+    if (int(own.z) != 0 || pc.f0.y <= 0.0)
+        return;
+    vec2 cand[9];
+    int n = 0;
+    bool edge = false;
+    for (int k = 0; k < 9; k++) {
+        vec4 q = tf[bidx(b + ivec2(k % 3 - 1, k / 3 - 1), ivec2(bw, bh))];
+        if (int(q.z) != 0)
+            continue;
+        edge = edge || l1(q.xy - own.xy) > pc.f0.y;
+        bool dup = false;
+        for (int i = 0; i < n; i++)
+            dup = dup || cand[i] == q.xy;
+        if (!dup)
+            cand[n++] = q.xy;
+    }
+    if (!edge)
+        return;
+    float best = 1e30;
+    vec2 bv = own.xy;
+    for (int i = 0; i < n; i++) {
+        float s = cost(cell, cand[i]) + (cand[i] == own.xy ? 0.0 : pc.f0.z);
+        if (s < best) {
+            best = s;
+            bv = cand[i];
+        }
+    }
+    for (int r = pc.i1.x; r > 0; r--) {
+        vec2 c0 = bv;
+        for (int k = 0; k < 8; k++) {
+            vec2 u = c0 + vec2(ivec2[8](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1), ivec2(-1, -1), ivec2(1, -1),
+                                        ivec2(-1, 1), ivec2(1, 1))[k]) * float(r);
+            float s = cost(cell, u) + pc.f1.x * l1(u - c0);
+            if (s < best) {
+                best = s;
+                bv = u;
+            }
+        }
+    }
+    t4[id] = vec4(bv, 0.0, own.w);
+}

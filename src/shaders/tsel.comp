@@ -140,7 +140,7 @@ void main()
     }
     float bs_c = 1e30;
     vec2 bs_v = vec2(0.0);
-    bool best_sup = true;
+    bool best_sup = true, best_ok = false;
     for (int i = 0; i < n2; i++) {
         vec2 u = cl[i];
         float ra[16], rb[16];
@@ -178,6 +178,7 @@ void main()
             best_v = u;
             best_m = m2;
             best_sup = sup;
+            best_ok = okA && okB;
         }
     }
     if (anysup && !best_sup && bs_c < 1e29 && pc.i3.x > 0) {
@@ -196,6 +197,8 @@ void main()
                 float thr = cons_thr(pc.f0.z, u);
                 bool okA = l1(fat(0, c - t * u) - u) <= thr;
                 bool okB = l1(fat(1, c + (1.0 - t) * u) + u) <= thr;
+                if (pass == 0 && !okA && !okB)
+                    continue;
                 float cost = s + pc.f0.y * ((both_sup(c, u, t) && pc.i3.z != 0) ? 0.0 : float(int(!okA) + int(!okB)));
                 if (okA && okB)
                     cost -= pc.f0.w * clamp(l1(u) * 0.5, 0.0, 1.0);
@@ -227,7 +230,7 @@ void main()
         }
     }
     float lim = pc.f1.w * best_c, best_rel = 1e30;
-    if ((fut || past) && lim > pc.f1.z && best_c > pc.f2.x) {
+    if ((fut || past) && lim > pc.f1.z && best_c > pc.f2.x && !best_ok) {
         if (fut)
             add(nfa[id].xy);
         if (past)
