@@ -49,6 +49,45 @@ vec4 illum_at(ivec2 q0, int bxA, int byA)
     return s / max(s.w, 1e-6);
 }
 
+struct Cub {
+    vec2 base, h, w0, w3, w12;
+    float nrm;
+    bool zero;
+};
+
+Cub cw_setup(vec2 pos)
+{
+    Cub c;
+    c.base = floor(pos - 0.5) + 0.5;
+    vec2 f = pos - c.base;
+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    c.w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    c.w3 = f * f * (-0.5 + 0.5 * f);
+    c.w12 = 1.0 + f * f * (-2.5 + 1.5 * f) + w2;
+    c.h = w2 / c.w12;
+    c.nrm = 1.0 / (c.w12.x * (c.w0.y + c.w12.y + c.w3.y) + c.w12.y * (c.w0.x + c.w3.x));
+    c.zero = f == vec2(0.0);
+    return c;
+}
+
+vec2 csamp(sampler2D T, Cub c, vec2 d, vec2 inv, bool two)
+{
+    vec2 t1 = c.base + d;
+    if (c.zero)
+        return texelFetch(T, clamp(ivec2(floor(t1)), ivec2(0), textureSize(T, 0) - 1), 0).rg;
+    vec2 t0 = (t1 - 1.0) * inv, t3 = (t1 + 2.0) * inv, t12 = (t1 + c.h) * inv, tc = (t1 + 0.5) * inv;
+    vec4 g0 = textureGather(T, tc, 0), g1 = two ? textureGather(T, tc, 1) : g0;
+    vec2 ctr = vec2(mix(mix(g0.w, g0.z, c.h.x), mix(g0.x, g0.y, c.h.x), c.h.y),
+                    mix(mix(g1.w, g1.z, c.h.x), mix(g1.x, g1.y, c.h.x), c.h.y));
+    vec2 v = (textureLod(T, vec2(t12.x, t0.y), 0.0).rg * (c.w12.x * c.w0.y) +
+              textureLod(T, vec2(t0.x, t12.y), 0.0).rg * (c.w0.x * c.w12.y) + ctr * (c.w12.x * c.w12.y) +
+              textureLod(T, vec2(t3.x, t12.y), 0.0).rg * (c.w3.x * c.w12.y) +
+              textureLod(T, vec2(t12.x, t3.y), 0.0).rg * (c.w12.x * c.w3.y)) * c.nrm;
+    vec2 lo = vec2(min(min(g0.x, g0.y), min(g0.z, g0.w)), min(min(g1.x, g1.y), min(g1.z, g1.w)));
+    vec2 hi = vec2(max(max(g0.x, g0.y), max(g0.z, g0.w)), max(max(g1.x, g1.y), max(g1.z, g1.w)));
+    return clamp(v, lo, hi);
+}
+
 float outq(float v)
 {
 #ifdef DEPTH16
@@ -152,12 +191,11 @@ void main()
     for (int j = 0; j < 4; j++)
         cw[fbi][j] = 1.0 - pc.f1.y;
 
-    float cost[NC][4], va[NC][4], vb[NC][4];
+    float cost[NC][4];
     uint am[4] = uint[4](0u, 0u, 0u, 0u);
     for (int i = 0; i < nc; i++) {
         vec2 u = cu[i];
-        vec2 oa = i == fbi ? vec2(0.0) : -t * u;
-        vec2 ob = i == fbi ? vec2(0.0) : (1.0 - t) * u;
+        vec2 oa = -t * u, ob = (1.0 - t) * u;
         float thr = cons_thr(pc.f1.z, u);
         vec2 pq = vec2(q0) + 0.5;
         float sA = 0.0, sB = 0.0;
@@ -169,7 +207,7 @@ void main()
             sB = okf(1, pq + ob, u, thr);
         }
         bool fb = i == fbi;
-        float D[16], PA[4], PB[4];
+        float D[16];
         for (int y = 0; y < 4; y++)
             for (int x = 0; x < 4; x++) {
                 vec2 p = vec2(q0 + ivec2(x - 1, y - 1)) + 0.5;
@@ -181,15 +219,6 @@ void main()
                 float b = textureLod(BY, (p + ob) * inv, 0.0).r;
 #endif
                 D[y * 4 + x] = abs((a - b) * 255.0 - dcl);
-                if (x >= 1 && x <= 2 && y >= 1 && y <= 2) {
-#ifdef DEPTH16
-                    PA[(y - 1) * 2 + x - 1] = textureLod(AY, (p + oa) * inv, 0.0).r;
-                    PB[(y - 1) * 2 + x - 1] = textureLod(BY, (p + ob) * inv, 0.0).r;
-#else
-                    PA[(y - 1) * 2 + x - 1] = a;
-                    PB[(y - 1) * 2 + x - 1] = b;
-#endif
-                }
             }
         for (int j = 0; j < 4; j++) {
             int jx = j & 1, jy = j >> 1;
@@ -225,8 +254,6 @@ void main()
             }
             cost[i][j] = cst;
             am[j] |= al << (6 * i);
-            va[i][j] = PA[j] - t * dy;
-            vb[i][j] = PB[j] + (1.0 - t) * dy;
         }
     }
     float wA[NC][4], wB[NC][4];
@@ -236,11 +263,11 @@ void main()
             mc = min(mc, cost[i][j]);
         float sw = 0.0, wt[NC];
         for (int i = 0; i < nc; i++) {
-            wt[i] = (pc.f1.y + cw[i][j]) * exp(-(cost[i][j] - mc) / pc.f0.y);
+            float e = exp(-(cost[i][j] - mc) / pc.f0.y);
+            wt[i] = e < 4.9e-4 ? 0.0 : (pc.f1.y + cw[i][j]) * e;
             sw += wt[i];
         }
         float f = fbn[j] > 0.0 ? fbs[j] / fbn[j] : 0.0;
-        float acc = 0.0;
         for (int i = 0; i < nc; i++) {
             float w = (1.0 - f) * wt[i] / sw + (i == fbi ? f : 0.0);
             uint c = (am[j] >> (6 * i)) & 63u;
@@ -248,11 +275,23 @@ void main()
             float al = t * (1.0 - qa - qb) + qb;
             wA[i][j] = w * (1.0 - al);
             wB[i][j] = w * al;
-            acc += wA[i][j] * va[i][j] + wB[i][j] * vb[i][j];
         }
+    }
+    float acc4[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    for (int i = 0; i < nc; i++) {
+        Cub xa = cw_setup(vec2(q0) + 0.5 - t * cu[i]), xb = cw_setup(vec2(q0) + 0.5 + (1.0 - t) * cu[i]);
+        for (int j = 0; j < 4; j++) {
+            if (wA[i][j] + wB[i][j] <= 0.0)
+                continue;
+            vec2 d = vec2(j & 1, j >> 1);
+            acc4[j] += wA[i][j] * (csamp(AY, xa, d, inv, false).x - t * dy) +
+                       wB[i][j] * (csamp(BY, xb, d, inv, false).x + (1.0 - t) * dy);
+        }
+    }
+    for (int j = 0; j < 4; j++) {
         ivec2 p = q0 + ivec2(j & 1, j >> 1);
         if (p.x < W && p.y < H)
-            imageStore(oY, p, vec4(outq(acc)));
+            imageStore(oY, p, vec4(outq(acc4[j])));
     }
 
     vec2 dcc = il.yz;
@@ -278,15 +317,16 @@ void main()
                     }
                 ca *= nrm;
                 cb *= nrm;
-                vec2 u = cu[i];
-                vec2 oa = i == fbi ? vec2(0.0) : -t * u / cs;
-                vec2 ob = i == fbi ? vec2(0.0) : (1.0 - t) * u / cs;
+                if (ca + cb <= 0.0)
+                    continue;
+                Cub xa = cw_setup(pc2 - t * cu[i] / cs), xb = cw_setup(pc2 + (1.0 - t) * cu[i] / cs);
 #ifdef NV
-                acc.xy += ca * (textureLod(AC1, (pc2 + oa) * cinv, 0.0).rg - t * dcc) + cb * (textureLod(BC1, (pc2 + ob) * cinv, 0.0).rg + (1.0 - t) * dcc);
+                vec2 a = csamp(AC1, xa, vec2(0.0), cinv, true), b = csamp(BC1, xb, vec2(0.0), cinv, true);
 #else
-                acc.x += ca * (textureLod(AC1, (pc2 + oa) * cinv, 0.0).r - t * dcc.x) + cb * (textureLod(BC1, (pc2 + ob) * cinv, 0.0).r + (1.0 - t) * dcc.x);
-                acc.y += ca * (textureLod(AC2, (pc2 + oa) * cinv, 0.0).r - t * dcc.y) + cb * (textureLod(BC2, (pc2 + ob) * cinv, 0.0).r + (1.0 - t) * dcc.y);
+                vec2 a = vec2(csamp(AC1, xa, vec2(0.0), cinv, false).x, csamp(AC2, xa, vec2(0.0), cinv, false).x);
+                vec2 b = vec2(csamp(BC1, xb, vec2(0.0), cinv, false).x, csamp(BC2, xb, vec2(0.0), cinv, false).x);
 #endif
+                acc.xy += ca * (a - t * dcc) + cb * (b + (1.0 - t) * dcc);
             }
 #ifdef NV
             imageStore(oC1, cp, vec4(outq(acc.x), outq(acc.y), 0.0, 0.0));
