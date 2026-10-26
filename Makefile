@@ -29,8 +29,8 @@ $(O)/interp16nv.h: $(S)/interp.comp $(S)/common.glsl
 	@mkdir -p $(O)
 	$(GLSLC) $(GFLAGS) -DNV -DDEPTH16 -o $@ $<
 
-eval_vk: tools/eval.c src/memc_vk.c src/memc.h $(SH)
-	$(CC) $(CFLAGS) -Isrc -Ibuild/eval -o $@ tools/eval.c src/memc_vk.c $(LDLIBS) -lvulkan
+eval_vk: tools/eval.c src/motionblade_vk.c src/motionblade.h $(SH)
+	$(CC) $(CFLAGS) -Isrc -Ibuild/eval -o $@ tools/eval.c src/motionblade_vk.c $(LDLIBS) -lvulkan
 
 clean:
 	rm -rf eval_vk build/eval

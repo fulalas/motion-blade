@@ -1,5 +1,5 @@
 #define _GNU_SOURCE
-#include "memc.h"
+#include "motionblade.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -129,7 +129,7 @@ static double ssim(const uint8_t *a, const uint8_t *b, int w, int h)
 
 typedef struct {
     uint8_t *buf;
-    memc_image im;
+    mb_image im;
 } conv;
 
 static void conv_alloc(conv *cv, int fm, int w, int h)
@@ -229,7 +229,7 @@ static void put_vec(FILE *fp, float x, float y, float scale)
     fwrite(px, 1, 3, fp);
 }
 
-static void dump_fields(memc_ctx *c, const char *path, int fw, int fh)
+static void dump_fields(mb_ctx *c, const char *path, int fw, int fh)
 {
     FILE *fp = fopen(path, "wb");
     if (!fp) {
@@ -239,7 +239,7 @@ static void dump_fields(memc_ctx *c, const char *path, int fw, int fh)
     float *f = malloc(sizeof(float) * 4 * (size_t)((fw + 7) / 8) * ((fh + 7) / 8));
     int w, h;
     for (int which = 0; which < 3; which++) {
-        if (memc_debug_field(c, which, f, &w, &h) < 0)
+        if (mb_debug_field(c, which, f, &w, &h) < 0)
             break;
         if (which == 0)
             fprintf(fp, "P6 %d %d 255\n", w, h * 3);
@@ -252,14 +252,14 @@ static void dump_fields(memc_ctx *c, const char *path, int fw, int fh)
 
 static void usage(void)
 {
-    fprintf(stderr, "eval in.y4m|in.mkv [-n frames] [-skip k] [-step s] [-mode memc|blend|repeat] [-cmp full.y4m]\n"
+    fprintf(stderr, "eval in.y4m|in.mkv [-n frames] [-skip k] [-step s] [-mode motionblade|blend|repeat] [-cmp full.y4m]\n"
                     "     [-o out.y4m] [-p name=value]... [-q]\n");
     exit(1);
 }
 
 int main(int argc, char **argv)
 {
-    const char *in = NULL, *out = NULL, *cmp = NULL, *mode = "memc";
+    const char *in = NULL, *out = NULL, *cmp = NULL, *mode = "motionblade";
     int maxn = 1000, step = 2, quiet = 0, skip = 0, nometric = 0, repeat = 1, fm = 0, dumpk = -1;
     char *params[64];
     int np = 0;
@@ -299,23 +299,23 @@ int main(int argc, char **argv)
     }
     int w = s.w, h = s.h;
     size_t ysz = (size_t)w * h, fsz = ysz * 3 / 2;
-    memc_format fmt = {w, h, fm == 2 ? 16 : fm == 3 ? 10 : 8, 1, 1, fm == 1 || fm == 2};
+    mb_format fmt = {w, h, fm == 2 ? 16 : fm == 3 ? 10 : 8, 1, 1, fm == 1 || fm == 2};
     conv ca, cb, co;
     if (fm) {
         conv_alloc(&ca, fm, w, h);
         conv_alloc(&cb, fm, w, h);
         conv_alloc(&co, fm, w, h);
     }
-    memc_ctx *c = memc_create(&fmt);
+    mb_ctx *c = mb_create(&fmt);
     if (!c) {
-        fprintf(stderr, "memc_create failed\n");
+        fprintf(stderr, "mb_create failed\n");
         return 1;
     }
     for (int i = 0; i < np; i++) {
         char *eq = strchr(params[i], '=');
         if (!eq) usage();
         *eq = 0;
-        if (memc_set_param(c, params[i], atof(eq + 1)) < 0) {
+        if (mb_set_param(c, params[i], atof(eq + 1)) < 0) {
             fprintf(stderr, "unknown param %s\n", params[i]);
             return 1;
         }
@@ -338,21 +338,21 @@ int main(int argc, char **argv)
     for (int rep_i = 0; rep_i < repeat; rep_i++)
     for (int k = 0; (k + 1) * step < s.n; k++) {
         if (k == 0 && rep_i > 0)
-            memc_reset(c);
+            mb_reset(c);
         uint8_t *A = s.f[k * step], *B = s.f[(k + 1) * step];
-        if (!strcmp(mode, "memc")) {
+        if (!strcmp(mode, "motionblade")) {
             for (int j = k == 0 ? 0 : k + 1 + la; j <= k + 1 + la; j++) {
                 if (j * step >= s.n) {
-                    memc_flush(c);
+                    mb_flush(c);
                     continue;
                 }
                 uint8_t *P = s.f[j * step];
                 if (fm) {
                     to_fmt(&cb, fm, P, w, h);
-                    memc_push(c, &cb.im);
+                    mb_push(c, &cb.im);
                 } else {
-                    memc_image ip = {{P, P + ysz, P + ysz + ysz / 4}, {w, w / 2, w / 2}};
-                    memc_push(c, &ip);
+                    mb_image ip = {{P, P + ysz, P + ysz + ysz / 4}, {w, w / 2, w / 2}};
+                    mb_push(c, &ip);
                 }
             }
         }
@@ -361,30 +361,30 @@ int main(int argc, char **argv)
         for (int m = 1; m < step; m++) {
             double t = (double)m / step;
             const uint8_t *R = res;
-            memc_stats st = {0};
+            mb_stats st = {0};
             if (cmp) {
                 if (k * step + m >= sc.n) {
                     fprintf(stderr, "%s has only %d frames\n", cmp, sc.n);
                     return 1;
                 }
                 R = sc.f[k * step + m];
-            } else if (!strcmp(mode, "memc")) {
-                memc_image io = {{res, res + ysz, res + ysz + ysz / 4}, {w, w / 2, w / 2}};
-                if (memc_interpolate(c, t, fm ? &co.im : &io) < 0) {
+            } else if (!strcmp(mode, "motionblade")) {
+                mb_image io = {{res, res + ysz, res + ysz + ysz / 4}, {w, w / 2, w / 2}};
+                if (mb_interpolate(c, t, fm ? &co.im : &io) < 0) {
                     fprintf(stderr, "interpolation failed at frame %d\n", k * step + m);
                     return 1;
                 }
                 if (fm)
                     from_fmt(&co, fm, res, w, h);
-                memc_get_stats(c, &st);
+                mb_get_stats(c, &st);
             } else if (!strcmp(mode, "blend")) {
                 for (size_t i = 0; i < fsz; i++)
                     res[i] = (uint8_t)lrint(A[i] * (1 - t) + B[i] * t);
             } else {
                 memcpy(res, t < 0.5 ? A : B, fsz);
             }
-            if (k * step + m == dumpk && !strcmp(mode, "memc")) {
-                dump_fields(c, "/tmp/memc-out/fields.ppm", w, h);
+            if (k * step + m == dumpk && !strcmp(mode, "motionblade")) {
+                dump_fields(c, "/tmp/motionblade-out/fields.ppm", w, h);
             }
             const uint8_t *T = s.f[k * step + m];
             double p = nometric ? 0 : psnr(R, T, ysz), q = nometric ? 0 : ssim(R, T, w, h);
@@ -417,6 +417,6 @@ int main(int argc, char **argv)
            sit / cnt, cnt);
     if (fo)
         fclose(fo);
-    memc_destroy(c);
+    mb_destroy(c);
     return 0;
 }

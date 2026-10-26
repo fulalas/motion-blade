@@ -14,7 +14,7 @@
 #include "video/mp_image.h"
 #include "video/mp_image_pool.h"
 
-#include "video/filter/memc/memc.h"
+#include "video/filter/motionblade/motionblade.h"
 
 #define MAXQ 32
 
@@ -34,7 +34,7 @@ struct priv {
     struct m_config_cache *vo_opts_cache;
     struct mp_pin *in;
     struct mp_image_pool *pool;
-    memc_ctx *ctx;
+    mb_ctx *ctx;
     int imgfmt, w, h;
     bool disabled;
     struct mp_image *prev, *cur;
@@ -54,7 +54,7 @@ static void clear_state(struct priv *p)
     p->last_pts = MP_NOPTS_VALUE;
     p->fast = false;
     if (p->ctx)
-        memc_reset(p->ctx);
+        mb_reset(p->ctx);
     for (int i = 0; i < p->nout; i++)
         mp_frame_unref(&p->outq[i].frame);
     p->nout = 0;
@@ -70,13 +70,13 @@ static void f_destroy(struct mp_filter *f)
 {
     struct priv *p = f->priv;
     clear_state(p);
-    memc_destroy(p->ctx);
+    mb_destroy(p->ctx);
     p->ctx = NULL;
 }
 
-static memc_image to_memc(struct mp_image *mpi)
+static mb_image to_mb(struct mp_image *mpi)
 {
-    memc_image im = {0};
+    mb_image im = {0};
     for (int i = 0; i < 3 && i < mpi->num_planes; i++) {
         im.data[i] = mpi->planes[i];
         im.stride[i] = mpi->stride[i];
@@ -97,7 +97,7 @@ static bool setup(struct mp_filter *f, struct mp_image *mpi)
         finish_oldest_gpu(p);
     mp_image_unrefp(&p->prev);
     p->grid = MP_NOPTS_VALUE;
-    memc_destroy(p->ctx);
+    mb_destroy(p->ctx);
     p->ctx = NULL;
     p->disabled = true;
     p->imgfmt = mpi->imgfmt;
@@ -110,7 +110,7 @@ static bool setup(struct mp_filter *f, struct mp_image *mpi)
         MP_WARN(f, "unsupported format %s, passing through\n", mp_imgfmt_to_name(mpi->imgfmt));
         return false;
     }
-    memc_format fmt = {
+    mb_format fmt = {
         .w = mpi->w,
         .h = mpi->h,
         .depth = reg.component_size == 1 ? 8 : 16 - (reg.component_pad < 0 ? -reg.component_pad : 0),
@@ -125,7 +125,7 @@ static bool setup(struct mp_filter *f, struct mp_image *mpi)
         MP_WARN(f, "unsupported plane layout %s, passing through\n", mp_imgfmt_to_name(mpi->imgfmt));
         return false;
     }
-    p->ctx = memc_create(&fmt);
+    p->ctx = mb_create(&fmt);
     if (!p->ctx) {
         MP_ERR(f, "could not initialize Vulkan interpolator, passing through\n");
         return false;
@@ -148,8 +148,8 @@ static void finish_oldest_gpu(struct priv *p)
         struct qent *e = &p->outq[i];
         if (!e->gpu)
             continue;
-        memc_image dst = to_memc(e->frame.data);
-        memc_retrieve(p->ctx, &dst);
+        mb_image dst = to_mb(e->frame.data);
+        mb_retrieve(p->ctx, &dst);
         e->gpu = false;
         p->ngpu--;
         return;
@@ -187,9 +187,9 @@ static void submit_interp(struct priv *p, struct mp_image *ref, double t, double
     struct mp_image *out = mp_image_pool_get(p->pool, ref->imgfmt, ref->w, ref->h);
     if (out) {
         mp_image_copy_attributes(out, ref);
-        while (memc_pending(p->ctx) >= MEMC_MAX_PENDING && p->ngpu)
+        while (mb_pending(p->ctx) >= MB_MAX_PENDING && p->ngpu)
             finish_oldest_gpu(p);
-        if (memc_submit(p->ctx, t) == 0) {
+        if (mb_submit(p->ctx, t) == 0) {
             out->pts = pts;
             out->pkt_duration = dur;
             enqueue(p, MAKE_FRAME(MP_FRAME_VIDEO, out), true);
@@ -266,7 +266,7 @@ static void flush_pending(struct mp_filter *f)
         return;
     struct mp_image *b = p->cur;
     p->cur = NULL;
-    memc_flush(p->ctx);
+    mb_flush(p->ctx);
     emit_pair(f, b);
 }
 
@@ -295,13 +295,13 @@ static void handle_frame(struct mp_filter *f, struct mp_image *mpi)
         flush_pending(f);
         mp_image_unrefp(&p->prev);
     }
-    memc_image src = to_memc(mpi);
+    mb_image src = to_mb(mpi);
     if (!p->prev) {
         while (p->ngpu)
             finish_oldest_gpu(p);
-        memc_reset(p->ctx);
+        mb_reset(p->ctx);
     }
-    memc_push(p->ctx, &src);
+    mb_push(p->ctx, &src);
     if (!p->prev) {
         emit_pair(f, mpi);
         return;
@@ -319,7 +319,7 @@ static bool emit_head(struct mp_filter *f, bool block)
         return false;
     struct qent *h = &p->outq[0];
     if (h->gpu) {
-        if (!block && !memc_ready(p->ctx))
+        if (!block && !mb_ready(p->ctx))
             return false;
         finish_oldest_gpu(p);
     }
@@ -341,7 +341,7 @@ static void f_process(struct mp_filter *f)
     }
 
     bool eof_queued = p->nout && p->outq[p->nout - 1].frame.type == MP_FRAME_EOF;
-    if (!eof_queued && (p->ngpu == 0 || p->ngpu + p->expect <= MEMC_MAX_PENDING) && p->nout < MAXQ - 8 &&
+    if (!eof_queued && (p->ngpu == 0 || p->ngpu + p->expect <= MB_MAX_PENDING) && p->nout < MAXQ - 8 &&
         mp_pin_out_request_data(p->in)) {
         struct mp_frame frame = mp_pin_out_read(p->in);
         if (frame.type == MP_FRAME_VIDEO) {
@@ -362,7 +362,7 @@ static void f_process(struct mp_filter *f)
 }
 
 static const struct mp_filter_info filter = {
-    .name = "memc",
+    .name = "motionblade",
     .process = f_process,
     .reset = f_reset,
     .destroy = f_destroy,
@@ -412,10 +412,10 @@ static const m_option_t opts_list[] = {
     {0}
 };
 
-const struct mp_user_filter_entry vf_memc = {
+const struct mp_user_filter_entry vf_motionblade = {
     .desc = {
         .description = "motion-compensated frame interpolation",
-        .name = "memc",
+        .name = "motionblade",
         .priv_size = sizeof(OPT_BASE_STRUCT),
         .priv_defaults = &(const struct opts){
             .factor = 0,

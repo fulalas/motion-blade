@@ -1,6 +1,6 @@
 #!/bin/sh
 set -e
-D=${MEMC_DATA:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)/samples}
+D=${MOTIONBLADE_DATA:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)/samples}
 mkdir -p "$D/suite" "$D/film" && cd "$D"
 ffv1() { ffmpeg -nostdin -hide_banner -loglevel error "$@" -c:v ffv1 -level 3 -slices 16 -y; }
 X=https://media.xiph.org/video/derf/y4m

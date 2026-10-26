@@ -1,7 +1,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include "memc.h"
+#include "motionblade.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -121,7 +121,7 @@ typedef struct {
     vimg lev[MAXLEV];
 } gframe;
 
-#define NSLOT (MEMC_MAX_PENDING + 1)
+#define NSLOT (MB_MAX_PENDING + 1)
 #define NFR 4
 
 typedef struct {
@@ -135,8 +135,8 @@ typedef struct {
     double gpu_ms;
 } slot;
 
-struct memc_ctx {
-    memc_format fmt;
+struct mb_ctx {
+    mb_format fmt;
     int bps, cw, ch, nplanes, nlev;
     VkInstance inst;
     VkPhysicalDevice pd;
@@ -162,7 +162,7 @@ struct memc_ctx {
     vbuf tf4, slots, xkeys, eslots, tf0, tf1, stat, pstat, qstat, dummy, fbw, ill0, ill1, hist;
     size_t off[3], rowb[3], rows[3];
     params p;
-    memc_stats st;
+    mb_stats st;
     int nfr, ib, me_valid, have_prev, have_q, eos, lnorm, recording;
     vbuf *last_tf, last_fa, last_fb;
     vimg oy, oc1, oc2;
@@ -178,9 +178,9 @@ struct memc_ctx {
 #define S(c) (&(c)->sl[(c)->cur])
 
 
-#define VK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { fprintf(stderr, "memc: %s failed (%d)\n", #x, r_); return -1; } } while (0)
+#define VK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { fprintf(stderr, "motionblade: %s failed (%d)\n", #x, r_); return -1; } } while (0)
 
-static int memtype(memc_ctx *c, uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid)
+static int memtype(mb_ctx *c, uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid)
 {
     for (uint32_t i = 0; i < c->mp.memoryTypeCount; i++) {
         VkMemoryPropertyFlags f = c->mp.memoryTypes[i].propertyFlags;
@@ -193,7 +193,7 @@ static int memtype(memc_ctx *c, uint32_t bits, VkMemoryPropertyFlags want, VkMem
     return -1;
 }
 
-static int buf_create(memc_ctx *c, vbuf *b, VkDeviceSize size, int host)
+static int buf_create(mb_ctx *c, vbuf *b, VkDeviceSize size, int host)
 {
     memset(b, 0, sizeof(*b));
     VkBufferCreateInfo bc = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -217,7 +217,7 @@ static int buf_create(memc_ctx *c, vbuf *b, VkDeviceSize size, int host)
     return 0;
 }
 
-static void buf_free(memc_ctx *c, vbuf *b)
+static void buf_free(mb_ctx *c, vbuf *b)
 {
     if (b->buf)
         vkDestroyBuffer(c->dev, b->buf, NULL);
@@ -226,7 +226,7 @@ static void buf_free(memc_ctx *c, vbuf *b)
     memset(b, 0, sizeof(*b));
 }
 
-static int img_create(memc_ctx *c, vimg *im, int w, int h, VkFormat fmt)
+static int img_create(mb_ctx *c, vimg *im, int w, int h, VkFormat fmt)
 {
     memset(im, 0, sizeof(*im));
     im->w = w;
@@ -258,7 +258,7 @@ static int img_create(memc_ctx *c, vimg *im, int w, int h, VkFormat fmt)
     return 0;
 }
 
-static void img_free(memc_ctx *c, vimg *im)
+static void img_free(mb_ctx *c, vimg *im)
 {
     if (im->view)
         vkDestroyImageView(c->dev, im->view, NULL);
@@ -269,7 +269,7 @@ static void img_free(memc_ctx *c, vimg *im)
     memset(im, 0, sizeof(*im));
 }
 
-static int pipe_create(memc_ctx *c, vpipe *p, const uint32_t *code, size_t size, const char *types, const char *name,
+static int pipe_create(mb_ctx *c, vpipe *p, const uint32_t *code, size_t size, const char *types, const char *name,
                        int sg)
 {
     memset(p, 0, sizeof(*p));
@@ -313,7 +313,7 @@ static int pipe_create(memc_ctx *c, vpipe *p, const uint32_t *code, size_t size,
     return r == VK_SUCCESS ? 0 : -1;
 }
 
-static void pipe_free(memc_ctx *c, vpipe *p)
+static void pipe_free(mb_ctx *c, vpipe *p)
 {
     if (p->p)
         vkDestroyPipeline(c->dev, p->p, NULL);
@@ -323,7 +323,7 @@ static void pipe_free(memc_ctx *c, vpipe *p)
         vkDestroyDescriptorSetLayout(c->dev, p->dsl, NULL);
 }
 
-static void barrier(memc_ctx *c)
+static void barrier(mb_ctx *c)
 {
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
                           VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -334,14 +334,14 @@ static void barrier(memc_ctx *c)
                          NULL);
 }
 
-static void host_barrier(memc_ctx *c)
+static void host_barrier(mb_ctx *c)
 {
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT};
     vkCmdPipelineBarrier(S(c)->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0,
                          NULL);
 }
 
-static void dispatch(memc_ctx *c, const vpipe *p, const vres *res, const pcs *pc, uint32_t gx, uint32_t gy)
+static void dispatch(mb_ctx *c, const vpipe *p, const vres *res, const pcs *pc, uint32_t gx, uint32_t gy)
 {
     int n = (int)strlen(p->types);
     VkWriteDescriptorSet w[32];
@@ -373,7 +373,7 @@ static void dispatch(memc_ctx *c, const vpipe *p, const vres *res, const pcs *pc
     }
 }
 
-static void slot_wait(memc_ctx *c, int i)
+static void slot_wait(mb_ctx *c, int i)
 {
     slot *sl = &c->sl[i];
     if (!sl->busy)
@@ -401,7 +401,7 @@ static void slot_wait(memc_ctx *c, int i)
     sl->gpu_ms = (double)(ts[1] - ts[0]) * c->ts_period / 1e6;
 }
 
-static int in_fifo(const memc_ctx *c, int i)
+static int in_fifo(const mb_ctx *c, int i)
 {
     for (int k = 0; k < c->fifo_n; k++)
         if (c->fifo[k] == i)
@@ -409,7 +409,7 @@ static int in_fifo(const memc_ctx *c, int i)
     return 0;
 }
 
-static int cmd_begin(memc_ctx *c)
+static int cmd_begin(mb_ctx *c)
 {
     if (c->recording)
         return 0;
@@ -423,7 +423,7 @@ static int cmd_begin(memc_ctx *c)
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL,
                                    VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
     if (vkResetCommandBuffer(c->sl[i].cb, 0) != VK_SUCCESS || vkBeginCommandBuffer(c->sl[i].cb, &bi) != VK_SUCCESS) {
-        fprintf(stderr, "memc: could not begin command buffer\n");
+        fprintf(stderr, "motionblade: could not begin command buffer\n");
         c->ok = 0;
         return -1;
     }
@@ -440,7 +440,7 @@ static int cmd_begin(memc_ctx *c)
     return 0;
 }
 
-static int cmd_end(memc_ctx *c, int has_out)
+static int cmd_end(mb_ctx *c, int has_out)
 {
     if (!c->recording)
         return 0;
@@ -451,7 +451,7 @@ static int cmd_end(memc_ctx *c, int has_out)
     si.commandBufferCount = 1;
     si.pCommandBuffers = &sl->cb;
     if (vkEndCommandBuffer(sl->cb) != VK_SUCCESS || vkQueueSubmit(c->q, 1, &si, sl->fence) != VK_SUCCESS) {
-        fprintf(stderr, "memc: could not submit command buffer\n");
+        fprintf(stderr, "motionblade: could not submit command buffer\n");
         c->ok = 0;
         return -1;
     }
@@ -462,7 +462,7 @@ static int cmd_end(memc_ctx *c, int has_out)
     return 0;
 }
 
-static double cmd_submit(memc_ctx *c)
+static double cmd_submit(mb_ctx *c)
 {
     int i = c->cur;
     if (cmd_end(c, 0) < 0)
@@ -471,7 +471,7 @@ static double cmd_submit(memc_ctx *c)
     return c->sl[i].gpu_ms;
 }
 
-static void to_general(memc_ctx *c, vimg *im)
+static void to_general(mb_ctx *c, vimg *im)
 {
     VkImageMemoryBarrier ib = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     ib.srcAccessMask = 0;
@@ -485,28 +485,28 @@ static void to_general(memc_ctx *c, vimg *im)
                          NULL, 1, &ib);
 }
 
-static void copy_b2i(memc_ctx *c, const vbuf *b, size_t off, const vimg *im)
+static void copy_b2i(mb_ctx *c, const vbuf *b, size_t off, const vimg *im)
 {
     VkBufferImageCopy r = {off, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {(uint32_t)im->w, (uint32_t)im->h, 1}};
     vkCmdCopyBufferToImage(S(c)->cb, b->buf, im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
 }
 
-static void copy_i2b(memc_ctx *c, const vimg *im, const vbuf *b, size_t off)
+static void copy_i2b(mb_ctx *c, const vimg *im, const vbuf *b, size_t off)
 {
     VkBufferImageCopy r = {off, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {(uint32_t)im->w, (uint32_t)im->h, 1}};
     vkCmdCopyImageToBuffer(S(c)->cb, im->img, VK_IMAGE_LAYOUT_GENERAL, b->buf, 1, &r);
 }
 
-static int vk_init(memc_ctx *c)
+static int vk_init(mb_ctx *c)
 {
-    VkApplicationInfo ai = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "memc", 1, "memc", 1, VK_API_VERSION_1_2};
+    VkApplicationInfo ai = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "motionblade", 1, "motionblade", 1, VK_API_VERSION_1_2};
     VkInstanceCreateInfo ii = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, NULL, 0, &ai};
     VK(vkCreateInstance(&ii, NULL, &c->inst));
     uint32_t np = 16;
     VkPhysicalDevice pds[16];
     VkResult er = vkEnumeratePhysicalDevices(c->inst, &np, pds);
     if (er != VK_SUCCESS && er != VK_INCOMPLETE) {
-        fprintf(stderr, "memc: vkEnumeratePhysicalDevices failed (%d)\n", er);
+        fprintf(stderr, "motionblade: vkEnumeratePhysicalDevices failed (%d)\n", er);
         return -1;
     }
     int best = -1, score = -1;
@@ -529,9 +529,9 @@ static int vk_init(memc_ctx *c)
     vkGetPhysicalDeviceProperties(c->pd, &pp);
     c->ts_period = pp.limits.timestampPeriod;
     c->max_groups = pp.limits.maxComputeWorkGroupCount[0];
-    int verbose = getenv("MEMC_VERBOSE") != NULL;
+    int verbose = getenv("MOTIONBLADE_VERBOSE") != NULL;
     if (verbose)
-        fprintf(stderr, "memc: using %s\n", pp.deviceName);
+        fprintf(stderr, "motionblade: using %s\n", pp.deviceName);
     vkGetPhysicalDeviceMemoryProperties(c->pd, &c->mp);
     uint32_t nq = 16;
     VkQueueFamilyProperties qfp[16];
@@ -563,7 +563,7 @@ static int vk_init(memc_ctx *c)
     free(exts);
 
     if (pp.apiVersion < VK_API_VERSION_1_1) {
-        fprintf(stderr, "memc: %s does not support Vulkan 1.1\n", pp.deviceName);
+        fprintf(stderr, "motionblade: %s does not support Vulkan 1.1\n", pp.deviceName);
         return -1;
     }
     VkPhysicalDeviceSubgroupSizeControlPropertiesEXT sgc = {
@@ -574,7 +574,7 @@ static int vk_init(memc_ctx *c)
     vkGetPhysicalDeviceProperties2(c->pd, &pp2);
     VkSubgroupFeatureFlags need = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_CLUSTERED_BIT;
     if ((sgp.supportedOperations & need) != need || !(sgp.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT)) {
-        fprintf(stderr, "memc: %s lacks clustered subgroup operations\n", pp.deviceName);
+        fprintf(stderr, "motionblade: %s lacks clustered subgroup operations\n", pp.deviceName);
         return -1;
     }
     uint32_t sg_min = has_sgctl ? sgc.minSubgroupSize : sgp.subgroupSize;
@@ -584,7 +584,7 @@ static int vk_init(memc_ctx *c)
         c->sg_size = 32;
     } else if (sg_min < 16) {
         if (!can_req || sgc.maxSubgroupSize < 16 || sgc.maxComputeWorkgroupSubgroups < 4) {
-            fprintf(stderr, "memc: %s cannot run 16-wide subgroups\n", pp.deviceName);
+            fprintf(stderr, "motionblade: %s cannot run 16-wide subgroups\n", pp.deviceName);
             return -1;
         }
         c->sg_size = 16;
@@ -622,7 +622,7 @@ static int vk_init(memc_ctx *c)
         VK(vkCreateDevice(c->pd, &dci, NULL, &c->dev));
     }
     if (verbose)
-        fprintf(stderr, "memc: queue family %u%s\n", c->qf, res == VK_SUCCESS ? ", low priority" : "");
+        fprintf(stderr, "motionblade: queue family %u%s\n", c->qf, res == VK_SUCCESS ? ", low priority" : "");
     vkGetDeviceQueue(c->dev, c->qf, 0, &c->q);
     c->pushdesc = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->dev, "vkCmdPushDescriptorSetKHR");
     if (!c->pushdesc)
@@ -644,7 +644,7 @@ static int vk_init(memc_ctx *c)
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     VK(vkCreateSampler(c->dev, &sci, NULL, &c->smp));
-    c->prof = getenv("MEMC_PROFILE") != NULL;
+    c->prof = getenv("MOTIONBLADE_PROFILE") != NULL;
 
 #define PIPE(P, S, T) do { if (pipe_create(c, &c->P, S, sizeof(S), T, #P, 0) < 0) return -1; } while (0)
 #define PIPE_SG(P, S, T) do { if (pipe_create(c, &c->P, S, sizeof(S), T, #P, 1) < 0) return -1; } while (0)
@@ -680,7 +680,7 @@ static int vk_init(memc_ctx *c)
     return 0;
 }
 
-static int res_init(memc_ctx *c)
+static int res_init(mb_ctx *c)
 {
     VkFormat fy = c->bps == 1 ? VK_FORMAT_R8_UNORM : VK_FORMAT_R16_UNORM;
     VkFormat fc = c->fmt.nv ? (c->bps == 1 ? VK_FORMAT_R8G8_UNORM : VK_FORMAT_R16G16_UNORM) : fy;
@@ -751,12 +751,12 @@ static int res_init(memc_ctx *c)
     return cmd_submit(c) < 0 ? -1 : 0;
 }
 
-static float luma_scale(const memc_ctx *c)
+static float luma_scale(const mb_ctx *c)
 {
     return c->lnorm ? (float)(65535.0 / ((1 << c->fmt.depth) - 1)) : 1.0f;
 }
 
-static void out_range(const memc_ctx *c, float *maxv, float *step)
+static void out_range(const mb_ctx *c, float *maxv, float *step)
 {
     int pad = c->fmt.lsb_pad;
     *maxv = c->bps == 1 ? 1.0f
@@ -765,23 +765,23 @@ static void out_range(const memc_ctx *c, float *maxv, float *step)
     *step = pad ? (float)((1 << pad) / 65535.0) : 0.0f;
 }
 
-static void set_dc(const memc_ctx *c, pcs *pc)
+static void set_dc(const mb_ctx *c, pcs *pc)
 {
     pc->f[14] = c->p.dc_lo;
     pc->f[15] = c->p.dc_hi;
 }
 
-static int fidx(const memc_ctx *c, int back)
+static int fidx(const mb_ctx *c, int back)
 {
     return (c->ib - back + NFR) % NFR;
 }
 
-static const vimg *lev_img(memc_ctx *c, int k, int L)
+static const vimg *lev_img(mb_ctx *c, int k, int L)
 {
     return L == 0 && !c->lnorm ? &c->fr[k].y : &c->fr[k].lev[L];
 }
 
-static void run_me(memc_ctx *c);
+static void run_me(mb_ctx *c);
 
 static void swapbuf(vbuf *a, vbuf *b)
 {
@@ -798,7 +798,7 @@ static void rot3(vbuf *q, vbuf *p, vbuf *n)
     *n = t;
 }
 
-void memc_push(memc_ctx *c, const memc_image *src)
+void mb_push(mb_ctx *c, const mb_image *src)
 {
     if (!c->ok)
         return;
@@ -855,12 +855,12 @@ void memc_push(memc_ctx *c, const memc_image *src)
         run_me(c);
 }
 
-void memc_flush(memc_ctx *c)
+void mb_flush(mb_ctx *c)
 {
     c->eos = 1;
 }
 
-static void estimate(memc_ctx *c, int dir)
+static void estimate(mb_ctx *c, int dir)
 {
     int kp = fidx(c, 1);
     int kx = dir ? c->ib : kp, ky = dir ? kp : c->ib;
@@ -907,7 +907,7 @@ static void estimate(memc_ctx *c, int dir)
     }
 }
 
-static void cross_fix(memc_ctx *c, int dir)
+static void cross_fix(mb_ctx *c, int dir)
 {
     int bw = c->bw[0], bh = c->bh[0], nb = bw * bh;
     int kp = fidx(c, 1);
@@ -926,7 +926,7 @@ static void cross_fix(memc_ctx *c, int dir)
     swapbuf(&F[0], &c->tmp[0]);
 }
 
-static void local_fix(memc_ctx *c, int dir)
+static void local_fix(mb_ctx *c, int dir)
 {
     int bw = c->bw[0], bh = c->bh[0], nb = bw * bh;
     int kp = fidx(c, 1);
@@ -940,7 +940,7 @@ static void local_fix(memc_ctx *c, int dir)
     swapbuf(&F[0], &c->tmp[0]);
 }
 
-static void run_me(memc_ctx *c)
+static void run_me(mb_ctx *c)
 {
     cmd_begin(c);
     vkCmdFillBuffer(S(c)->cb, c->stat.buf, 0, VK_WHOLE_SIZE, 0);
@@ -961,7 +961,7 @@ static void run_me(memc_ctx *c)
     c->me_valid = 1;
 }
 
-static void read_out(memc_ctx *c, const slot *sl, memc_image *dst)
+static void read_out(mb_ctx *c, const slot *sl, mb_image *dst)
 {
     for (int i = 0; i < c->nplanes; i++) {
         const uint8_t *s = (const uint8_t *)sl->down.map + c->off[i];
@@ -970,10 +970,10 @@ static void read_out(memc_ctx *c, const slot *sl, memc_image *dst)
     }
 }
 
-int memc_submit(memc_ctx *c, double t)
+int mb_submit(mb_ctx *c, double t)
 {
     int la = c->p.la && !c->eos && c->have_prev && c->me_valid;
-    if (!c->ok || c->nfr < 2 || c->fifo_n >= MEMC_MAX_PENDING || (c->p.la && !c->eos && !la))
+    if (!c->ok || c->nfr < 2 || c->fifo_n >= MB_MAX_PENDING || (c->p.la && !c->eos && !la))
         return -1;
     if (cmd_begin(c) < 0)
         return -1;
@@ -1075,7 +1075,7 @@ int memc_submit(memc_ctx *c, double t)
     return cmd_end(c, 1);
 }
 
-int memc_debug_field(memc_ctx *c, int which, float *out, int *w, int *h)
+int mb_debug_field(mb_ctx *c, int which, float *out, int *w, int *h)
 {
     if (which < 0 || which > 2)
         return -1;
@@ -1102,17 +1102,17 @@ int memc_debug_field(memc_ctx *c, int which, float *out, int *w, int *h)
     return 0;
 }
 
-int memc_pending(memc_ctx *c)
+int mb_pending(mb_ctx *c)
 {
     return c->fifo_n;
 }
 
-int memc_ready(memc_ctx *c)
+int mb_ready(mb_ctx *c)
 {
     return c->fifo_n && vkGetFenceStatus(c->dev, c->sl[c->fifo[0]].fence) == VK_SUCCESS;
 }
 
-int memc_retrieve(memc_ctx *c, memc_image *dst)
+int mb_retrieve(mb_ctx *c, mb_image *dst)
 {
     if (!c->fifo_n)
         return -1;
@@ -1130,14 +1130,14 @@ int memc_retrieve(memc_ctx *c, memc_image *dst)
     return cut;
 }
 
-int memc_interpolate(memc_ctx *c, double t, memc_image *dst)
+int mb_interpolate(mb_ctx *c, double t, mb_image *dst)
 {
-    if (memc_submit(c, t) < 0)
+    if (mb_submit(c, t) < 0)
         return -1;
-    return memc_retrieve(c, dst);
+    return mb_retrieve(c, dst);
 }
 
-void memc_reset(memc_ctx *c)
+void mb_reset(mb_ctx *c)
 {
     cmd_end(c, 0);
     for (int i = 0; i < NSLOT; i++)
@@ -1225,7 +1225,7 @@ static void default_params(params *p)
     p->cut_kmin = 0.1f;
 }
 
-int memc_set_param(memc_ctx *c, const char *name, double v)
+int mb_set_param(mb_ctx *c, const char *name, double v)
 {
     params *p = &c->p;
 #define P_(N) if (!strcmp(name, #N)) { p->N = v; return 0; }
@@ -1240,18 +1240,18 @@ int memc_set_param(memc_ctx *c, const char *name, double v)
     return -1;
 }
 
-void memc_get_stats(memc_ctx *c, memc_stats *st)
+void mb_get_stats(mb_ctx *c, mb_stats *st)
 {
     *st = c->st;
 }
 
-void memc_destroy(memc_ctx *c)
+void mb_destroy(mb_ctx *c)
 {
     if (!c)
         return;
     if (c->prof)
         for (int k = 0; k < c->prof_n; k++)
-            fprintf(stderr, "memc profile: %-10s %8.1f ms total\n", c->prof_name[k], c->prof_ms[k]);
+            fprintf(stderr, "motionblade profile: %-10s %8.1f ms total\n", c->prof_name[k], c->prof_ms[k]);
     if (c->dev) {
         vkDeviceWaitIdle(c->dev);
         for (int k = 0; k < NFR; k++) {
@@ -1324,13 +1324,13 @@ void memc_destroy(memc_ctx *c)
     free(c);
 }
 
-memc_ctx *memc_create(const memc_format *fmt)
+mb_ctx *mb_create(const mb_format *fmt)
 {
     if (fmt->w < 64 || fmt->h < 64 || fmt->depth < 8 || fmt->depth > 16 || fmt->cshift_x < 0 || fmt->cshift_x > 1 ||
         fmt->cshift_y < 0 || fmt->cshift_y > 1 || fmt->lsb_pad < 0 || fmt->lsb_pad > 8 ||
         (fmt->lsb_pad && fmt->depth != 16))
         return NULL;
-    memc_ctx *c = calloc(1, sizeof(*c));
+    mb_ctx *c = calloc(1, sizeof(*c));
     if (!c)
         return NULL;
     c->fmt = *fmt;
@@ -1352,18 +1352,18 @@ memc_ctx *memc_create(const memc_format *fmt)
         c->bh[L] = (c->lh[L] + BS - 1) / BS;
     }
     if (vk_init(c) < 0) {
-        fprintf(stderr, "memc: Vulkan init failed\n");
-        memc_destroy(c);
+        fprintf(stderr, "motionblade: Vulkan init failed\n");
+        mb_destroy(c);
         return NULL;
     }
     if ((uint32_t)(c->bw[0] * c->bh[0] + 3) / 4 > c->max_groups) {
-        fprintf(stderr, "memc: %dx%d is too large for this GPU\n", fmt->w, fmt->h);
-        memc_destroy(c);
+        fprintf(stderr, "motionblade: %dx%d is too large for this GPU\n", fmt->w, fmt->h);
+        mb_destroy(c);
         return NULL;
     }
     if (res_init(c) < 0) {
-        fprintf(stderr, "memc: Vulkan init failed\n");
-        memc_destroy(c);
+        fprintf(stderr, "motionblade: Vulkan init failed\n");
+        mb_destroy(c);
         return NULL;
     }
     c->ok = 1;

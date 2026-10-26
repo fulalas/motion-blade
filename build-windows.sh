@@ -228,17 +228,17 @@ meson setup "$build" --cross-file "$prefix/crossfile" \
     -D{uchardet,libarchive,rubberband,zimg,cplugins}=disabled
 meson compile -C "$build"
 
-out="$work/mpv-memc-windows-x86_64"
+out="$work/motionblade-windows-x86_64"
 rm -rf "$out" "$out.zip"
 mkdir -p "$out/portable_config"
 cp "$build/mpv.exe" "$build/mpv.com" "$out/"
 $TARGET-strip "$out/mpv.exe" "$out/mpv.com"
 cat >"$out/portable_config/mpv.conf" <<EOF
-vf=memc
+vf=motionblade
 hwdec=auto-copy
 video-sync=display-resample
 EOF
-cp "$root/README.md" "$root/MEMC_VERSION" "$out/"
-printf '@echo off\r\nstart "" "%%~dp0mpv.exe" --vf=memc --hwdec=auto-copy --video-sync=display-resample %%*\r\n' >"$out/run.bat"
+cp "$root/README.md" "$root/VERSION" "$root/LICENSE" "$out/"
+printf '@echo off\r\nstart "" "%%~dp0mpv.exe" --vf=motionblade --hwdec=auto-copy --video-sync=display-resample %%*\r\n' >"$out/run.bat"
 (cd "$work" && zip -qr9 "$out.zip" "$(basename "$out")")
 echo "=== done: $out.zip"

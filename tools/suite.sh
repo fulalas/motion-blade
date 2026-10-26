@@ -1,5 +1,5 @@
 #!/bin/bash
-D=${MEMC_DATA:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)/samples}; E=${EVAL:-$(dirname "$(readlink -f "$0")")/../eval_vk}
+D=${MOTIONBLADE_DATA:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)/samples}; E=${EVAL:-$(dirname "$(readlink -f "$0")")/../eval_vk}
 clips=${CLIPS:-"suite/park_joy_1080p50:41 suite/crowd_run_1080p50:41 suite/in_to_tree_1080p50:41 suite/ducks_take_off_1080p50:41 suite/old_town_cross_1080p50:41 suite/mobcal_720p50:41 suite/shields_720p50:41 suite/parkrun_720p50:41 suite/stockholm_720p60:41 suite/bbb_tree_cut_1080p60:81 suite/bbb_meadow_still_1080p60:81 suite/bbb_squirrel_branch_1080p60:81 suite/bbb_credits_scroll_1080p60:81 suite/bbb_butterfly_closeup_1080p60:81 suite/bbb_butterfly_bunny_1080p60:81 suite/bbb_apple_cut_1080p60:81"}
 tl=0; tp=0; ts=0; tc=0; n=0
 for c in $clips; do f=${c%%:*}; k=${c##*:}

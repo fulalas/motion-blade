@@ -2,7 +2,7 @@
 
 ## Version
 
-The plain text file `MEMC_VERSION` at the root of this repository holds the version of the memc
+The plain text file `VERSION` at the root of this repository holds the version of the motionblade
 filter (`major.minor.patch`, one line). It is separate from mpv's own `MPV_VERSION`.
 
 Every commit that changes code must increase it by one step:

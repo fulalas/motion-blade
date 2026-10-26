@@ -1,6 +1,6 @@
 #!/bin/bash
 T=$(dirname "$(readlink -f "$0")")
-D=${MEMC_DATA:-$(cd "$T/../.." && pwd)/samples}
+D=${MOTIONBLADE_DATA:-$(cd "$T/../.." && pwd)/samples}
 E=${EVAL:-$T/../eval_vk}
 B=$T/baseline.txt
 update=0
@@ -46,7 +46,7 @@ for r in 1 2 3; do
     best=$(echo "$ms $best" | awk '{print ($1 < $2) ? $1 : $2}')
 done
 put speed_ms_1080p "$best"
-MEMC_PROFILE=1 "$E" "$D/suite/crowd_run_1080p50.mkv" -n 41 -nometric -repeat 8 2>&1 | grep "memc profile" |
+MOTIONBLADE_PROFILE=1 "$E" "$D/suite/crowd_run_1080p50.mkv" -n 41 -nometric -repeat 8 2>&1 | grep "motionblade profile" |
     awk '{printf "pass_%s %s\n", $3, $4 / 160}' >>"$out"
 
 vg=$(RADV_DEBUG=shaderstats,nocache "$E" "$D/suite/crowd_run_1080p50.mkv" -n 3 -q 2>&1 | grep -E "^VGPRs" | tail -1 | awk '{print $2}')

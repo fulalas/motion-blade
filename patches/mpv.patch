@@ -6,11 +6,11 @@
                       'video/out/vulkan/utils.c',
 -                     'video/filter/vf_gpu_vulkan.c')
 +                     'video/filter/vf_gpu_vulkan.c',
-+                     'video/filter/vf_memc.c',
-+                     'video/filter/memc/memc_vk.c')
-+    subdir('video/filter/memc/shaders')
-+    sources += memc_shaders
-+    dependencies += declare_dependency(include_directories: include_directories('video/filter/memc'))
++                     'video/filter/vf_motionblade.c',
++                     'video/filter/motionblade/motionblade_vk.c')
++    subdir('video/filter/motionblade/shaders')
++    sources += mb_shaders
++    dependencies += declare_dependency(include_directories: include_directories('video/filter/motionblade'))
  endif
  
  if features['vulkan'] and features['android']
@@ -21,7 +21,7 @@
      &vf_gpu,
  #endif
 +#if HAVE_VULKAN
-+    &vf_memc,
++    &vf_motionblade,
 +#endif
  };
  
@@ -32,14 +32,14 @@
  extern const struct mp_user_filter_entry vf_d3d11vpp;
  extern const struct mp_user_filter_entry vf_fingerprint;
  extern const struct mp_user_filter_entry vf_gpu;
-+extern const struct mp_user_filter_entry vf_memc;
++extern const struct mp_user_filter_entry vf_motionblade;
 --- a/etc/input.conf
 +++ b/etc/input.conf
 @@ -178,6 +178,7 @@
  #Ctrl+v loadfile ${clipboard/text} append-play; show-text '+ ${clipboard/text}' # append the copied path
  #DEL script-binding osc/visibility      # cycle OSC visibility between never, auto (mouse-move) and always
  #ctrl+h cycle-values hwdec "no" "auto"  # toggle hardware decoding
-+#Ctrl+m cycle-values vf "memc=factor=2" "memc=factor=3" "memc=factor=4" "" "memc=factor=auto"; show-text "Interpolation: ${?vf==(empty):off}${!vf==(empty):${=vf}}" # cycle motion interpolation
++#Ctrl+m cycle-values vf "motionblade=factor=2" "motionblade=factor=3" "motionblade=factor=4" "" "motionblade=factor=auto"; show-text "Interpolation: ${?vf==(empty):off}${!vf==(empty):${=vf}}" # cycle motion interpolation
  #F8 show-text ${playlist}               # show the playlist
  #F9 show-text ${track-list}             # show the list of video, audio and sub tracks
  #g ignore
@@ -50,7 +50,7 @@
          most ``--vo=gpu`` options are unconditionally applied to the ``gpu``
          filter. There is no mechanism in mpv to prevent this.
 +
-+``memc=...``
++``motionblade=...``
 +    Motion-compensated frame interpolation on the GPU with Vulkan. New frames
 +    are computed between the source frames, so motion looks smoother on
 +    displays with a higher refresh rate than the video.
@@ -79,4 +79,4 @@
 +        Do not interpolate between frames that are more than this many seconds
 +        apart (default: 0.25).
 +
-+    Example: ``--vf=memc --hwdec=auto-copy --video-sync=display-resample``
++    Example: ``--vf=motionblade --hwdec=auto-copy --video-sync=display-resample``
