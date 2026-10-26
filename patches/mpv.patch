@@ -55,8 +55,8 @@
 +    are computed between the source frames, so motion looks smoother on
 +    displays with a higher refresh rate than the video.
 +
-+    The filter works on frames in system memory. With hardware decoding, use a
-+    copy mode such as ``--hwdec=auto-copy``. Supported formats are 8 to 16 bit
++    The filter works on frames in system memory; hardware decoded frames are
++    copied there automatically. Supported formats are 8 to 16 bit
 +    YUV with 4:2:0, 4:2:2 or 4:4:4 chroma, planar or semi-planar (``nv12``,
 +    ``p010``). Other formats and frames smaller than 64x64 pass through
 +    unchanged, as does everything when no suitable Vulkan device is found.
@@ -79,4 +79,4 @@
 +        Do not interpolate between frames that are more than this many seconds
 +        apart (default: 0.25).
 +
-+    Example: ``--vf=motionblade --hwdec=auto-copy --video-sync=display-resample``
++    Example: ``--vf=motionblade --hwdec=auto --video-sync=display-resample``

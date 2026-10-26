@@ -94,6 +94,13 @@ void main()
     add(vec2(0.0), pc.f0.w);
     float best_c = 1e30, best_s = 0.0, best_m = 0.0;
     vec2 best_v = vec2(0.0);
+    float skip = -1.0;
+    if (pc.f1.z > 0.0) {
+        float mx = block_sum() / 256.0, ax = 0.0;
+        for (int x = 0; x < 16; x++)
+            ax += abs(xr[x] - mx);
+        skip = max(subgroupClusteredAdd(ax, 16) * 255.0 * pc.f1.z, 32.0);
+    }
     for (int i = 0; i < n; i++) {
         float s = sad_y(Y, cl[i]);
         float c = s + pen[i] + pc.f1.y * l1(cl[i]);
@@ -103,12 +110,14 @@ void main()
             best_m = g_ml;
             best_v = cl[i];
         }
+        if (best_s < skip)
+            break;
     }
     uint h = hash(uint(id) * 7919u + uint(pc.i1.w) * 104729u);
     vec2 d1 = vec2(float(int(h & 7u)) - 3.5, float(int((h >> 3) & 7u)) - 3.5) * 0.25;
     vec2 d2 = vec2(float(int((h >> 6) & 3u)) - 1.5, float(int((h >> 8) & 3u)) - 1.5);
     vec2 base = best_v;
-    for (int k = 0; k < 2; k++) {
+    for (int k = 0; k < 2 && best_s >= skip; k++) {
         vec2 v = base + (k == 0 ? d1 : d2);
         float s = sad_y(Y, v);
         float c = s + pc.f0.z + pc.f1.y * l1(v);

@@ -253,14 +253,14 @@ static void dump_fields(mb_ctx *c, const char *path, int fw, int fh)
 static void usage(void)
 {
     fprintf(stderr, "eval in.y4m|in.mkv [-n frames] [-skip k] [-step s] [-mode motionblade|blend|repeat] [-cmp full.y4m]\n"
-                    "     [-o out.y4m] [-p name=value]... [-q]\n");
+                    "     [-o out.y4m] [-p name=value]... [-q] [-export]\n");
     exit(1);
 }
 
 int main(int argc, char **argv)
 {
     const char *in = NULL, *out = NULL, *cmp = NULL, *mode = "motionblade";
-    int maxn = 1000, step = 2, quiet = 0, skip = 0, nometric = 0, repeat = 1, fm = 0, dumpk = -1;
+    int maxn = 1000, step = 2, quiet = 0, skip = 0, nometric = 0, repeat = 1, fm = 0, dumpk = -1, xport = 0;
     char *params[64];
     int np = 0;
     for (int i = 1; i < argc; i++) {
@@ -279,6 +279,7 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "-repeat") && i + 1 < argc) repeat = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-nometric")) nometric = 1, quiet = 1;
+        else if (!strcmp(argv[i], "-export")) xport = 1;
         else if (argv[i][0] != '-') in = argv[i];
         else usage();
     }
@@ -309,6 +310,10 @@ int main(int argc, char **argv)
     mb_ctx *c = mb_create(&fmt);
     if (!c) {
         fprintf(stderr, "mb_create failed\n");
+        return 1;
+    }
+    if (xport && mb_export_init(c) < 0) {
+        fprintf(stderr, "dma-buf export not available\n");
         return 1;
     }
     for (int i = 0; i < np; i++) {

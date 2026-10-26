@@ -233,7 +233,7 @@ void main()
         }
         bool fb = i == fbi;
         float D[16];
-        for (int y = 0; y < 4; y++)
+        for (int y = 0; y < 4 && !fb; y++)
             for (int x = 0; x < 4; x++) {
                 vec2 p = vec2(q0 + ivec2(x - 1, y - 1)) + 0.5;
 #ifdef DEPTH16
@@ -249,13 +249,13 @@ void main()
             int jx = j & 1, jy = j >> 1;
             float cst;
             uint al = 0u;
-            float e = 0.0;
-            for (int dy = 0; dy < 3; dy++)
-                for (int dx = 0; dx < 3; dx++)
-                    e += D[(jy + dy) * 4 + jx + dx];
             if (fb) {
                 cst = hasm ? pc.f1.w : pc.f1.x;
             } else {
+                float e = 0.0;
+                for (int dy = 0; dy < 3; dy++)
+                    for (int dx = 0; dx < 3; dx++)
+                        e += D[(jy + dy) * 4 + jx + dx];
                 float qa = round(sA * (1.0 - sB) * 7.0), qb = round((1.0 - sA) * sB * 7.0);
                 cst = sA * sB * max(0.0, e - pc.f3.x * clamp(l1(u) * 0.5, 0.0, 1.0)) +
                       (qa + qb) / 7.0 * pc.f0.z + (1.0 - sA) * (1.0 - sB) * (e + pc.f0.w);

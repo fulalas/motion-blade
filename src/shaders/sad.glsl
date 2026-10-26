@@ -48,6 +48,14 @@ float zsad(float a[16], float b[16])
     return subgroupClusteredAdd(s, 16) * 255.0;
 }
 
+float block_sum()
+{
+    float s = 0.0;
+    for (int x = 0; x < 16; x++)
+        s += xr[x];
+    return subgroupClusteredAdd(s, 16);
+}
+
 float block_dc(float ml)
 {
     return subgroupClusteredAdd(ml, 16) * (255.0 / 256.0);

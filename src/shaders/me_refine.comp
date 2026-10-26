@@ -39,12 +39,7 @@ void main()
         }
     }
     float dcm = block_dc(best_m);
-    float bm = 0.0;
-    if (pc.i1.z != 0) {
-        for (int x = 0; x < 16; x++)
-            bm += xr[x];
-        bm = subgroupClusteredAdd(bm, 16) * (255.0 / 256.0);
-    }
+    float bm = pc.i1.z != 0 ? block_sum() * (255.0 / 256.0) : 0.0;
     if (lane == 0) {
         f[id] = vec4(bv, best, dcm);
         if (pc.i1.x != 0) {

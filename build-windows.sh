@@ -235,10 +235,10 @@ cp "$build/mpv.exe" "$build/mpv.com" "$out/"
 $TARGET-strip "$out/mpv.exe" "$out/mpv.com"
 cat >"$out/portable_config/mpv.conf" <<EOF
 vf=motionblade
-hwdec=auto-copy
+hwdec=auto
 video-sync=display-resample
 EOF
 cp "$root/README.md" "$root/VERSION" "$root/LICENSE" "$out/"
-printf '@echo off\r\nstart "" "%%~dp0mpv.exe" --vf=motionblade --hwdec=auto-copy --video-sync=display-resample %%*\r\n' >"$out/run.bat"
+printf '@echo off\r\nstart "" "%%~dp0mpv.exe" --vf=motionblade --hwdec=auto --video-sync=display-resample %%*\r\n' >"$out/run.bat"
 (cd "$work" && zip -qr9 "$out.zip" "$(basename "$out")")
 echo "=== done: $out.zip"

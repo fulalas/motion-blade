@@ -1,5 +1,6 @@
 #version 450
 #extension GL_GOOGLE_include_directive : enable
+#extension GL_KHR_shader_subgroup_clustered : enable
 #include "common.glsl"
 layout(local_size_x = 64) in;
 layout(binding = 0) uniform sampler2D A;
@@ -8,68 +9,90 @@ layout(std430, binding = 2) readonly buffer TF { vec4 tf[]; };
 layout(std430, binding = 3) writeonly buffer TF4 { vec4 t4[]; };
 layout(std430, binding = 4) readonly buffer ILL { vec4 ill[]; };
 
-float dc;
+shared int lst[64];
+shared uint cnt;
 
-float cost(ivec2 cell, vec2 u)
-{
-    float t = pc.f0.x;
-    vec2 inv = 1.0 / vec2(pc.i0.zw), p0 = vec2(cell * 4) + 0.5;
-    float s = 0.0;
-    for (int k = 0; k < 16; k++) {
-        vec2 p = p0 + vec2(k & 3, k >> 2);
-        s += abs(textureLod(A, (p - t * u) * inv, 0.0).r - textureLod(B, (p + (1.0 - t) * u) * inv, 0.0).r - dc);
-    }
-    return s * 255.0;
-}
+int bw, bh;
+vec2 cand[9];
+int n;
 
-void main()
+bool gather_cands(ivec2 b, vec2 own)
 {
-    int bw = pc.i0.x, bh = pc.i0.y, cw = bw * 2;
-    int id = int(gl_GlobalInvocationID.x);
-    if (id >= cw * bh * 2)
-        return;
-    ivec2 cell = ivec2(id % cw, id / cw), b = cell >> 1;
-    vec4 own = tf[bidx(b, ivec2(bw, bh))];
-    dc = ill[bidx(b, ivec2(bw, bh))].x * pc.f0.w;
-    t4[id] = own;
-    if (int(own.z) != 0 || pc.f0.y <= 0.0)
-        return;
-    vec2 cand[9];
-    int n = 0;
+    n = 0;
     bool edge = false;
     for (int k = 0; k < 9; k++) {
         vec4 q = tf[bidx(b + ivec2(k % 3 - 1, k / 3 - 1), ivec2(bw, bh))];
         if (int(q.z) != 0)
             continue;
-        edge = edge || l1(q.xy - own.xy) > pc.f0.y;
+        edge = edge || l1(q.xy - own) > pc.f0.y;
         bool dup = false;
         for (int i = 0; i < n; i++)
             dup = dup || cand[i] == q.xy;
         if (!dup)
             cand[n++] = q.xy;
     }
-    if (!edge)
-        return;
-    float best = 1e30;
-    vec2 bv = own.xy;
-    for (int i = 0; i < n; i++) {
-        float s = cost(cell, cand[i]) + (cand[i] == own.xy ? 0.0 : pc.f0.z);
-        if (s < best) {
-            best = s;
-            bv = cand[i];
-        }
+    return edge;
+}
+
+float cost(vec2 p, vec2 u, float dc)
+{
+    float t = pc.f0.x;
+    vec2 inv = 1.0 / vec2(pc.i0.zw);
+    float d = abs(textureLod(A, (p - t * u) * inv, 0.0).r - textureLod(B, (p + (1.0 - t) * u) * inv, 0.0).r - dc);
+    return subgroupClusteredAdd(d, 16) * 255.0;
+}
+
+void main()
+{
+    bw = pc.i0.x;
+    bh = pc.i0.y;
+    int cw = bw * 2;
+    uint t = gl_LocalInvocationID.x;
+    if (t == 0u)
+        cnt = 0u;
+    barrier();
+    int id = int(gl_WorkGroupID.x) * 64 + int(t);
+    if (id < cw * bh * 2) {
+        ivec2 cell = ivec2(id % cw, id / cw), b = cell >> 1;
+        vec4 own = tf[bidx(b, ivec2(bw, bh))];
+        if (int(own.z) == 0 && pc.f0.y > 0.0 && gather_cands(b, own.xy))
+            lst[atomicAdd(cnt, 1u)] = id;
+        else
+            t4[id] = own;
     }
-    for (int r = pc.i1.x; r > 0; r--) {
-        vec2 c0 = bv;
-        for (int k = 0; k < 8; k++) {
-            vec2 u = c0 + vec2(ivec2[8](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1), ivec2(-1, -1), ivec2(1, -1),
-                                        ivec2(-1, 1), ivec2(1, 1))[k]) * float(r);
-            float s = cost(cell, u) + pc.f1.x * l1(u - c0);
+    barrier();
+    int lane = int(t) & 15, grp = int(t) >> 4, ne = int(cnt);
+    for (int j = grp; j < ne; j += 4) {
+        int cid = lst[j];
+        ivec2 cell = ivec2(cid % cw, cid / cw), b = cell >> 1;
+        int bi = bidx(b, ivec2(bw, bh));
+        vec4 own = tf[bi];
+        float dc = ill[bi].x * pc.f0.w;
+        gather_cands(b, own.xy);
+        vec2 p = vec2(cell * 4 + ivec2(lane & 3, lane >> 2)) + 0.5;
+        float best = 1e30;
+        vec2 bv = own.xy;
+        for (int i = 0; i < n; i++) {
+            vec2 u = cand[i];
+            float s = cost(p, u, dc) + (u == own.xy ? 0.0 : pc.f0.z);
             if (s < best) {
                 best = s;
                 bv = u;
             }
         }
+        for (int r = pc.i1.x; r > 0; r--) {
+            vec2 c0 = bv;
+            for (int k = 0; k < 8; k++) {
+                vec2 u = c0 + vec2(ivec2[8](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1), ivec2(-1, -1), ivec2(1, -1),
+                                            ivec2(-1, 1), ivec2(1, 1))[k]) * float(r);
+                float s = cost(p, u, dc) + pc.f1.x * l1(u - c0);
+                if (s < best) {
+                    best = s;
+                    bv = u;
+                }
+            }
+        }
+        if (lane == 0)
+            t4[cid] = vec4(bv, 0.0, own.w);
     }
-    t4[id] = vec4(bv, 0.0, own.w);
 }

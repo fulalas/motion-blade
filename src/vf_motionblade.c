@@ -1,4 +1,13 @@
 #include <math.h>
+#include <unistd.h>
+
+#include "config.h"
+
+#if HAVE_DRM
+#include <drm_fourcc.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_drm.h>
+#endif
 
 #include "common/common.h"
 #include "common/msg.h"
@@ -10,6 +19,7 @@
 #include "options/m_option.h"
 #include "options/options.h"
 #include "osdep/timer.h"
+#include "video/hwdec.h"
 #include "video/img_format.h"
 #include "video/mp_image.h"
 #include "video/mp_image_pool.h"
@@ -44,6 +54,9 @@ struct priv {
     bool fast;
     int64_t dfps_time;
     int expect;
+    struct AVBufferRef *xframes;
+    uint32_t fourcc;
+    bool hw_failed, nozc;
 };
 
 static void clear_state(struct priv *p)
@@ -53,6 +66,7 @@ static void clear_state(struct priv *p)
     p->grid = MP_NOPTS_VALUE;
     p->last_pts = MP_NOPTS_VALUE;
     p->fast = false;
+    p->hw_failed = false;
     if (p->ctx)
         mb_reset(p->ctx);
     for (int i = 0; i < p->nout; i++)
@@ -72,6 +86,7 @@ static void f_destroy(struct mp_filter *f)
     clear_state(p);
     mb_destroy(p->ctx);
     p->ctx = NULL;
+    av_buffer_unref(&p->xframes);
 }
 
 static mb_image to_mb(struct mp_image *mpi)
@@ -87,10 +102,176 @@ static mb_image to_mb(struct mp_image *mpi)
 static void finish_oldest_gpu(struct priv *p);
 static void flush_pending(struct mp_filter *f);
 
+static void setup_export(struct mp_filter *f, struct mp_image *mpi, int swfmt)
+{
+#if HAVE_DRM
+    struct priv *p = f->priv;
+    p->fourcc = swfmt == IMGFMT_NV12   ? DRM_FORMAT_NV12
+                : swfmt == IMGFMT_P010 ? DRM_FORMAT_P010
+                : swfmt == IMGFMT_420P ? DRM_FORMAT_YUV420
+                                       : 0;
+    if (!p->fourcc || p->nozc)
+        return;
+    struct mp_hwdec_ctx *hw = mp_filter_load_hwdec_device(f, IMGFMT_DRMPRIME, AV_HWDEVICE_TYPE_DRM);
+    if (hw && mp_update_av_hw_frames_pool(&p->xframes, hw->av_device_ref, IMGFMT_DRMPRIME, swfmt, mpi->w, mpi->h, false) &&
+        mb_export_init(p->ctx) < 0)
+        av_buffer_unref(&p->xframes);
+#else
+    (void)f;
+    (void)mpi;
+    (void)swfmt;
+#endif
+}
+
+#if HAVE_DRM
+struct xrel {
+    void *pool;
+    int idx;
+};
+
+static void drm_free(void *opaque, uint8_t *data)
+{
+    struct xrel *r = opaque;
+    AVDRMFrameDescriptor *d = (AVDRMFrameDescriptor *)data;
+    close(d->objects[0].fd);
+    mb_dmabuf_release(r->pool, r->idx);
+    av_free(r);
+    av_free(d);
+}
+#endif
+
+static struct mp_image *drm_image(struct priv *p, const mb_dmabuf *x, struct mp_image *ref)
+{
+#if HAVE_DRM
+    AVDRMFrameDescriptor *d = av_mallocz(sizeof(*d));
+    struct xrel *r = av_mallocz(sizeof(*r));
+    AVFrame *fr = av_frame_alloc();
+    if (!d || !r || !fr)
+        goto fail;
+    d->nb_objects = 1;
+    d->objects[0].fd = x->fd;
+    d->objects[0].size = x->size;
+    d->objects[0].format_modifier = DRM_FORMAT_MOD_LINEAR;
+    d->nb_layers = 1;
+    d->layers[0].format = p->fourcc;
+    d->layers[0].nb_planes = x->nplanes;
+    for (int i = 0; i < x->nplanes; i++) {
+        d->layers[0].planes[i].object_index = 0;
+        d->layers[0].planes[i].offset = x->offset[i];
+        d->layers[0].planes[i].pitch = x->pitch[i];
+    }
+    r->pool = x->pool;
+    r->idx = x->idx;
+    fr->format = AV_PIX_FMT_DRM_PRIME;
+    fr->width = ref->w;
+    fr->height = ref->h;
+    fr->data[0] = (uint8_t *)d;
+    fr->buf[0] = av_buffer_create((uint8_t *)d, sizeof(*d), drm_free, r, 0);
+    if (!fr->buf[0])
+        goto fail;
+    fr->hw_frames_ctx = av_buffer_ref(p->xframes);
+    struct mp_image *img = mp_image_from_av_frame(fr);
+    av_frame_free(&fr);
+    if (img)
+        mp_image_copy_attributes(img, ref);
+    return img;
+fail:
+    av_frame_free(&fr);
+    av_free(r);
+    av_free(d);
+    close(x->fd);
+    mb_dmabuf_release(x->pool, x->idx);
+#else
+    (void)p;
+    (void)x;
+    (void)ref;
+#endif
+    return NULL;
+}
+
+static void free_img(void *opaque)
+{
+    talloc_free(opaque);
+}
+
+static struct mp_image *map_drm(struct priv *p, struct mp_image *mpi)
+{
+    struct mp_image *img = NULL;
+#if HAVE_DRM
+    if (mpi->imgfmt != IMGFMT_VAAPI || p->hw_failed || !p->xframes)
+        return NULL;
+    AVFrame *av = mp_image_to_av_frame(mpi), *d = av_frame_alloc();
+    if (av && d) {
+        d->format = AV_PIX_FMT_DRM_PRIME;
+        if (av_hwframe_map(d, av, AV_HWFRAME_MAP_READ) >= 0) {
+            if (!d->hw_frames_ctx)
+                d->hw_frames_ctx = av_buffer_ref(p->xframes);
+            img = mp_image_from_av_frame(d);
+        }
+    }
+    av_frame_free(&av);
+    av_frame_free(&d);
+    if (img)
+        mp_image_copy_attributes(img, mpi);
+#else
+    (void)p;
+    (void)mpi;
+#endif
+    return img;
+}
+
+static bool push_hw(struct priv *p, struct mp_image *mpi)
+{
+    struct mp_image *m = map_drm(p, mpi);
+    mb_dmabuf_in in = {.release = free_img, .opaque = m};
+    int n = 0;
+#if HAVE_DRM
+    const AVDRMFrameDescriptor *x = m ? (AVDRMFrameDescriptor *)m->planes[0] : NULL;
+    for (int i = 0; x && i < x->nb_layers; i++)
+        for (int j = 0; j < x->layers[i].nb_planes && n < 2; j++, n++) {
+            in.obj[n] = x->layers[i].planes[j].object_index;
+            in.offset[n] = x->layers[i].planes[j].offset;
+            in.pitch[n] = x->layers[i].planes[j].pitch;
+        }
+    for (int i = 0; x && i < x->nb_objects && i < 4; i++)
+        in.fd[i] = x->objects[i].fd;
+    in.modifier = x ? x->objects[0].format_modifier : 0;
+#endif
+    if (n != 2 || mb_push_dmabuf(p->ctx, &in) < 0) {
+        talloc_free(m);
+        p->hw_failed = true;
+        return false;
+    }
+    return true;
+}
+
+static struct mp_image *download(struct priv *p, struct mp_image *mpi)
+{
+    if (mpi->imgfmt != IMGFMT_VAAPI)
+        return mpi;
+    struct mp_image *sw = mp_image_hw_download(mpi, p->pool);
+    talloc_free(mpi);
+    return sw;
+}
+
+static struct mp_image *to_drm(struct priv *p, struct mp_image *mpi)
+{
+    mb_dmabuf x;
+    mb_image src = to_mb(mpi);
+    if (!p->xframes || mpi->imgfmt != p->imgfmt || mb_export_image(p->ctx, &src, &x) < 0)
+        return mpi;
+    struct mp_image *img = drm_image(p, &x, mpi);
+    if (!img)
+        return mpi;
+    talloc_free(mpi);
+    return img;
+}
+
 static bool setup(struct mp_filter *f, struct mp_image *mpi)
 {
     struct priv *p = f->priv;
-    if (p->imgfmt == mpi->imgfmt && p->w == mpi->w && p->h == mpi->h)
+    int swfmt = mpi->imgfmt == IMGFMT_VAAPI ? mpi->params.hw_subfmt : mpi->imgfmt;
+    if (p->imgfmt == swfmt && p->w == mpi->w && p->h == mpi->h)
         return !p->disabled;
     flush_pending(f);
     while (p->ngpu)
@@ -99,13 +280,14 @@ static bool setup(struct mp_filter *f, struct mp_image *mpi)
     p->grid = MP_NOPTS_VALUE;
     mb_destroy(p->ctx);
     p->ctx = NULL;
+    av_buffer_unref(&p->xframes);
     p->disabled = true;
-    p->imgfmt = mpi->imgfmt;
+    p->imgfmt = swfmt;
     p->w = mpi->w;
     p->h = mpi->h;
 
     struct mp_regular_imgfmt reg;
-    if (!mp_get_regular_imgfmt(&reg, mpi->imgfmt) || reg.component_type != MP_COMPONENT_TYPE_UINT ||
+    if (!mp_get_regular_imgfmt(&reg, swfmt) || reg.component_type != MP_COMPONENT_TYPE_UINT ||
         reg.component_size > 2 || reg.chroma_xs > 1 || reg.chroma_ys > 1) {
         MP_WARN(f, "unsupported format %s, passing through\n", mp_imgfmt_to_name(mpi->imgfmt));
         return false;
@@ -131,7 +313,9 @@ static bool setup(struct mp_filter *f, struct mp_image *mpi)
         return false;
     }
     p->disabled = false;
-    MP_VERBOSE(f, "interpolating %dx%d %s\n", mpi->w, mpi->h, mp_imgfmt_to_name(mpi->imgfmt));
+    setup_export(f, mpi, swfmt);
+    MP_VERBOSE(f, "interpolating %dx%d %s%s\n", mpi->w, mpi->h, mp_imgfmt_to_name(swfmt),
+               p->xframes ? ", frames stay on the GPU" : "");
     return true;
 }
 
@@ -148,8 +332,16 @@ static void finish_oldest_gpu(struct priv *p)
         struct qent *e = &p->outq[i];
         if (!e->gpu)
             continue;
-        mb_image dst = to_mb(e->frame.data);
-        mb_retrieve(p->ctx, &dst);
+        if (p->xframes) {
+            mb_dmabuf x;
+            struct mp_image *ref = e->frame.data;
+            struct mp_image *img = mb_retrieve_dmabuf(p->ctx, &x) >= 0 ? drm_image(p, &x, ref) : NULL;
+            talloc_free(ref);
+            e->frame = img ? MAKE_FRAME(MP_FRAME_VIDEO, img) : MP_NO_FRAME;
+        } else {
+            mb_image dst = to_mb(e->frame.data);
+            mb_retrieve(p->ctx, &dst);
+        }
         e->gpu = false;
         p->ngpu--;
         return;
@@ -172,6 +364,19 @@ static double display_fps(struct mp_filter *f)
     return p->dfps;
 }
 
+static void enqueue_real(struct priv *p, struct mp_image *r)
+{
+    struct mp_image *m = map_drm(p, r);
+    if (m) {
+        talloc_free(r);
+        enqueue(p, MAKE_FRAME(MP_FRAME_VIDEO, m), false);
+        return;
+    }
+    r = download(p, r);
+    if (r)
+        enqueue(p, MAKE_FRAME(MP_FRAME_VIDEO, to_drm(p, r)), false);
+}
+
 static void enqueue_ref(struct priv *p, struct mp_image *img, double pts, double dur)
 {
     struct mp_image *r = mp_image_new_ref(img);
@@ -179,12 +384,12 @@ static void enqueue_ref(struct priv *p, struct mp_image *img, double pts, double
         return;
     r->pts = pts;
     r->pkt_duration = dur;
-    enqueue(p, MAKE_FRAME(MP_FRAME_VIDEO, r), false);
+    enqueue_real(p, r);
 }
 
 static void submit_interp(struct priv *p, struct mp_image *ref, double t, double pts, double dur)
 {
-    struct mp_image *out = mp_image_pool_get(p->pool, ref->imgfmt, ref->w, ref->h);
+    struct mp_image *out = p->xframes ? mp_image_new_dummy_ref(ref) : mp_image_pool_get(p->pool, ref->imgfmt, ref->w, ref->h);
     if (out) {
         mp_image_copy_attributes(out, ref);
         while (mb_pending(p->ctx) >= MB_MAX_PENDING && p->ngpu)
@@ -256,7 +461,7 @@ static void emit_pair(struct mp_filter *f, struct mp_image *mpi)
     }
     mp_image_unrefp(&p->prev);
     p->prev = mp_image_new_ref(mpi);
-    enqueue(p, MAKE_FRAME(MP_FRAME_VIDEO, mpi), false);
+    enqueue_real(p, mpi);
 }
 
 static void flush_pending(struct mp_filter *f)
@@ -273,9 +478,16 @@ static void flush_pending(struct mp_filter *f)
 static void handle_frame(struct mp_filter *f, struct mp_image *mpi)
 {
     struct priv *p = f->priv;
+    if (mpi->imgfmt == IMGFMT_VAAPI && p->hw_failed) {
+        mpi = download(p, mpi);
+        if (!mpi)
+            return;
+    }
     if (!setup(f, mpi)) {
         mp_image_unrefp(&p->prev);
-        enqueue(p, MAKE_FRAME(MP_FRAME_VIDEO, mpi), false);
+        mpi = download(p, mpi);
+        if (mpi)
+            enqueue(p, MAKE_FRAME(MP_FRAME_VIDEO, mpi), false);
         return;
     }
     double lp = p->last_pts, gap = mpi->pts - lp, dfps = p->opts->factor ? 0 : display_fps(f);
@@ -288,20 +500,30 @@ static void handle_frame(struct mp_filter *f, struct mp_image *mpi)
         flush_pending(f);
         mp_image_unrefp(&p->prev);
         mpi->pkt_duration = gap;
-        enqueue(p, MAKE_FRAME(MP_FRAME_VIDEO, mpi), false);
+        enqueue_real(p, mpi);
         return;
     }
     if (p->prev && !fast && !pair_ok(p, lp, mpi->pts)) {
         flush_pending(f);
         mp_image_unrefp(&p->prev);
     }
-    mb_image src = to_mb(mpi);
     if (!p->prev) {
         while (p->ngpu)
             finish_oldest_gpu(p);
         mb_reset(p->ctx);
     }
-    mb_push(p->ctx, &src);
+    if (mpi->imgfmt == IMGFMT_VAAPI && !push_hw(p, mpi)) {
+        MP_VERBOSE(f, "cannot import decoder frames, copying them instead\n");
+        mpi = download(p, mpi);
+        if (!mpi) {
+            mp_image_unrefp(&p->prev);
+            return;
+        }
+    }
+    if (mpi->imgfmt != IMGFMT_VAAPI) {
+        mb_image src = to_mb(mpi);
+        mb_push(p->ctx, &src);
+    }
     if (!p->prev) {
         emit_pair(f, mpi);
         return;
@@ -326,7 +548,8 @@ static bool emit_head(struct mp_filter *f, bool block)
     struct mp_frame frame = h->frame;
     p->nout--;
     memmove(&p->outq[0], &p->outq[1], p->nout * sizeof(p->outq[0]));
-    mp_pin_in_write(f->ppins[1], frame);
+    if (frame.type != MP_FRAME_NONE)
+        mp_pin_in_write(f->ppins[1], frame);
     return true;
 }
 
@@ -399,6 +622,13 @@ static struct mp_filter *f_create(struct mp_filter *parent, void *options)
         if (fmt)
             mp_autoconvert_add_imgfmt(conv, fmt, 0);
     }
+    p->nozc = getenv("MOTIONBLADE_NO_ZEROCOPY");
+#if HAVE_DRM
+    if (!p->nozc) {
+        mp_autoconvert_add_imgfmt(conv, IMGFMT_VAAPI, IMGFMT_NV12);
+        mp_autoconvert_add_imgfmt(conv, IMGFMT_VAAPI, IMGFMT_P010);
+    }
+#endif
     mp_pin_connect(conv->f->pins[0], f->ppins[0]);
     p->in = conv->f->pins[1];
     return f;

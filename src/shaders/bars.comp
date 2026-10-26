@@ -1,0 +1,43 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(binding = 0) uniform sampler2D Y;
+layout(binding = 1) uniform sampler2D C;
+layout(std430, binding = 2) buffer Flags { uint fl[]; };
+
+shared uint rowf[32], colf[32];
+
+void main()
+{
+    int W = pc.i0.x, H = pc.i0.y, sx = pc.i0.z, sy = pc.i0.w;
+    uint t = gl_LocalInvocationIndex;
+    if (t < 32u) {
+        rowf[t] = 1u;
+        colf[t] = 1u;
+    }
+    barrier();
+    ivec2 cp = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 csz = textureSize(C, 0);
+    if (cp.x < csz.x && cp.y < csz.y) {
+        vec2 c = texelFetch(C, cp, 0).rg;
+        bool cb = all(lessThanEqual(abs(c - 0.5), vec2(pc.f0.y)));
+        for (int dy = 0; dy < (1 << sy); dy++)
+            for (int dx = 0; dx < (1 << sx); dx++) {
+                ivec2 p = (cp << ivec2(sx, sy)) + ivec2(dx, dy);
+                if (p.x < W && p.y < H && (!cb || texelFetch(Y, p, 0).r > pc.f0.x)) {
+                    rowf[(int(gl_LocalInvocationID.y) << sy) + dy] = 0u;
+                    colf[(int(gl_LocalInvocationID.x) << sx) + dx] = 0u;
+                }
+            }
+    }
+    barrier();
+    if (t < 32u) {
+        int y = (int(gl_WorkGroupID.y) * 16 << sy) + int(t);
+        int x = (int(gl_WorkGroupID.x) * 16 << sx) + int(t);
+        if (rowf[t] == 0u && int(t) < (16 << sy) && y < H)
+            fl[y] = 0u;
+        if (colf[t] == 0u && int(t) < (16 << sx) && x < W)
+            fl[H + x] = 0u;
+    }
+}
