@@ -60,6 +60,15 @@ static const uint32_t spv_cutdec[] =
 static const uint32_t spv_bars[] =
 #include "shaders/bars.h"
     ;
+static const uint32_t spv_agree[] =
+#include "shaders/agree.h"
+    ;
+static const uint32_t spv_gmed[] =
+#include "shaders/gmed.h"
+    ;
+static const uint32_t spv_agspread[] =
+#include "shaders/agspread.h"
+    ;
 static const uint32_t spv_illum[] =
 #include "shaders/illum.h"
     ;
@@ -119,7 +128,9 @@ typedef struct {
     float tsup_rel, tsup_abs, tsup_pen, tsup_min, xbad, xnoise, xr, xs;
     float pen_xfix, xrel, xabs, xmin, vm_thr, ws_lo, ws_hi, sub_thr, pen_sub, pen_sref;
     int sub_ref;
-    int la, bar_wait, bars;
+    int la, bar_wait, bars, tz_pen;
+    float ag_lo, ag_hi, ag_flat, ag_sat, ag_sw, ag_src;
+    int ag_r;
     double scut, scut_rel, zcut_rel, zcut_min;
     float cut_sd, cut_kmin;
 } params;
@@ -184,7 +195,7 @@ struct mb_ctx {
     impimg imp[MAXIMP];
     vimg bgy, bgc;
     vbuf bflags;
-    vpipe p_bars;
+    vpipe p_bars, p_agree, p_gmed, p_agspread;
     VkInstance inst;
     VkPhysicalDevice pd;
     VkDevice dev;
@@ -206,7 +217,7 @@ struct mb_ctx {
     gframe fr[NFR];
     vbuf fa[MAXLEV], fb[MAXLEV], pfa[MAXLEV], pfb[MAXLEV], tmp[MAXLEV], qfb;
     int lw[MAXLEV], lh[MAXLEV], bw[MAXLEV], bh[MAXLEV];
-    vbuf tf4, slots, xkeys, eslots, tf0, tf1, stat, pstat, qstat, dummy, fbw, ill0, ill1, hist;
+    vbuf tf4, slots, xkeys, eslots, tf0, tf1, stat, pstat, qstat, dummy, fbw, agw, agw2, gmv, ill0, ill1, hist;
     size_t off[3], rowb[3], rows[3];
     params p;
     mb_stats st;
@@ -750,7 +761,10 @@ static int vk_init(mb_ctx *c)
     PIPE(p_illum, spv_illum, "SSSSBB");
     PIPE(p_ilmed, spv_ilmed, "BB");
     PIPE(p_bars, spv_bars, "SSB");
-    const char *ti = "SSSSSSBBBIIISSBBB";
+    PIPE(p_agree, spv_agree, "SSSSSSBB");
+    PIPE(p_gmed, spv_gmed, "BB");
+    PIPE(p_agspread, spv_agspread, "BBBB");
+    const char *ti = "SSSSSSBBBIIISSBBBBB";
     if (c->fmt.nv) {
         if (c->bps == 1)
             PIPE(p_interp, spv_interp8nv, ti);
@@ -852,7 +866,7 @@ static void res_geom_free(mb_ctx *c)
     img_free(c, &c->oc1);
     img_free(c, &c->oc2);
     vbuf *bufs[] = {&c->slots, &c->xkeys, &c->eslots, &c->tf4,  &c->tf0, &c->tf1,  &c->stat, &c->pstat,
-                    &c->qstat, &c->qfb,   &c->dummy,  &c->fbw, &c->ill0, &c->ill1, &c->hist};
+                    &c->qstat, &c->qfb,   &c->dummy,  &c->fbw, &c->agw, &c->agw2, &c->gmv, &c->ill0, &c->ill1, &c->hist};
     for (size_t i = 0; i < sizeof(bufs) / sizeof(bufs[0]); i++)
         buf_free(c, bufs[i]);
 }
@@ -889,7 +903,9 @@ static int res_geom_init(mb_ctx *c)
         buf_create(c, &c->eslots, (VkDeviceSize)nb * 4 * 4, 0) || buf_create(c, &c->tf4, (VkDeviceSize)nb * 64, 0) ||
         buf_create(c, &c->tf0, (VkDeviceSize)nb * 16, 0) || buf_create(c, &c->tf1, (VkDeviceSize)nb * 16, 0) ||
         buf_create(c, &c->stat, 64, 0) || buf_create(c, &c->dummy, 64, 0) || buf_create(c, &c->hist, 128, 0) ||
-        buf_create(c, &c->fbw, (VkDeviceSize)nb * 4, 0) || buf_create(c, &c->ill0, (VkDeviceSize)nb * 16, 0) ||
+        buf_create(c, &c->fbw, (VkDeviceSize)nb * 4, 0) || buf_create(c, &c->agw, (VkDeviceSize)nb * 8, 0) ||
+        buf_create(c, &c->agw2, (VkDeviceSize)nb * 4, 0) || buf_create(c, &c->gmv, 16, 0) ||
+        buf_create(c, &c->ill0, (VkDeviceSize)nb * 16, 0) ||
         buf_create(c, &c->ill1, (VkDeviceSize)nb * 16, 0))
         return -1;
     if (cmd_begin(c) < 0)
@@ -1874,7 +1890,7 @@ int mb_submit(mb_ctx *c, double t)
     }
     vbuf *tfin = &c->dummy, *tfout = &c->tf0;
     for (int pass = 0; pass < c->p.sel_passes; pass++) {
-        pcs pc = {{bw, bh, c->fmt.w, c->fmt.h, pass, la, past, c->p.tsup, (int)lrintf(c->p.tsup_rel * 100), (int)lrintf(c->p.tsup_abs * 100), (int)c->p.tsup_pen, (int)lrintf(c->p.tsup_min * 100), c->p.tref, 0, c->p.twaive},
+        pcs pc = {{bw, bh, c->fmt.w, c->fmt.h, pass, la, past, c->p.tsup, (int)lrintf(c->p.tsup_rel * 100), (int)lrintf(c->p.tsup_abs * 100), (int)c->p.tsup_pen, (int)lrintf(c->p.tsup_min * 100), c->p.tref, c->p.tz_pen, c->p.twaive},
                   {(float)t, c->p.pen_inc, c->p.cthr, c->p.fg_sel, 0, 0, c->p.pen_one, c->p.one_rel, c->p.one_min, c->p.one_tex,
                    c->p.unc_min, (float)c->p.uncov, c->p.one_sw, c->p.unc_cont * 0.01f}};
         set_dc(c, &pc);
@@ -1905,6 +1921,18 @@ int mb_submit(mb_ctx *c, double t)
         pcs pm = {{bw, bh}};
         vres rm[2] = {{NULL, &c->ill0}, {NULL, &c->ill1}};
         dispatch(c, &c->p_ilmed, rm, &pm, (uint32_t)(nb + 63) / 64, 1);
+        pcs pa = {{bw, bh, c->fmt.w, c->fmt.h, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y, c->fmt.nv},
+                  {(float)t, 255.0f * luma_scale(c), c->p.ag_lo, c->p.ag_hi, c->p.ag_flat, 0,
+                   c->bps == 1 ? 128.0f / 255.0f : c->lnorm ? (float)(1 << (c->fmt.depth - 1)) / 65535.0f : 0.5f, c->p.ag_sat}};
+        pcs pg = {{bw, bh}};
+        vres rg[2] = {{NULL, tfin}, {NULL, &c->gmv}};
+        dispatch(c, &c->p_gmed, rg, &pg, 1, 1);
+        vres ra[8] = {{&A->y, NULL}, {&B->y, NULL}, {&A->c1, NULL}, {&B->c1, NULL},
+                      {ac2, NULL},   {bc2, NULL},   {NULL, &c->agw}, {NULL, &c->gmv}};
+        dispatch(c, &c->p_agree, ra, &pa, (uint32_t)(nb + 63) / 64, 1);
+        pcs ps = {{bw, bh, c->p.ag_r}, {c->p.ag_src, (float)t}};
+        vres rs[4] = {{NULL, &c->agw}, {NULL, &c->agw2}, {NULL, tfin}, {NULL, &c->gmv}};
+        dispatch(c, &c->p_agspread, rs, &ps, (uint32_t)(nb + 63) / 64, 1);
     }
     {
         pcs pc = {{bw, bh, c->fmt.w, c->fmt.h, c->p.sub_ref},
@@ -1917,11 +1945,12 @@ int mb_submit(mb_ctx *c, double t)
         out_range(c, &maxv, &step);
         pcs pc = {{c->fmt.w, c->fmt.h, bw, bh, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y},
                   {(float)t, c->p.sigma, c->p.pen_occ, c->p.pen_bad, c->p.pen_fb, c->p.wprior, c->p.cthr, c->p.pen_fbm,
-                   luma_scale(c), maxv, step, 0, c->p.fg_pix, c->p.ws_lo, c->p.ws_hi}};
-        vres r[17] = {{&A->y, NULL},  {&B->y, NULL},  {&A->c1, NULL},   {&B->c1, NULL},
+                   luma_scale(c), maxv, step, 0, c->p.fg_pix, c->p.ws_lo, c->p.ws_hi, c->p.ag_sw}};
+        vres r[19] = {{&A->y, NULL},  {&B->y, NULL},  {&A->c1, NULL},   {&B->c1, NULL},
                       {ac2, NULL},    {bc2, NULL},    {NULL, &c->tf4},  {NULL, FA0},
                       {NULL, FB0}, {&c->oy, NULL}, {&c->oc1, NULL}, {c->fmt.nv ? &c->oc1 : &c->oc2, NULL},
-                      {lev_img(c, ka, 0), NULL}, {lev_img(c, kb, 0), NULL}, {NULL, SC}, {NULL, &c->fbw}, {NULL, &c->ill1}};
+                      {lev_img(c, ka, 0), NULL}, {lev_img(c, kb, 0), NULL}, {NULL, SC}, {NULL, &c->fbw}, {NULL, &c->ill1},
+                      {NULL, &c->agw2}, {NULL, &c->gmv}};
         dispatch(c, &c->p_interp, r, &pc, (uint32_t)((c->fmt.w + 1) / 2 + 7) / 8, (uint32_t)((c->fmt.h + 1) / 2 + 7) / 8);
     }
     S(c)->xidx = xi;
@@ -2125,6 +2154,14 @@ static void default_params(params *p)
     p->la = 1;
     p->bar_wait = 48;
     p->bars = 1;
+    p->tz_pen = 2048;
+    p->ag_lo = 24;
+    p->ag_hi = 48;
+    p->ag_flat = 32;
+    p->ag_r = 8;
+    p->ag_sat = 48;
+    p->ag_sw = 16;
+    p->ag_src = 8;
     p->scut = 40;
     p->scut_rel = 4;
     p->zcut_rel = 2;
@@ -2143,7 +2180,7 @@ int mb_set_param(mb_ctx *c, const char *name, double v)
     }
     P_(pen_parent) P_(pen_temporal) P_(pen_update) P_(pen_zero) P_(pen_cross) P_(pen_len) P_(lam_full) P_(dc_lo) P_(dc_hi) P_(skip)
     P_(coarse_r) P_(iters) P_(iters0) P_(refine) P_(sel_passes) P_(pen_inc) P_(sigma) P_(pen_occ) P_(pen_bad)
-    P_(wprior) P_(cthr) P_(pen_fb) P_(fb_spread) P_(fb_avg) P_(fg_sel) P_(fg_pix) P_(pen_one) P_(one_rel) P_(one_min) P_(one_tex) P_(one_sw) P_(pen_fbm) P_(unc_min) P_(uncov) P_(unc_cont) P_(xfix) P_(tsup) P_(xloc) P_(tex) P_(tref) P_(twaive) P_(xchk) P_(xbad) P_(xnoise) P_(xr) P_(xs) P_(tsup_rel) P_(tsup_abs) P_(tsup_pen) P_(tsup_min) P_(pen_xfix) P_(xrel) P_(xabs) P_(xmin) P_(vm_thr) P_(ws_lo) P_(ws_hi) P_(sub_thr) P_(pen_sub) P_(sub_ref) P_(pen_sref) P_(la) P_(bar_wait) P_(bars) P_(fb_ilo) P_(fb_ihi) P_(scut) P_(scut_rel) P_(zcut_rel) P_(zcut_min) P_(cut_sd) P_(cut_kmin)
+    P_(wprior) P_(cthr) P_(pen_fb) P_(fb_spread) P_(fb_avg) P_(fg_sel) P_(fg_pix) P_(pen_one) P_(one_rel) P_(one_min) P_(one_tex) P_(one_sw) P_(pen_fbm) P_(unc_min) P_(uncov) P_(unc_cont) P_(xfix) P_(tsup) P_(xloc) P_(tex) P_(tref) P_(twaive) P_(xchk) P_(xbad) P_(xnoise) P_(xr) P_(xs) P_(tsup_rel) P_(tsup_abs) P_(tsup_pen) P_(tsup_min) P_(pen_xfix) P_(xrel) P_(xabs) P_(xmin) P_(vm_thr) P_(ws_lo) P_(ws_hi) P_(sub_thr) P_(pen_sub) P_(sub_ref) P_(pen_sref) P_(la) P_(bar_wait) P_(bars) P_(tz_pen) P_(ag_lo) P_(ag_hi) P_(ag_flat) P_(ag_r) P_(ag_sat) P_(ag_sw) P_(ag_src) P_(fb_ilo) P_(fb_ihi) P_(scut) P_(scut_rel) P_(zcut_rel) P_(zcut_min) P_(cut_sd) P_(cut_kmin)
 #undef P_
     return -1;
 }
@@ -2171,6 +2208,9 @@ void mb_destroy(mb_ctx *c)
         img_free(c, &c->bgc);
         buf_free(c, &c->bflags);
         pipe_free(c, &c->p_bars);
+        pipe_free(c, &c->p_agree);
+        pipe_free(c, &c->p_gmed);
+        pipe_free(c, &c->p_agspread);
         for (int i = 0; i < c->nx; i++)
             xbuf_free(c, &c->xb[i]);
         if (c->xp && atomic_fetch_sub(&c->xp->refs, 1) == 1)

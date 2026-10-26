@@ -108,6 +108,15 @@ void main()
                 add(u);
         }
     }
+    bool tsup = false;
+    vec2 tv = vec2(0.0);
+    if (pc.i3.y > 0 && past && fut) {
+        vec2 tc[3] = vec2[3](vec2(0.0), nfa[id].xy, -pfb[id].xy);
+        for (int k = 0; k < 3 && !tsup; k++) {
+            tsup = both_sup(vec2(bx * 8 + 4, by * 8 + 4), tc[k], t);
+            tv = tc[k];
+        }
+    }
     int n2 = n;
     if (pc.i1.x == 0) {
         ivec2 d[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
@@ -162,6 +171,8 @@ void main()
                 pen = 0.0;
         }
         float cost = s + pc.f0.y * pen;
+        if (tsup && l1(u - tv) >= minsup && !both_sup(c, u, t))
+            cost += float(pc.i3.y);
         if (chk) {
             if (!sup)
                 cost += float(pc.i2.z);
@@ -178,6 +189,22 @@ void main()
             best_v = u;
             best_m = m2;
             best_sup = sup;
+            best_ok = okA && okB;
+        }
+    }
+    if (tsup && l1(best_v - tv) >= minsup) {
+        float ra[16], rb[16];
+        row16(A, row0 - t * tv, ra);
+        row16(B, row0 + (1.0 - t) * tv, rb);
+        float s = zsad(ra, rb);
+        float thr = cons_thr(pc.f0.z, tv);
+        bool okA = l1(fat(0, c - t * tv) - tv) <= thr, okB = l1(fat(1, c + (1.0 - t) * tv) + tv) <= thr;
+        float cost = s + pc.f0.y * float(int(!okA) + int(!okB));
+        if (cost < best_c) {
+            best_c = cost;
+            best_v = tv;
+            best_m = g_ml;
+            best_sup = true;
             best_ok = okA && okB;
         }
     }

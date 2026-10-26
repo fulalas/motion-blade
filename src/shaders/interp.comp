@@ -16,6 +16,8 @@ layout(binding = 13) uniform sampler2D BL;
 layout(std430, binding = 14) readonly buffer Stat { uint stat[]; };
 layout(std430, binding = 15) readonly buffer FBW { float fbw[]; };
 layout(std430, binding = 16) readonly buffer ILL { vec4 ill[]; };
+layout(std430, binding = 17) readonly buffer NW { float nwb[]; };
+layout(std430, binding = 18) readonly buffer GM { vec4 gmv[]; };
 #ifdef DEPTH16
 layout(binding = 9, r16) uniform writeonly image2D oY;
 #ifdef NV
@@ -113,6 +115,15 @@ void quad_cubic(sampler2D T, vec2 pos, vec2 inv, out float o[4])
     }
 }
 
+vec2 csmp(sampler2D T1, sampler2D T2, vec2 p)
+{
+#ifdef NV
+    return textureLod(T1, p, 0.0).rg;
+#else
+    return vec2(textureLod(T1, p, 0.0).r, textureLod(T2, p, 0.0).r);
+#endif
+}
+
 float outq(float v)
 {
 #ifdef DEPTH16
@@ -176,7 +187,7 @@ void main()
     vec2 cu[NC];
     int cm[NC];
     float cw[NC][4];
-    float fbs[4] = float[4](0.0, 0.0, 0.0, 0.0), fbn[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    float fbs[4] = float[4](0.0, 0.0, 0.0, 0.0), fbn[4] = float[4](0.0, 0.0, 0.0, 0.0), nws[4] = float[4](0.0, 0.0, 0.0, 0.0);
     int nc = 0;
     bool hasm = false;
     for (int k = 0; k < 4; k++) {
@@ -204,6 +215,7 @@ void main()
             vec2 w2 = max(vec2(0.0), 1.0 - abs(p - cb) / 8.0);
             cw[ci][j] += w2.x * w2.y;
             fbs[j] += w2.x * w2.y * fbw[bi];
+            nws[j] += w2.x * w2.y * nwb[bi];
             fbn[j] += w2.x * w2.y;
         }
     }
@@ -312,17 +324,40 @@ void main()
         for (int j = 0; j < 4; j++)
             acc4[j] += wA[i][j] * (sa[j] - t * dy) + wB[i][j] * (sb[j] + (1.0 - t) * dy);
     }
+    float nq = 0.0, nn[4];
+    for (int j = 0; j < 4; j++) {
+        nn[j] = fbn[j] > 0.0 ? nws[j] / fbn[j] : 0.0;
+        nq += nn[j] * 0.25;
+    }
+    vec2 gv = gmv[0].xy, goa = -t * gv, gob = (1.0 - t) * gv;
+    float gsw = 0.0;
+    int sx = pc.i1.z, sy = pc.i1.w;
+    int CW = pc.i1.x, CH = pc.i1.y;
+    vec2 cinv = 1.0 / vec2(CW, CH);
+    vec2 cs = vec2(1 << sx, 1 << sy);
+    if (nq > 0.0) {
+        vec2 qc = (vec2(q0) + 1.0) / cs;
+        vec2 dc2 = abs(csmp(AC1, AC2, (qc + goa / cs) * cinv) - csmp(BC1, BC2, (qc + gob / cs) * cinv));
+        float dyq = 0.0;
+        for (int j = 0; j < 4; j++) {
+            vec2 pp = vec2(q0 + ivec2(j & 1, j >> 1)) + 0.5;
+            dyq = max(dyq, abs(textureLod(AY, (pp + goa) * inv, 0.0).r - textureLod(BY, (pp + gob) * inv, 0.0).r));
+        }
+        gsw = smoothstep(pc.f3.w, pc.f3.w * 2.5, max(max(dc2.x, dc2.y), dyq) * 255.0 * pc.f2.x);
+    }
     for (int j = 0; j < 4; j++) {
         ivec2 p = q0 + ivec2(j & 1, j >> 1);
+        if (nn[j] > 0.0) {
+            vec2 pp = vec2(p) + 0.5;
+            float ga = textureLod(AY, (pp + goa) * inv, 0.0).r, gb = textureLod(BY, (pp + gob) * inv, 0.0).r;
+            float fv = mix((1.0 - t) * ga + t * gb, t < 0.5 ? ga : gb, gsw);
+            acc4[j] = mix(acc4[j], fv, nn[j]);
+        }
         if (p.x < W && p.y < H)
             imageStore(oY, p, vec4(outq(acc4[j])));
     }
 
     vec2 dcc = il.yz;
-    int sx = pc.i1.z, sy = pc.i1.w;
-    int CW = pc.i1.x, CH = pc.i1.y;
-    vec2 cinv = 1.0 / vec2(CW, CH);
-    vec2 cs = vec2(1 << sx, 1 << sy);
     for (int cy = 0; cy < (2 >> sy); cy++)
         for (int cx = 0; cx < (2 >> sx); cx++) {
             ivec2 cp = (q0 >> ivec2(sx, sy)) + ivec2(cx, cy);
@@ -351,6 +386,10 @@ void main()
                 vec2 b = vec2(cubic(BC1, pb, cinv, false).x, cubic(BC2, pb, cinv, false).x);
 #endif
                 acc.xy += ca * (a - t * dcc) + cb * (b + (1.0 - t) * dcc);
+            }
+            if (nq > 0.0) {
+                vec2 sa = csmp(AC1, AC2, (pc2 + goa / cs) * cinv), sb = csmp(BC1, BC2, (pc2 + gob / cs) * cinv);
+                acc.xy = mix(acc.xy, mix((1.0 - t) * sa + t * sb, t < 0.5 ? sa : sb, gsw), nq);
             }
 #ifdef NV
             imageStore(oC1, cp, vec4(outq(acc.x), outq(acc.y), 0.0, 0.0));
