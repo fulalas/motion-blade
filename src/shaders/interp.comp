@@ -88,6 +88,48 @@ vec2 csamp(sampler2D T, Cub c, vec2 d, vec2 inv, bool two)
     return clamp(v, lo, hi);
 }
 
+vec4 crw(float f)
+{
+    return vec4(f * (-0.5 + f * (1.0 - 0.5 * f)), 1.0 + f * f * (-2.5 + 1.5 * f), f * (0.5 + f * (2.0 - 1.5 * f)),
+                f * f * (-0.5 + 0.5 * f));
+}
+
+void quad_cubic(sampler2D T, vec2 pos, vec2 inv, out float o[4])
+{
+    vec2 k = floor(pos - 0.5), f = pos - 0.5 - k;
+    if (f == vec2(0.0)) {
+        ivec2 lim = textureSize(T, 0) - 1;
+        for (int j = 0; j < 4; j++)
+            o[j] = texelFetch(T, clamp(ivec2(k) + ivec2(j & 1, j >> 1), ivec2(0), lim), 0).r;
+        return;
+    }
+    vec4 wx = crw(f.x), wy = crw(f.y);
+    float hv[5][2], in3[3][3];
+    for (int gy = 0; gy < 3; gy++) {
+        vec4 g0 = textureGather(T, (k + vec2(0.0, float(2 * gy))) * inv, 0);
+        vec4 g1 = textureGather(T, (k + vec2(2.0, float(2 * gy))) * inv, 0);
+        vec4 g2 = textureGather(T, (k + vec2(4.0, float(2 * gy))) * inv, 0);
+        float r[2][6] = float[2][6](float[6](g0.w, g0.z, g1.w, g1.z, g2.w, g2.z), float[6](g0.x, g0.y, g1.x, g1.y, g2.x, g2.y));
+        for (int rr = 0; rr < 2; rr++) {
+            int row = 2 * gy + rr;
+            if (row > 4)
+                continue;
+            for (int jx = 0; jx < 2; jx++)
+                hv[row][jx] = dot(wx, vec4(r[rr][jx], r[rr][jx + 1], r[rr][jx + 2], r[rr][jx + 3]));
+            if (row >= 1 && row <= 3)
+                for (int c = 0; c < 3; c++)
+                    in3[row - 1][c] = r[rr][c + 1];
+        }
+    }
+    for (int j = 0; j < 4; j++) {
+        int jx = j & 1, jy = j >> 1;
+        float v = dot(wy, vec4(hv[jy][jx], hv[jy + 1][jx], hv[jy + 2][jx], hv[jy + 3][jx]));
+        float lo = min(min(in3[jy][jx], in3[jy][jx + 1]), min(in3[jy + 1][jx], in3[jy + 1][jx + 1]));
+        float hi = max(max(in3[jy][jx], in3[jy][jx + 1]), max(in3[jy + 1][jx], in3[jy + 1][jx + 1]));
+        o[j] = clamp(v, lo, hi);
+    }
+}
+
 float outq(float v)
 {
 #ifdef DEPTH16
@@ -279,14 +321,13 @@ void main()
     }
     float acc4[4] = float[4](0.0, 0.0, 0.0, 0.0);
     for (int i = 0; i < nc; i++) {
-        Cub xa = cw_setup(vec2(q0) + 0.5 - t * cu[i]), xb = cw_setup(vec2(q0) + 0.5 + (1.0 - t) * cu[i]);
-        for (int j = 0; j < 4; j++) {
-            if (wA[i][j] + wB[i][j] <= 0.0)
-                continue;
-            vec2 d = vec2(j & 1, j >> 1);
-            acc4[j] += wA[i][j] * (csamp(AY, xa, d, inv, false).x - t * dy) +
-                       wB[i][j] * (csamp(BY, xb, d, inv, false).x + (1.0 - t) * dy);
-        }
+        if (wA[i][0] + wB[i][0] + wA[i][1] + wB[i][1] + wA[i][2] + wB[i][2] + wA[i][3] + wB[i][3] <= 0.0)
+            continue;
+        float sa[4], sb[4];
+        quad_cubic(AY, vec2(q0) + 0.5 - t * cu[i], inv, sa);
+        quad_cubic(BY, vec2(q0) + 0.5 + (1.0 - t) * cu[i], inv, sb);
+        for (int j = 0; j < 4; j++)
+            acc4[j] += wA[i][j] * (sa[j] - t * dy) + wB[i][j] * (sb[j] + (1.0 - t) * dy);
     }
     for (int j = 0; j < 4; j++) {
         ivec2 p = q0 + ivec2(j & 1, j >> 1);
