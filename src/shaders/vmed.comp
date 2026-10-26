@@ -17,23 +17,26 @@ void main()
         return;
     }
     ivec2 b = ivec2(id % bw, id / bw);
-    vec2 nv[9];
+    vec4 nv[9];
     int n = 0;
     for (int k = 0; k < 9; k++) {
-        vec4 q = ti[bidx(b + ivec2(k % 3 - 1, k / 3 - 1), ivec2(bw, bh))];
-        if (int(q.z) == 0)
-            nv[n++] = q.xy;
+        ivec2 q = b + ivec2(k % 3 - 1, k / 3 - 1);
+        if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(bw, bh))))
+            continue;
+        vec4 f = ti[q.y * bw + q.x];
+        if (int(f.z) == 0)
+            nv[n++] = f;
     }
-    vec2 med = v.xy;
+    vec4 med = v;
     float bd = 1e30;
     for (int i = 0; i < n; i++) {
         float d = 0.0;
         for (int j = 0; j < n; j++)
-            d += l1(nv[i] - nv[j]);
+            d += l1(nv[i].xy - nv[j].xy);
         if (d < bd) {
             bd = d;
             med = nv[i];
         }
     }
-    to[id] = l1(med - v.xy) > pc.f0.x ? vec4(med, 0.0, v.w) : v;
+    to[id] = l1(med.xy - v.xy) > pc.f0.x ? med : v;
 }

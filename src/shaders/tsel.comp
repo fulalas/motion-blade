@@ -206,6 +206,7 @@ void main()
                     best_c = cost;
                     best_v = u;
                     best_m = m2;
+                    best_ok = okA && okB;
                 }
             }
         }
@@ -227,6 +228,7 @@ void main()
             best_v = pv;
             best_c = pc2;
             best_mode = M_UNC;
+            best_ok = false;
         }
     }
     float lim = pc.f1.w * best_c, best_rel = 1e30;

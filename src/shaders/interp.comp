@@ -211,6 +211,7 @@ void main()
                         for (int dx = 0; dx < 3; dx++)
                             dm = min(dm, D[(jy + dy) * 4 + jx + dx]);
                     float s7 = round(smoothstep(pc.f3.y, pc.f3.z, dm) * smoothstep(0.0, 0.25, sA * sB) * 7.0);
+                    float q0 = qa + qb;
                     if (t < 0.5) {
                         qa = max(qa, s7);
                         qb = min(qb, 7.0 - qa);
@@ -218,6 +219,7 @@ void main()
                         qb = max(qb, s7);
                         qa = min(qa, 7.0 - qb);
                     }
+                    cst += max(0.0, qa + qb - q0) / 7.0 * pc.f0.z;
                 }
                 al = uint(qa) | (uint(qb) << 3);
             }
