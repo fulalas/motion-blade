@@ -79,4 +79,4 @@
 +        Do not interpolate between frames that are more than this many seconds
 +        apart (default: 0.25).
 +
-+    Example: ``--vf=motionblade --hwdec=auto --video-sync=display-resample``
++    Example: ``--vf=motionblade --hwdec=auto``

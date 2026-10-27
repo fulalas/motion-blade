@@ -56,7 +56,7 @@ driver.
 ## Use
 
 ```sh
-mpv --vf=motionblade --hwdec=auto --video-sync=display-resample video.mp4
+mpv --vf=motionblade --hwdec=auto video.mp4
 ```
 
 Options: `--vf=motionblade=factor=auto:max-fps=0:max-gap=0.25`
