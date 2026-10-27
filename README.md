@@ -10,7 +10,9 @@ The current options available for PC have at least one drawback:
 - SVP: paid and its engine has lower quality (below).
 - RIFE: a heavy neural network, and slightly lower quality.
 - NVIDIA Optical Flow: good quality, but closed source and needs at least an NVIDIA Turing (GTX 1630 or MX450).
-- AMD Fluid Motion Frames: closed source, lower quality and officially only Windows is supported.
+- AMD Fluid Motion Frames: closed source and officially only Windows is supported.
+- AMD FSR 3 frame generation: made for games; with video frames alone its quality is much lower.
+- Lossless Scaling: paid, closed source, officially only Windows is supported, and lower quality.
 
 Motion Blade is free and open source, and runs in real time on any vendor, even integrated GPUs like AMD 780M.
 
@@ -22,9 +24,10 @@ Every other frame of 16 test clips dropped, rebuilt and compared with the real o
 |---|---|---|
 | Motion Blade | 38.73 | 0.938 |
 | RIFE 4.16 lite (SVP 4.7) | 38.14 | 0.935 |
-| RIFE 4.4 (SVP 4.7) | 37.86 | 0.937 |
+| Lossless Scaling 3.2.1 (LSFG 3.1) | 37.01 | 0.919 |
 | SVP 4.7 own engine | 36.73 | 0.910 |
-| AMD Fluid Motion Frames (afmf-linux 1.3.1) | 34.70 | 0.885 |
+| afmf-linux 1.3.1 | 34.70 | 0.885 |
+| AMD FSR 3.1.6 frame generation | 33.37 | 0.828 |
 
 ## How it works
 
@@ -35,7 +38,7 @@ Above 1080p the motion analysis runs at half resolution; the final image is alwa
 
 ## Build
 
-Needs the mpv build dependencies (meson, ninja, ffmpeg, libplacebo...), Vulkan 1.1 headers
+Needs the mpv build dependencies (meson, ninja, ffmpeg, libplacebo, etc), Vulkan 1.1 headers
 and driver, and `glslc` (from shaderc).
 
 ```sh
