@@ -140,7 +140,7 @@ void main()
     int best_mode = 0;
     int q = nbr3(lane, ivec2(bx, by), ivec2(bw, bh));
     set_dc_w(lane < 9 ? max(abs(fa[q].w), abs(fb[q].w)) : 1e30);
-    float cs[8];
+    float cs[19];
     bool anysup = false;
     float minsup = float(pc.i2.w) * 0.01;
     if (pc.i1.w != 0 && past && fut) {

@@ -41,7 +41,7 @@ struct opts {
 
 struct qent {
     struct mp_frame frame;
-    bool gpu;
+    bool gpu, synced;
 };
 
 struct priv {
@@ -279,6 +279,15 @@ static void vk_unlock(void *opaque, uint32_t qf, uint32_t qi)
     (void)vk, (void)qf, (void)qi;
 #endif
 }
+
+static bool vk_can_lock(AVVulkanDeviceContext *vk)
+{
+#if FF_API_VULKAN_SYNC_QUEUES
+    return vk->lock_queue && vk->unlock_queue;
+#else
+    return false;
+#endif
+}
 #pragma GCC diagnostic pop
 
 static mb_ctx *create_vk(struct mp_filter *f, struct mp_image *mpi, const mb_format *fmt)
@@ -288,13 +297,17 @@ static mb_ctx *create_vk(struct mp_filter *f, struct mp_image *mpi, const mb_for
     AVHWDeviceContext *dc = hwfc->device_ctx;
     AVVulkanDeviceContext *vk = dc->hwctx;
     int qf = -1;
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(59, 34, 100)
     for (int i = 0; i < vk->nb_qf && qf < 0; i++)
         if (vk->qf[i].flags & VK_QUEUE_COMPUTE_BIT)
             qf = vk->qf[i].idx;
     for (int i = 0; i < vk->nb_qf && qf < 0; i++)
         if (vk->qf[i].flags & VK_QUEUE_GRAPHICS_BIT)
             qf = vk->qf[i].idx;
-    if (qf < 0 || !fmt->nv)
+#else
+    qf = vk->queue_family_comp_index >= 0 ? vk->queue_family_comp_index : vk->queue_family_index;
+#endif
+    if (qf < 0 || !fmt->nv || !vk_can_lock(vk))
         return NULL;
     mb_vkdev d = {
         .inst = vk->inst,
@@ -480,16 +493,16 @@ static bool setup(struct mp_filter *f, struct mp_image *mpi)
     return true;
 }
 
-static void enqueue(struct priv *p, struct mp_frame frame, bool gpu)
+static void enqueue_synced(struct priv *p, struct mp_frame frame, bool gpu, bool synced)
 {
-    MP_TARRAY_APPEND(p, p->outq, p->nout, ((struct qent){frame, gpu}));
+    MP_TARRAY_APPEND(p, p->outq, p->nout, ((struct qent){frame, gpu, synced}));
     if (gpu)
         p->ngpu++;
 }
 
-static bool gpu_synced(const struct qent *e)
+static void enqueue(struct priv *p, struct mp_frame frame, bool gpu)
 {
-    return ((struct mp_image *)e->frame.data)->imgfmt == IMGFMT_VULKAN;
+    enqueue_synced(p, frame, gpu, false);
 }
 
 static void finish_oldest_gpu(struct priv *p)
@@ -498,13 +511,13 @@ static void finish_oldest_gpu(struct priv *p)
         struct qent *e = &p->outq[i];
         if (!e->gpu)
             continue;
-        if (p->xframes && !gpu_synced(e)) {
+        if (p->xframes && !e->synced) {
             mb_dmabuf x;
             struct mp_image *ref = e->frame.data;
             struct mp_image *img = mb_retrieve_dmabuf(p->ctx, &x) >= 0 ? drm_image(p, &x, ref) : NULL;
             talloc_free(ref);
             e->frame = img ? MAKE_FRAME(MP_FRAME_VIDEO, img) : MP_NO_FRAME;
-        } else if (!gpu_synced(e)) {
+        } else if (!e->synced) {
             mb_image dst = to_mb(e->frame.data);
             mb_retrieve(p->ctx, &dst);
         }
@@ -562,10 +575,11 @@ static void enqueue_ref(struct priv *p, struct mp_image *img, double pts, double
     enqueue_real(p, r);
 }
 
-static struct mp_image *submit_out(struct priv *p, struct mp_image *ref, double t)
+static struct mp_image *submit_out(struct priv *p, struct mp_image *ref, double t, bool *synced)
 {
+    *synced = vk_out(p);
 #if HAVE_VULKAN
-    if (vk_out(p))
+    if (*synced)
         return submit_vk(p, ref, t);
 #endif
     struct mp_image *out = p->xframes ? mp_image_new_dummy_ref(ref) : mp_image_pool_get(p->pool, ref->imgfmt, ref->w, ref->h);
@@ -581,14 +595,15 @@ static void submit_interp(struct priv *p, struct mp_image *ref, double t, double
 {
     while (mb_pending(p->ctx) >= MB_MAX_PENDING && p->ngpu)
         finish_oldest_gpu(p);
-    struct mp_image *out = submit_out(p, ref, t);
+    bool synced;
+    struct mp_image *out = submit_out(p, ref, t, &synced);
     if (!out) {
         enqueue_ref(p, ref, pts, dur);
         return;
     }
     out->pts = pts;
     out->pkt_duration = dur;
-    enqueue(p, MAKE_FRAME(MP_FRAME_VIDEO, out), true);
+    enqueue_synced(p, MAKE_FRAME(MP_FRAME_VIDEO, out), true, synced);
 }
 
 static bool short_gap(double gap, double dfps)
@@ -637,7 +652,10 @@ static void emit_pair(struct mp_filter *f, struct mp_image *mpi)
         return;
     }
 
-    if (ok) {
+    double rate = display_fps(f);
+    if (ok && rate > 0)
+        n = MPMIN(n, (int)(rate * gap * 1.05));
+    if (ok && n > 1) {
         for (int k = 1; k < n; k++) {
             double t = (double)k / n;
             submit_interp(p, t < 0.5 ? prev : mpi, t, prev->pts + gap * t, gap / n);
@@ -676,7 +694,7 @@ static void handle_frame(struct mp_filter *f, struct mp_image *mpi)
             enqueue(p, MAKE_FRAME(MP_FRAME_VIDEO, mpi), false);
         return;
     }
-    double lp = p->last_pts, gap = mpi->pts - lp, dfps = p->opts->factor ? 0 : display_fps(f);
+    double lp = p->last_pts, gap = mpi->pts - lp, dfps = display_fps(f);
     p->last_pts = mpi->pts;
     bool fast = lp != MP_NOPTS_VALUE && mpi->pts != MP_NOPTS_VALUE && gap > 0 &&
                 (short_gap(gap, dfps) || (p->opts->max_fps > 0 && 1.0 / gap > p->opts->max_fps));
@@ -727,7 +745,7 @@ static bool emit_head(struct mp_filter *f, bool block)
         return false;
     struct qent *h = &p->outq[0];
     if (h->gpu) {
-        if (!block && !gpu_synced(h) && !mb_ready(p->ctx))
+        if (!block && !h->synced && !mb_ready(p->ctx))
             return false;
         finish_oldest_gpu(p);
     }

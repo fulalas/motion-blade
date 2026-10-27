@@ -6,9 +6,10 @@ ffv1() { ffmpeg -nostdin -hide_banner -loglevel error "$@" -c:v ffv1 -level 3 -s
 X=https://media.xiph.org/video/derf/y4m
 xiph() {
     [ -f suite/$1.mkv ] && return 0
-    curl -s -r 0-$3 -o suite/$1.tmp.y4m $X/$2.y4m
-    ffv1 -i suite/$1.tmp.y4m -frames:v 41 suite/$1.mkv
-    rm suite/$1.tmp.y4m
+    curl -sfL -r 0-$3 -o suite/$1.tmp.y4m $X/$2.y4m && ffv1 -i suite/$1.tmp.y4m -frames:v 41 suite/$1.mkv
+    r=$?
+    rm -f suite/$1.tmp.y4m
+    return $r
 }
 for f in park_joy crowd_run in_to_tree ducks_take_off old_town_cross; do xiph ${f}_1080p50 ${f}_1080p50 130000000; done
 xiph mobcal_720p50 720p50_mobcal_ter 60000000

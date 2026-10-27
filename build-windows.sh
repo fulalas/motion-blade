@@ -18,7 +18,6 @@ export CC=$TARGET-clang CXX=$TARGET-clang++ AR=$TARGET-ar RANLIB=$TARGET-ranlib
 export CFLAGS="-O2 -pipe" CXXFLAGS="-O2 -pipe" LDFLAGS=""
 export PKG_CONFIG_SYSROOT_DIR="$prefix"
 export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig"
-gitclone="git clone --depth=1 --recursive --shallow-submodules"
 jobs=$(nproc)
 
 cat >"$prefix/crossfile" <<EOF
@@ -72,8 +71,17 @@ gettar() {
     local name="${1##*/}"
     [ -d "${name%.tar.*}" ] && return 0
     curl -sfL -o "$name" "$1"
+    echo "$2  $name" | sha256sum -c --quiet -
     tar -xaf "$name"
     rm "$name"
+}
+
+gitpin() {
+    [ -d "$2" ] && return 0
+    git init -q "$2"
+    git -C "$2" fetch -q --depth=1 "$1" "$3"
+    git -C "$2" checkout -q FETCH_HEAD
+    git -C "$2" submodule update --init --recursive --depth=1
 }
 
 meson_build() {
@@ -87,7 +95,7 @@ done_mark() { [ -e "$prefix/.done-$1" ]; }
 mark() { touch "$prefix/.done-$1"; }
 
 _zlib() {
-    gettar https://zlib.net/fossils/zlib-1.3.1.tar.gz
+    gettar https://zlib.net/fossils/zlib-1.3.1.tar.gz 9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
     pushd zlib-1.3.1 >/dev/null
     make -fwin32/Makefile.gcc clean
     make -fwin32/Makefile.gcc PREFIX=$TARGET- CC=$CC libz.a -j$jobs
@@ -101,7 +109,7 @@ _zlib() {
 }
 
 _iconv() {
-    gettar https://ftpmirror.gnu.org/gnu/libiconv/libiconv-1.18.tar.gz
+    gettar https://ftpmirror.gnu.org/gnu/libiconv/libiconv-1.18.tar.gz 3b08f5f4f9b4eb82f151a7040bfd6fe6c6fb922efe4b1659c66ea933276965e8
     builddir libiconv-1.18
     ../configure --host=$TARGET --prefix=/ --disable-shared --enable-static --disable-nls
     install_build
@@ -112,12 +120,12 @@ _iconv() {
 }
 
 _vulkan() {
-    [ -d Vulkan-Headers ] || $gitclone https://github.com/KhronosGroup/Vulkan-Headers
+    gitpin https://github.com/KhronosGroup/Vulkan-Headers Vulkan-Headers acbb9391c0a597272800cd3f4363661c00a27c77
     builddir Vulkan-Headers
     cmake .. "${cmake_args[@]}"
     install_build
     popd >/dev/null
-    [ -d Vulkan-Loader ] || $gitclone https://github.com/KhronosGroup/Vulkan-Loader
+    gitpin https://github.com/KhronosGroup/Vulkan-Loader Vulkan-Loader 6dc4f59df7af059f3a56a5df1704ab0130d33b95
     builddir Vulkan-Loader
     cmake .. "${cmake_args[@]}" -DBUILD_SHARED_LIBS=ON -DUSE_GAS=ON -DBUILD_TESTS=OFF \
         -DVULKAN_HEADERS_INSTALL_DIR="$prefix"
@@ -127,7 +135,7 @@ _vulkan() {
 
 _shaderc() {
     if [ ! -d shaderc ]; then
-        $gitclone https://github.com/google/shaderc.git
+        gitpin https://github.com/google/shaderc.git shaderc 5bcaaaec711df4dfa31f38923d3d42b9b98d5250
         (cd shaderc && ./utils/git-sync-deps)
     fi
     builddir shaderc
@@ -140,7 +148,7 @@ _shaderc() {
 }
 
 _spirv_cross() {
-    [ -d SPIRV-Cross ] || $gitclone https://github.com/KhronosGroup/SPIRV-Cross
+    gitpin https://github.com/KhronosGroup/SPIRV-Cross SPIRV-Cross 300681bbcb8365a8d1eacdacdbdd0249bbf1d6b1
     builddir SPIRV-Cross
     cmake .. "${cmake_args[@]}" -DSPIRV_CROSS_SHARED=OFF -DSPIRV_CROSS_STATIC=ON \
         -DSPIRV_CROSS_CLI=OFF -DSPIRV_CROSS_ENABLE_TESTS=OFF
@@ -152,17 +160,17 @@ _spirv_cross() {
 }
 
 _dav1d() {
-    [ -d dav1d ] || $gitclone https://github.com/videolan/dav1d.git
+    gitpin https://github.com/videolan/dav1d.git dav1d 9433da2daa61bf7029a52b84bafa5daf59cdcc9d
     meson_build dav1d -Denable_{tools,tests}=false
 }
 
 _lcms2() {
-    [ -d lcms2 ] || $gitclone https://github.com/mm2/Little-CMS.git lcms2
+    gitpin https://github.com/mm2/Little-CMS.git lcms2 044b7bbc59383517854a797ef4d8291809d2ccd8
     meson_build lcms2 -Dtests=disabled -D{utils,versionedlibs}=false
 }
 
 _ffmpeg() {
-    [ -d ffmpeg ] || $gitclone https://github.com/FFmpeg/FFmpeg.git ffmpeg
+    gitpin https://github.com/FFmpeg/FFmpeg.git ffmpeg 847acdff187e6f2f1b725644ac9eabdea7aed9f2
     builddir ffmpeg
     ../configure --prefix=/ --target-os=mingw32 --arch=x86_64 --enable-cross-compile \
         --cross-prefix=$TARGET- --cc=$CC --cxx=$CXX --pkg-config=pkg-config --pkg-config-flags=--static \
@@ -174,33 +182,33 @@ _ffmpeg() {
 }
 
 _libplacebo() {
-    [ -d libplacebo ] || $gitclone https://github.com/haasn/libplacebo.git
+    gitpin https://github.com/haasn/libplacebo.git libplacebo 285d1cc8af2ab79b72ac662eb09736de8c12392b
     meson_build libplacebo -Ddemos=false -Dtests=false -Dopengl=disabled \
         -D{vulkan,d3d11,lcms,shaderc}=enabled -Dglslang=disabled
 }
 
 _freetype() {
-    gettar https://download.savannah.gnu.org/releases/freetype/freetype-2.14.1.tar.xz
+    gettar https://download.savannah.gnu.org/releases/freetype/freetype-2.14.1.tar.xz 32427e8c471ac095853212a37aef816c60b42052d4d9e48230bab3bdf2936ccc
     meson_build freetype-2.14.1 -D{harfbuzz,png,bzip2,brotli}=disabled -Dzlib=system
 }
 
 _fribidi() {
-    gettar https://github.com/fribidi/fribidi/releases/download/v1.0.16/fribidi-1.0.16.tar.xz
+    gettar https://github.com/fribidi/fribidi/releases/download/v1.0.16/fribidi-1.0.16.tar.xz 1b1cde5b235d40479e91be2f0e88a309e3214c8ab470ec8a2744d82a5a9ea05c
     meson_build fribidi-1.0.16 -D{tests,docs,bin}=false
 }
 
 _harfbuzz() {
-    gettar https://github.com/harfbuzz/harfbuzz/releases/download/12.2.0/harfbuzz-12.2.0.tar.xz
+    gettar https://github.com/harfbuzz/harfbuzz/releases/download/12.2.0/harfbuzz-12.2.0.tar.xz ecb603aa426a8b24665718667bda64a84c1504db7454ee4cadbd362eea64e545
     meson_build harfbuzz-12.2.0 -D{tests,docs,utilities,glib,gobject,cairo,icu}=disabled -Dfreetype=enabled
 }
 
 _libass() {
-    [ -d libass ] || $gitclone https://github.com/libass/libass.git
+    gitpin https://github.com/libass/libass.git libass f61db567e6593df3470e91594bcd4ad2d0473aff
     meson_build libass -Dfontconfig=disabled -Ddirectwrite=enabled -Dasm=enabled
 }
 
 _luajit() {
-    [ -d LuaJIT ] || $gitclone https://github.com/LuaJIT/LuaJIT.git
+    gitpin https://github.com/LuaJIT/LuaJIT.git LuaJIT a4c064539ea931274d407e1249b4bb575424a0f4
     pushd LuaJIT >/dev/null
     make TARGET_SYS=Windows clean
     make TARGET_SYS=Windows HOST_CC="cc" CROSS="$TARGET-" STATIC_CC="$CC" DYNAMIC_CC="$CC" \

@@ -1,4 +1,5 @@
 #!/bin/bash
+set -o pipefail
 D=${MOTIONBLADE_DATA:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)/samples}; T=$(dirname "$(readlink -f "$0")"); m=${LIGHT:-flicker}
 F=${TMPDIR:-/tmp}/motionblade-flick
 [ "$F" -nt "$T/flick.c" ] || gcc -O2 -o "$F" "$T/flick.c" -lm || exit 1

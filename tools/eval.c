@@ -5,7 +5,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 
 typedef struct {
     int w, h, n;
@@ -13,23 +15,59 @@ typedef struct {
     char hdr[256];
 } seq;
 
+static void *xalloc(size_t n)
+{
+    void *p = calloc(1, n ? n : 1);
+    if (!p) {
+        fprintf(stderr, "out of memory (%zu bytes)\n", n);
+        exit(1);
+    }
+    return p;
+}
+
+static FILE *open_ffmpeg(const char *path, int nframes, pid_t *pid)
+{
+    char nf[16];
+    snprintf(nf, sizeof(nf), "%d", nframes);
+    char *const argv[] = {"ffmpeg", "-nostdin", "-v", "fatal", "-i", (char *)path, "-frames:v", nf,
+                          "-pix_fmt", "yuv420p", "-f", "yuv4mpegpipe", "-", NULL};
+    int fd[2];
+    if (pipe(fd) < 0)
+        return NULL;
+    *pid = fork();
+    if (*pid < 0) {
+        close(fd[0]);
+        close(fd[1]);
+        return NULL;
+    }
+    if (*pid == 0) {
+        dup2(fd[1], 1);
+        close(fd[0]);
+        close(fd[1]);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(fd[1]);
+    return fdopen(fd[0], "r");
+}
+
+static void close_in(FILE *fp, pid_t pid)
+{
+    fclose(fp);
+    if (pid > 0)
+        waitpid(pid, NULL, 0);
+}
+
 static int read_y4m(const char *path, seq *s, int maxn, int skip)
 {
     size_t len = strlen(path);
     int piped = !(len > 4 && !strcmp(path + len - 4, ".y4m")) && strncmp(path, "/dev/", 5);
-    FILE *fp;
-    if (piped) {
-        char cmd[4200];
-        snprintf(cmd, sizeof(cmd), "ffmpeg -nostdin -v fatal -i '%s' -frames:v %d -pix_fmt yuv420p -f yuv4mpegpipe -",
-                 path, maxn + skip);
-        fp = popen(cmd, "r");
-    } else {
-        fp = fopen(path, "rb");
-    }
+    pid_t pid = -1;
+    FILE *fp = piped ? open_ffmpeg(path, maxn + skip, &pid) : fopen(path, "rb");
     if (!fp)
         return -1;
     if (!fgets(s->hdr, sizeof(s->hdr), fp)) {
-        piped ? pclose(fp) : fclose(fp);
+        close_in(fp, pid);
         return -1;
     }
     char *pw = strstr(s->hdr, " W"), *ph = strstr(s->hdr, " H"), *pc = strstr(s->hdr, " C");
@@ -37,16 +75,16 @@ static int read_y4m(const char *path, seq *s, int maxn, int skip)
     s->h = ph ? atoi(ph + 2) : 0;
     if (s->w <= 0 || s->h <= 0 || s->w % 2 || s->h % 2 || (pc && (strncmp(pc + 2, "420", 3) || strstr(pc, "p1")))) {
         fprintf(stderr, "%s: needs 8-bit 4:2:0 with even width and height\n", path);
-        piped ? pclose(fp) : fclose(fp);
+        close_in(fp, pid);
         return -1;
     }
     size_t fsz = (size_t)s->w * s->h * 3 / 2;
-    s->f = calloc(maxn, sizeof(*s->f));
+    s->f = xalloc((size_t)(maxn > 0 ? maxn : 1) * sizeof(*s->f));
     s->n = 0;
     char line[256];
     int idx = 0;
     while (s->n < maxn && fgets(line, sizeof(line), fp)) {
-        uint8_t *buf = malloc(fsz);
+        uint8_t *buf = xalloc(fsz);
         if (fread(buf, 1, fsz, fp) != fsz) {
             free(buf);
             break;
@@ -57,7 +95,7 @@ static int read_y4m(const char *path, seq *s, int maxn, int skip)
         }
         s->f[s->n++] = buf;
     }
-    piped ? pclose(fp) : fclose(fp);
+    close_in(fp, pid);
     return 0;
 }
 
@@ -81,7 +119,7 @@ static int cmpdbl(const void *a, const void *b)
 static double worst_blocks(const uint8_t *a, const uint8_t *b, int w, int h)
 {
     int bw = w / 16, bh = h / 16, n = bw * bh;
-    double *m = malloc(sizeof(double) * n);
+    double *m = xalloc(sizeof(double) * (size_t)n);
     for (int by = 0; by < bh; by++)
         for (int bx = 0; bx < bw; bx++) {
             double se = 0;
@@ -136,7 +174,7 @@ static void conv_alloc(conv *cv, int fm, int w, int h)
 {
     int bps = fm >= 2 ? 2 : 1;
     size_t ys = (size_t)w * h * bps, cs = (size_t)(w / 2) * (h / 2) * bps;
-    cv->buf = malloc(ys + 2 * cs);
+    cv->buf = xalloc(ys + 2 * cs);
     cv->im.data[0] = cv->buf;
     cv->im.stride[0] = (ptrdiff_t)w * bps;
     if (fm == 1 || fm == 2) {
@@ -236,7 +274,7 @@ static void dump_fields(mb_ctx *c, const char *path, int fw, int fh)
         fprintf(stderr, "cannot write %s\n", path);
         return;
     }
-    float *f = malloc(sizeof(float) * 4 * (size_t)((fw + 7) / 8) * ((fh + 7) / 8));
+    float *f = xalloc(sizeof(float) * 4 * (size_t)((fw + 7) / 8) * ((fh + 7) / 8));
     int w, h;
     for (int which = 0; which < 3; which++) {
         if (mb_debug_field(c, which, f, &w, &h) < 0)
@@ -328,7 +366,7 @@ int main(int argc, char **argv)
     FILE *fo = out ? fopen(out, "wb") : NULL;
     if (fo)
         fputs(s.hdr, fo);
-    uint8_t *res = malloc(fsz);
+    uint8_t *res = xalloc(fsz);
     double swb = 0, spc = 0, sp = 0, ss = 0, sit = 0, worst = 99;
     int cnt = 0, worsti = -1, la = 1;
     for (int i = 0; i < np; i++)

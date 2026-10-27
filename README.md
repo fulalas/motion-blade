@@ -68,9 +68,14 @@ Options: `--vf=motionblade=factor=2:max-fps=0:max-gap=0.25`
 - `max-fps`: skip sources faster than this (default 0 = never skip).
 - `max-gap`: skip timestamp gaps longer than this, in seconds (default 0.25).
 
-`Ctrl+m` cycles the factor: 2, 4, 8 and auto. Other factors are set with the `factor` option.
+Motion Blade never outputs more frames per second than the display refresh rate. A factor that would
+exceed it is lowered (30 fps at 4x on a 60 Hz display gives 60 fps), and videos already at the
+refresh rate play as they are.
 
-Any `--hwdec` mode works. With VA-API (`--hwdec=vaapi`) or Vulkan (`--gpu-api=vulkan --hwdec=vulkan`,
+`Ctrl+m` cycles the factor: 2, 4, 8, auto and off. Other factors are set with the `factor`
+option.
+
+Any `--hwdec` mode works. With VA-API (`--hwdec=vaapi`) or Vulkan (`--gpu-api=vulkan --hwdec=vulkan`),
 frames stay on the GPU so less CPU use. If a driver shows wrong colours or glitches
 with this, `MOTIONBLADE_NO_ZEROCOPY=1` goes back to copying.
 Formats: 8/10/16-bit 4:2:0, 4:2:2, 4:4:4, planar or NV12/P010.

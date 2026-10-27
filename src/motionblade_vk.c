@@ -226,7 +226,6 @@ struct mb_ctx {
     int ok;
     uint32_t sg_size;
     mb_vkdev vd;
-    vimg vy, vc;
     VkSemaphore wsem[4], ssem[4];
     uint64_t wval[4], sval[4];
     int nwait, nsig;
@@ -1205,6 +1204,21 @@ static int bar_rects(const mb_ctx *c, int i, int W, int H, int rect[4][4])
     return n;
 }
 
+static void tmpl_black(mb_ctx *c)
+{
+    unsigned mid = c->bps == 1 ? 128 : c->lnorm ? 1u << (c->full.depth - 1) : 32768;
+    for (int i = 1; i < c->nplanes; i++) {
+        uint8_t *p = c->tmpl + c->toff[i];
+        size_t n = c->trowb[i] * c->trows[i] / c->bps;
+        for (size_t k = 0; k < n; k++) {
+            if (c->bps == 1)
+                p[k] = (uint8_t)mid;
+            else
+                ((uint16_t *)p)[k] = (uint16_t)mid;
+        }
+    }
+}
+
 static int set_crop(mb_ctx *c, int x0, int y0, int w, int h)
 {
     cmd_end(c, 0);
@@ -1227,8 +1241,10 @@ static int set_crop(mb_ctx *c, int x0, int y0, int w, int h)
     c->bars_ver++;
     int ok = 1;
     if (!c->tmpl) {
-        c->tmpl = malloc(c->tsize);
+        c->tmpl = calloc(1, c->tsize);
         ok = c->tmpl != NULL;
+        if (ok)
+            tmpl_black(c);
     }
     ok = ok && res_geom_init(c) == 0 && cmd_begin(c) == 0;
     if (ok && c->nfr) {
@@ -1557,8 +1573,11 @@ static int plane_pair_init(mb_ctx *c, vimg *y, vimg *uv)
     if (y->img)
         return 0;
     if (img_create(c, y, c->full.w, c->full.h, plane_fmt(c, 1)) < 0 ||
-        img_create(c, uv, cdim(c->full.w, c->full.cshift_x), cdim(c->full.h, c->full.cshift_y), plane_fmt(c, 2)) < 0)
+        img_create(c, uv, cdim(c->full.w, c->full.cshift_x), cdim(c->full.h, c->full.cshift_y), plane_fmt(c, 2)) < 0) {
+        img_free(c, y);
+        img_free(c, uv);
         return -1;
+    }
     to_general(c, y);
     to_general(c, uv);
     return 0;
@@ -1627,20 +1646,18 @@ static void push_planes(mb_ctx *c, const vimg *py, const vimg *pu)
     int sx = c->fmt.cshift_x, sy = c->fmt.cshift_y;
     copy_overlap(c, py, -c->x0, -c->y0, &f->y, 0, 0);
     copy_overlap(c, pu, -(c->x0 >> sx), -(c->y0 >> sy), &f->c1, 0, 0);
-    if (cropped(c) && (c->bg_ver != c->bars_ver || (c->bf_tick & 15) == 0)) {
+    int bg = cropped(c) && (c->bg_ver != c->bars_ver || (c->bf_tick & 15) == 0);
+    int bars = c->p.bars && !c->bf_pending && (c->bf_tick++ & 3) == 0;
+    if (bg || (bars && !py->view)) {
         copy_overlap(c, py, 0, 0, &c->bgy, 0, 0);
         copy_overlap(c, pu, 0, 0, &c->bgc, 0, 0);
         c->bg_ver = c->bars_ver;
     }
-    if (c->p.bars && !c->bf_pending && (c->bf_tick++ & 3) == 0) {
+    if (bars) {
         if (!py->view) {
-            if (plane_pair_init(c, &c->vy, &c->vc) < 0)
-                return;
-            copy_overlap(c, py, 0, 0, &c->vy, 0, 0);
-            copy_overlap(c, pu, 0, 0, &c->vc, 0, 0);
             barrier(c);
-            py = &c->vy;
-            pu = &c->vc;
+            py = &c->bgy;
+            pu = &c->bgc;
         }
         pcs pc = {{c->full.w, c->full.h, sx, sy}, {24.0f / 255.0f, 10.0f / 255.0f}};
         vres r[3] = {{py, NULL}, {pu, NULL}, {NULL, &c->bflags}};
@@ -1720,6 +1737,8 @@ int mb_push_vk(mb_ctx *c, mb_vkframe *in)
     vimg pu = frame_plane(c, in, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     push_planes(c, &py, &pu);
     frame_end(c, in, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    if (cmd_end(c, 0) < 0 || cmd_begin(c) < 0)
+        return -1;
     push_end(c);
     return cmd_end(c, 0);
 }
@@ -1730,7 +1749,7 @@ static void vk_copy_out(mb_ctx *c, mb_vkframe *out)
     const vimg *bg[2] = {&c->bgy, &c->bgc}, *im[2] = {&c->oy, &c->oc1};
     for (int i = 0; i < 2; i++) {
         vimg dst = frame_plane(c, out, i, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        int rect[4][4], n = cropped(c) ? bar_rects(c, i, dst.w, dst.h, rect) : 0;
+        int rect[4][4], n = cropped(c) && c->bgy.img ? bar_rects(c, i, dst.w, dst.h, rect) : 0;
         for (int k = 0; k < n; k++)
             copy_rect(c, bg[i], rect[k][0], rect[k][1], &dst, rect[k][0], rect[k][1], rect[k][2], rect[k][3]);
         int sx = i ? c->fmt.cshift_x : 0, sy = i ? c->fmt.cshift_y : 0;
@@ -1999,12 +2018,17 @@ static void xcopy_out(mb_ctx *c, xbuf *x)
     }
 }
 
-static void xfill_desc(mb_ctx *c, int i, mb_dmabuf *out)
+static int xfill_desc(mb_ctx *c, int i, mb_dmabuf *out)
 {
     memset(out, 0, sizeof(*out));
+    out->fd = -1;
 #ifndef _WIN32
     out->fd = dup(c->xb[i].fd);
 #endif
+    if (out->fd < 0) {
+        atomic_store(&c->xp->busy[i], 0);
+        return -1;
+    }
     out->nplanes = c->nplanes;
     for (int k = 0; k < c->nplanes; k++) {
         out->offset[k] = (uint32_t)c->xoff[k];
@@ -2014,6 +2038,7 @@ static void xfill_desc(mb_ctx *c, int i, mb_dmabuf *out)
     out->pool = c->xp;
     out->idx = i;
     atomic_fetch_add(&c->xp->refs, 1);
+    return 0;
 }
 
 void mb_dmabuf_release(void *pool, int idx)
@@ -2035,8 +2060,7 @@ int mb_export_image(mb_ctx *c, const mb_image *src, mb_dmabuf *out)
     mb_image d = xbuf_image(c, x);
     copy_image(c, &d, src);
     x->ver = c->bars_ver;
-    xfill_desc(c, i, out);
-    return 0;
+    return xfill_desc(c, i, out);
 }
 
 int mb_submit_vk(mb_ctx *c, double t, mb_vkframe *out)
@@ -2045,7 +2069,7 @@ int mb_submit_vk(mb_ctx *c, double t, mb_vkframe *out)
     if (!c->ok || c->nfr < 2 || c->fifo_n >= MB_MAX_PENDING || (c->p.la && !c->eos && !la) || (out && !frame_ok(c, out)))
         return -1;
     int xi = c->xp && !out ? xacquire(c) : -1;
-    if ((c->xp && xi < 0) || cmd_begin(c) < 0) {
+    if ((c->xp && !out && xi < 0) || cmd_begin(c) < 0) {
         if (xi >= 0)
             atomic_store(&c->xp->busy[xi], 0);
         return -1;
@@ -2261,9 +2285,9 @@ int mb_retrieve_dmabuf(mb_ctx *c, mb_dmabuf *out)
         return -1;
     if (sl->xidx < 0)
         return -1;
-    xfill_desc(c, sl->xidx, out);
+    int r = xfill_desc(c, sl->xidx, out);
     sl->xidx = -1;
-    return cut;
+    return r < 0 ? -1 : cut;
 }
 
 int mb_interpolate(mb_ctx *c, double t, mb_image *dst)
@@ -2423,8 +2447,6 @@ void mb_destroy(mb_ctx *c)
             slot_release(c, &c->sl[i]);
         img_free(c, &c->bgy);
         img_free(c, &c->bgc);
-        img_free(c, &c->vy);
-        img_free(c, &c->vc);
         buf_free(c, &c->bflags);
         pipe_free(c, &c->p_bars);
         pipe_free(c, &c->p_agree);

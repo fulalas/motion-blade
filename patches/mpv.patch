@@ -39,13 +39,13 @@
  #Ctrl+v loadfile ${clipboard/text} append-play; show-text '+ ${clipboard/text}' # append the copied path
  #DEL script-binding osc/visibility      # cycle OSC visibility between never, auto (mouse-move) and always
  #ctrl+h cycle-values hwdec "no" "auto"  # toggle hardware decoding
-+#Ctrl+m cycle-values vf "motionblade=factor=4" "motionblade=factor=8" "motionblade=factor=auto" "motionblade=factor=2"; show-text "Interpolation: ${?vf==(empty):off}${!vf==(empty):${=vf}}" # cycle motion interpolation
++#Ctrl+m cycle-values vf "motionblade=factor=4" "motionblade=factor=8" "motionblade=factor=auto" "" "motionblade=factor=2"; show-text "Interpolation: ${?vf==(empty):off}${!vf==(empty):${=vf}}" # cycle motion interpolation
  #F8 show-text ${playlist}               # show the playlist
  #F9 show-text ${track-list}             # show the list of video, audio and sub tracks
  #g ignore
 --- a/DOCS/man/vf.rst
 +++ b/DOCS/man/vf.rst
-@@ -865,3 +865,34 @@
+@@ -865,3 +865,36 @@
          Do not use this with ``--vo=gpu``. It will apply filtering twice, since
          most ``--vo=gpu`` options are unconditionally applied to the ``gpu``
          filter. There is no mechanism in mpv to prevent this.
@@ -55,8 +55,8 @@
 +    are computed between the source frames, so motion looks smoother on
 +    displays with a higher refresh rate than the video.
 +
-+    The filter works on frames in system memory; hardware decoded frames are
-+    copied there automatically. Supported formats are 8 to 16 bit
++    With VA-API or Vulkan hardware decoding the frames stay on the GPU; other
++    frames are uploaded from system memory. Supported formats are 8 to 16 bit
 +    YUV with 4:2:0, 4:2:2 or 4:4:4 chroma, planar or semi-planar (``nv12``,
 +    ``p010``). Other formats and frames smaller than 64x64 pass through
 +    unchanged, as does everything when no suitable Vulkan device is found.
@@ -67,7 +67,9 @@
 +    Sub-options:
 +
 +    ``factor=<auto|2-8>``
-+        A number multiplies the frame rate by that factor (default: 2).
++        A number multiplies the frame rate by that factor (default: 2). The
++        output never exceeds the display refresh rate: a factor that would
++        exceed it is lowered, and videos at the refresh rate pass through.
 +        ``auto`` outputs one frame per display refresh, using the display
 +        refresh rate or ``--display-fps-override``. Videos with a frame rate at
 +        or above the refresh rate pass through.
@@ -83,7 +85,7 @@
 diff --git a/video/out/vulkan/context.c b/video/out/vulkan/context.c
 --- a/video/out/vulkan/context.c
 +++ b/video/out/vulkan/context.c
-@@ -347,9 +347,16 @@
+@@ -347,9 +347,15 @@
          .uniformBufferStandardLayout = true,
      };
  
@@ -91,7 +93,6 @@ diff --git a/video/out/vulkan/context.c b/video/out/vulkan/context.c
 +        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
 +        .pNext = &recommended_vk12,
 +        .subgroupSizeControl = true,
-+        .computeFullSubgroups = true,
 +    };
 +
      VkPhysicalDeviceVulkan11Features recommended_vk11 = {
@@ -101,7 +102,7 @@ diff --git a/video/out/vulkan/context.c b/video/out/vulkan/context.c
          .storageBuffer16BitAccess = true,
          .uniformAndStorageBuffer16BitAccess = true,
      };
-@@ -360,6 +367,7 @@
+@@ -360,6 +366,7 @@
          .features = {
              .shaderInt16 = true,
              .shaderFloat64 = true,
