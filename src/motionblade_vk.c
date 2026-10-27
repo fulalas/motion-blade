@@ -195,7 +195,7 @@ typedef struct {
 } params;
 
 typedef struct {
-    vimg y, c1, c2;
+    vimg pl[3];
     vimg lev[MAXLEV];
 } gframe;
 
@@ -289,7 +289,7 @@ struct mb_ctx {
     mb_stats st;
     int nfr, ib, me_valid, have_prev, have_q, eos, lnorm, recording;
     vbuf *last_tf, last_fa, last_fb;
-    vimg oy, oc1, oc2;
+    vimg out[3];
     vbuf up[2];
     int up_k, up_slot[2];
     unsigned up_serial[2], serial;
@@ -1066,9 +1066,8 @@ static int res_fixed_init(mb_ctx *c)
 static void frames_free(mb_ctx *c, gframe *fr)
 {
     for (int k = 0; k < NFR; k++) {
-        img_free(c, &fr[k].y);
-        img_free(c, &fr[k].c1);
-        img_free(c, &fr[k].c2);
+        for (int i = 0; i < 3; i++)
+            img_free(c, &fr[k].pl[i]);
         for (int L = 0; L < MAXLEV; L++)
             img_free(c, &fr[k].lev[L]);
     }
@@ -1084,9 +1083,8 @@ static void res_geom_free(mb_ctx *c)
         buf_free(c, &c->pfb[L]);
         buf_free(c, &c->tmp[L]);
     }
-    img_free(c, &c->oy);
-    img_free(c, &c->oc1);
-    img_free(c, &c->oc2);
+    for (int i = 0; i < 3; i++)
+        img_free(c, &c->out[i]);
     for (int i = 0; i < c->ngbufs; i++)
         buf_free(c, c->gbufs[i]);
     c->ngbufs = 0;
@@ -1108,25 +1106,27 @@ static int img_general(mb_ctx *c, vimg *im, int w, int h, VkFormat fmt)
     return 0;
 }
 
+static int planes_create(mb_ctx *c, vimg pl[3])
+{
+    for (int i = 0; i < c->nplanes; i++)
+        if (img_general(c, &pl[i], i ? c->cw : c->fmt.w, i ? c->ch : c->fmt.h, plane_fmt(c, i && c->fmt.nv ? 2 : 1)) < 0)
+            return -1;
+    return 0;
+}
+
 static int res_geom_init(mb_ctx *c)
 {
-    VkFormat fy = plane_fmt(c, 1), fc = plane_fmt(c, c->fmt.nv ? 2 : 1);
-    int W = c->fmt.w, H = c->fmt.h;
     if (cmd_begin(c) < 0)
         return -1;
     for (int k = 0; k < NFR; k++) {
         gframe *f = &c->fr[k];
-        if (img_general(c, &f->y, W, H, fy) < 0 || img_general(c, &f->c1, c->cw, c->ch, fc) < 0)
-            return -1;
-        if (!c->fmt.nv && img_general(c, &f->c2, c->cw, c->ch, fc) < 0)
+        if (planes_create(c, f->pl) < 0)
             return -1;
         for (int L = c->lnorm ? 0 : 1; L < c->nlev; L++)
             if (img_general(c, &f->lev[L], c->lw[L], c->lh[L], VK_FORMAT_R16_SFLOAT) < 0)
                 return -1;
     }
-    if (img_general(c, &c->oy, W, H, fy) < 0 || img_general(c, &c->oc1, c->cw, c->ch, fc) < 0)
-        return -1;
-    if (!c->fmt.nv && img_general(c, &c->oc2, c->cw, c->ch, fc) < 0)
+    if (planes_create(c, c->out) < 0)
         return -1;
     for (int L = c->mb; L < c->nlev; L++) {
         VkDeviceSize sz = (VkDeviceSize)c->bw[L] * c->bh[L] * 16;
@@ -1178,7 +1178,7 @@ static int fidx(const mb_ctx *c, int back)
 
 static const vimg *lev_img(mb_ctx *c, int k, int L)
 {
-    return L == 0 && !c->lnorm ? &c->fr[k].y : &c->fr[k].lev[L];
+    return L == 0 && !c->lnorm ? &c->fr[k].pl[0] : &c->fr[k].lev[L];
 }
 
 static void run_me(mb_ctx *c);
@@ -1309,7 +1309,7 @@ static void build_levels(mb_ctx *c, int k)
     gframe *f = &c->fr[k];
     if (c->lnorm) {
         pcs pc = {{c->lw[0], c->lh[0]}, {luma_scale(c)}};
-        vres r[2] = {{&f->y, NULL}, {&f->lev[0], NULL}};
+        vres r[2] = {{&f->pl[0], NULL}, {&f->lev[0], NULL}};
         dispatch(c, P(c, NORM), r, &pc, (c->lw[0] + 15) / 16, (c->lh[0] + 15) / 16);
     }
     for (int L = 1; L < c->nlev; L++) {
@@ -1368,10 +1368,8 @@ static void stage_planes(const mb_ctx *c, const vbuf *up, const mb_image *src)
 
 static void upload_planes(mb_ctx *c, const vbuf *up, gframe *f)
 {
-    copy_b2i(c, up, c->off[0], &f->y);
-    copy_b2i(c, up, c->off[1], &f->c1);
-    if (!c->fmt.nv)
-        copy_b2i(c, up, c->off[2], &f->c2);
+    for (int i = 0; i < c->nplanes; i++)
+        copy_b2i(c, up, c->off[i], &f->pl[i]);
 }
 
 static void tmpl_black(mb_ctx *c)
@@ -1421,8 +1419,8 @@ static int set_crop(mb_ctx *c, int x0, int y0, int w, int h)
         vbuf *up = &c->up[0];
         if (c->gpu_in) {
             for (int k = 0; k < NFR; k++) {
-                copy_overlap(c, &c->bgy, 0, 0, &c->fr[k].y, x0, y0);
-                copy_overlap(c, &c->bgc, 0, 0, &c->fr[k].c1, x0 >> sx, y0 >> sy);
+                copy_overlap(c, &c->bgy, 0, 0, &c->fr[k].pl[0], x0, y0);
+                copy_overlap(c, &c->bgc, 0, 0, &c->fr[k].pl[1], x0 >> sx, y0 >> sy);
             }
             had_tmpl = 0;
         } else if (had_tmpl) {
@@ -1434,10 +1432,10 @@ static int set_crop(mb_ctx *c, int x0, int y0, int w, int h)
             if (had_tmpl)
                 upload_planes(c, up, f);
             barrier(c);
-            copy_overlap(c, &old[k].y, ox0, oy0, &f->y, x0, y0);
-            copy_overlap(c, &old[k].c1, ox0 >> sx, oy0 >> sy, &f->c1, x0 >> sx, y0 >> sy);
-            if (!c->fmt.nv)
-                copy_overlap(c, &old[k].c2, ox0 >> sx, oy0 >> sy, &f->c2, x0 >> sx, y0 >> sy);
+            for (int i = 0; i < c->nplanes; i++) {
+                int px = i ? sx : 0, py = i ? sy : 0;
+                copy_overlap(c, &old[k].pl[i], ox0 >> px, oy0 >> py, &f->pl[i], x0 >> px, y0 >> py);
+            }
         }
         barrier(c);
         for (int k = 0; k < NFR; k++)
@@ -1833,8 +1831,8 @@ static void push_planes(mb_ctx *c, const vimg *py, const vimg *pu)
 {
     gframe *f = &c->fr[c->ib];
     int sx = c->fmt.cshift_x, sy = c->fmt.cshift_y;
-    copy_overlap(c, py, -c->x0, -c->y0, &f->y, 0, 0);
-    copy_overlap(c, pu, -(c->x0 >> sx), -(c->y0 >> sy), &f->c1, 0, 0);
+    copy_overlap(c, py, -c->x0, -c->y0, &f->pl[0], 0, 0);
+    copy_overlap(c, pu, -(c->x0 >> sx), -(c->y0 >> sy), &f->pl[1], 0, 0);
     int bg = cropped(c) && (c->bg_ver != c->bars_ver || (c->bf_tick & 15) == 0);
     int bars = c->p.bars && !c->bf_pending && (c->bf_tick++ & 3) == 0;
     if (bg || (bars && !py->view)) {
@@ -1931,14 +1929,14 @@ int mb_push_vk(mb_ctx *c, mb_vkframe *in)
 static void vk_copy_out(mb_ctx *c, mb_vkframe *out)
 {
     frame_begin(c, out, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT);
-    const vimg *bg[2] = {&c->bgy, &c->bgc}, *im[2] = {&c->oy, &c->oc1};
+    const vimg *bg[2] = {&c->bgy, &c->bgc};
     for (int i = 0; i < 2; i++) {
         vimg dst = frame_plane(c, out, i, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         int rect[4][4], n = cropped(c) && c->bgy.img ? bar_rects(c, i, dst.w, dst.h, rect) : 0;
         for (int k = 0; k < n; k++)
             copy_rect(c, bg[i], rect[k][0], rect[k][1], &dst, rect[k][0], rect[k][1], rect[k][2], rect[k][3]);
         int sx = i ? c->fmt.cshift_x : 0, sy = i ? c->fmt.cshift_y : 0;
-        copy_rect(c, im[i], 0, 0, &dst, c->x0 >> sx, c->y0 >> sy, im[i]->w, im[i]->h);
+        copy_rect(c, &c->out[i], 0, 0, &dst, c->x0 >> sx, c->y0 >> sy, c->out[i].w, c->out[i].h);
     }
     frame_end(c, out, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 }
@@ -2228,10 +2226,10 @@ static void xfill_bars(mb_ctx *c, xbuf *x)
 
 static void xcopy_out(mb_ctx *c, xbuf *x)
 {
-    const vimg *im[3] = {&c->oy, &c->oc1, &c->oc2};
     for (int i = 0; i < c->nplanes; i++) {
         int sx = i ? c->fmt.cshift_x : 0, sy = i ? c->fmt.cshift_y : 0;
-        xcopy_rect(c, x, i, im[i], 0, 0, (size_t)(c->x0 >> sx), (size_t)(c->y0 >> sy), im[i]->w, im[i]->h);
+        const vimg *im = &c->out[i];
+        xcopy_rect(c, x, i, im, 0, 0, (size_t)(c->x0 >> sx), (size_t)(c->y0 >> sy), im->w, im->h);
     }
 }
 
@@ -2353,12 +2351,12 @@ int mb_submit_vk(mb_ctx *c, double t, mb_vkframe *out)
         vres r[4] = {{NULL, tfin}, {NULL, &c->fbw}, {NULL, FA0}, {NULL, FB0}};
         dispatch1(c, P(c, CONF), r, &pc, nb);
     }
-    const vimg *ac2 = c->fmt.nv ? &A->c1 : &A->c2, *bc2 = c->fmt.nv ? &B->c1 : &B->c2;
+    const vimg *ac2 = &A->pl[c->fmt.nv ? 1 : 2], *bc2 = &B->pl[c->fmt.nv ? 1 : 2];
     {
         pcs pc = geom_pc(c, bw, bh, lb);
         pc.f[0] = (float)t;
         pc.f[1] = luma_scale(c);
-        vres r[6] = {{&A->c1, NULL}, {&B->c1, NULL}, {ac2, NULL}, {bc2, NULL}, {NULL, tfin}, {NULL, &c->ill0}};
+        vres r[6] = {{&A->pl[1], NULL}, {&B->pl[1], NULL}, {ac2, NULL}, {bc2, NULL}, {NULL, tfin}, {NULL, &c->ill0}};
         dispatch1(c, P(c, ILLUM), r, &pc, nb);
         pcs pm = {{bw, bh}};
         vres rm[2] = {{NULL, &c->ill0}, {NULL, &c->ill1}};
@@ -2369,7 +2367,7 @@ int mb_submit_vk(mb_ctx *c, double t, mb_vkframe *out)
         pcs pg = {{bw, bh}};
         vres rg[2] = {{NULL, tfin}, {NULL, &c->gmv}};
         dispatch1(c, P(c, GMED), rg, &pg, 1);
-        vres ra[8] = {{&A->y, NULL}, {&B->y, NULL}, {&A->c1, NULL}, {&B->c1, NULL},
+        vres ra[8] = {{&A->pl[0], NULL}, {&B->pl[0], NULL}, {&A->pl[1], NULL}, {&B->pl[1], NULL},
                       {ac2, NULL},   {bc2, NULL},   {NULL, &c->agw}, {NULL, &c->gmv}};
         dispatch1(c, P(c, AGREE), ra, &pa, nb);
         pcs ps = {{bw, bh, c->p.ag_r}, {c->p.ag_src, (float)t}};
@@ -2388,9 +2386,9 @@ int mb_submit_vk(mb_ctx *c, double t, mb_vkframe *out)
         pcs pc = {{c->fmt.w, c->fmt.h, bw, bh, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y, c->fmt.nv, 0, 0, 0, 0, 0, 0, lb},
                   {(float)t, c->p.sigma, c->p.pen_occ, c->p.pen_bad, c->p.pen_fb, c->p.wprior, c->p.cthr, c->p.pen_fbm,
                    luma_scale(c), maxv, step, 0, c->p.fg_pix, c->p.ws_lo, c->p.ws_hi, c->p.ag_sw}};
-        vres r[19] = {{&A->y, NULL},  {&B->y, NULL},  {&A->c1, NULL},   {&B->c1, NULL},
+        vres r[19] = {{&A->pl[0], NULL},  {&B->pl[0], NULL},  {&A->pl[1], NULL},   {&B->pl[1], NULL},
                       {ac2, NULL},    {bc2, NULL},    {NULL, &c->tf4},  {NULL, FA0},
-                      {NULL, FB0}, {&c->oy, NULL}, {&c->oc1, NULL}, {c->fmt.nv ? &c->oc1 : &c->oc2, NULL},
+                      {NULL, FB0}, {&c->out[0], NULL}, {&c->out[1], NULL}, {&c->out[c->fmt.nv ? 1 : 2], NULL},
                       {lev_img(c, ka, 0), NULL}, {lev_img(c, kb, 0), NULL}, {NULL, SC}, {NULL, &c->fbw}, {NULL, &c->ill1},
                       {NULL, &c->agw2}, {NULL, &c->gmv}};
         dispatch(c, P(c, INTERP), r, &pc, (uint32_t)((c->fmt.w + 1) / 2 + 7) / 8, (uint32_t)((c->fmt.h + 1) / 2 + 7) / 8);
@@ -2407,10 +2405,8 @@ int mb_submit_vk(mb_ctx *c, double t, mb_vkframe *out)
             xfill_bars(c, x);
         xcopy_out(c, x);
     } else {
-        copy_i2b(c, &c->oy, &S(c)->down, c->off[0]);
-        copy_i2b(c, &c->oc1, &S(c)->down, c->off[1]);
-        if (!c->fmt.nv)
-            copy_i2b(c, &c->oc2, &S(c)->down, c->off[2]);
+        for (int i = 0; i < c->nplanes; i++)
+            copy_i2b(c, &c->out[i], &S(c)->down, c->off[i]);
     }
     VkBufferCopy bc = {0, 0, 64};
     vkCmdCopyBuffer(S(c)->cb, SC->buf, S(c)->statcopy.buf, 1, &bc);
