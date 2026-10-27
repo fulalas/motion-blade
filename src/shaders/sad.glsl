@@ -6,6 +6,8 @@ vec2 g_inv;
 vec2 g_row0;
 float g_w = 1.0;
 float g_ml, g_sad, g_zsad;
+float best_c, best_s, best_m;
+vec2 best_v;
 
 void row16(sampler2D T, vec2 p, out float o[16])
 {
@@ -31,12 +33,12 @@ float zsad(float a[16], float b[16])
     for (int x = 0; x < 16; x++)
         ml += a[x] - b[x];
     g_ml = ml;
-    float m = g_w > 0.0 ? subgroupClusteredAdd(ml, 16) / 256.0 * g_w : 0.0;
+    float mf = subgroupClusteredAdd(ml, 16) / 256.0;
+    float m = g_w > 0.0 ? mf * g_w : 0.0;
     float s = 0.0;
     for (int x = 0; x < 16; x++)
         s += abs(a[x] - b[x] - m);
 #ifdef PLAIN_SAD
-    float mf = subgroupClusteredAdd(ml, 16) / 256.0;
     float s0 = 0.0, s1 = 0.0;
     for (int x = 0; x < 16; x++) {
         s0 += abs(a[x] - b[x]);
@@ -61,11 +63,6 @@ float block_dc(float ml)
     return subgroupClusteredAdd(ml, 16) * (255.0 / 256.0);
 }
 
-int nbr3(int lane, ivec2 b, ivec2 n)
-{
-    return bidx(b + ivec2(lane % 3 - 1, lane / 3 - 1), n);
-}
-
 void set_dc_w(float m)
 {
     g_w = smoothstep(pc.f3.z, pc.f3.w, subgroupClusteredMin(m, 16));
@@ -82,4 +79,14 @@ float sad_y(sampler2D Y, vec2 v)
     float yr[16];
     row16(Y, g_row0 + v, yr);
     return zsad(xr, yr);
+}
+
+void consider(vec2 u, float s, float c)
+{
+    if (c < best_c) {
+        best_c = c;
+        best_s = s;
+        best_m = g_ml;
+        best_v = u;
+    }
 }

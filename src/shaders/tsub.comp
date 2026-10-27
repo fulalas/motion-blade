@@ -10,6 +10,8 @@ layout(std430, binding = 3) writeonly buffer TF4 { vec4 t4[]; };
 layout(std430, binding = 4) readonly buffer ILL { vec4 ill[]; };
 
 shared int lst[64];
+shared int lcn[64];
+shared vec2 lcv[64][9];
 shared uint cnt;
 
 int bw, bh;
@@ -21,7 +23,7 @@ bool gather_cands(ivec2 b, vec2 own)
     n = 0;
     bool edge = false;
     for (int k = 0; k < 9; k++) {
-        vec4 q = tf[bidx(b + ivec2(k % 3 - 1, k / 3 - 1), ivec2(bw, bh))];
+        vec4 q = tf[nbr3(k, b, ivec2(bw, bh))];
         if (int(q.z) != 0)
             continue;
         edge = edge || l1(q.xy - own) > pc.f0.y;
@@ -55,10 +57,15 @@ void main()
     if (id < cw * bh * 2) {
         ivec2 cell = ivec2(id % cw, id / cw), b = cell >> 1;
         vec4 own = tf[bidx(b, ivec2(bw, bh))];
-        if (int(own.z) == 0 && pc.f0.y > 0.0 && gather_cands(b, own.xy))
-            lst[atomicAdd(cnt, 1u)] = id;
-        else
+        if (int(own.z) == 0 && pc.f0.y > 0.0 && gather_cands(b, own.xy)) {
+            uint s = atomicAdd(cnt, 1u);
+            lst[s] = id;
+            lcn[s] = n;
+            for (int i = 0; i < n; i++)
+                lcv[s][i] = cand[i];
+        } else {
             t4[id] = own;
+        }
     }
     barrier();
     int lane = int(t) & 15, grp = int(t) >> 4, ne = int(cnt);
@@ -68,7 +75,9 @@ void main()
         int bi = bidx(b, ivec2(bw, bh));
         vec4 own = tf[bi];
         float dc = ill[bi].x * pc.f0.w;
-        gather_cands(b, own.xy);
+        n = lcn[j];
+        for (int i = 0; i < n; i++)
+            cand[i] = lcv[j][i];
         vec2 p = vec2(cell * 4 + ivec2(lane & 3, lane >> 2)) + 0.5;
         float best = 1e30;
         vec2 bv = own.xy;
@@ -83,8 +92,7 @@ void main()
         for (int r = pc.i1.x; r > 0; r--) {
             vec2 c0 = bv;
             for (int k = 0; k < 8; k++) {
-                vec2 u = c0 + vec2(ivec2[8](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1), ivec2(-1, -1), ivec2(1, -1),
-                                            ivec2(-1, 1), ivec2(1, 1))[k]) * float(r);
+                vec2 u = c0 + vec2(DIR8[k]) * float(r);
                 float s = cost(p, u, dc) + pc.f1.x * l1(u - c0);
                 if (s < best) {
                     best = s;

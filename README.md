@@ -36,8 +36,8 @@ Generated frames compared with the real ones (higher is better):
 
 Block motion search in both directions, vectors projected to the in-between time, then each
 pixel blends the best nearby vectors. It handles hidden and revealed areas, scene cuts (falls
-back to the nearest frame), light changes (flashes, sirens). Above 1080p the motion analysis
-runs at half resolution; the final image is always full resolution.
+back to the nearest frame), light changes (flashes, sirens). Above 2.5 megapixels (larger than
+1920x1080) the motion analysis runs at half resolution; the final image is always full resolution.
 
 ## Build
 
@@ -61,24 +61,29 @@ Windows (static, cross-built from Linux): extract
 mpv --vf=motionblade --hwdec=auto video.mp4
 ```
 
-Options: `--vf=motionblade=factor=2:max-fps=0:max-gap=0.25`
+Options: `--vf=motionblade=factor=2:max-fps=0:max-gap=0.25:zerocopy=auto`
 
 - `factor`: a number from 2 to 8 to multiply the frame rate; `auto` matches the display
   refresh rate instead (default 2).
 - `max-fps`: skip sources faster than this (default 0 = never skip).
-- `max-gap`: skip timestamp gaps longer than this, in seconds (default 0.25).
+- `max-gap`: skip timestamp gaps longer than this, in seconds (default 0.25, 0 = never skip).
+- `zerocopy`: which paths may keep frames on the GPU: `drm` (VA-API), `vulkan`, `auto` (both,
+  default) or `no` (always copy through system memory).
 
 Motion Blade never outputs more frames per second than the display refresh rate. A factor that would
 exceed it is lowered (30 fps at 4x on a 60 Hz display gives 60 fps), and videos already at the
 refresh rate play as they are.
 
-`Ctrl+m` cycles the factor: 2, 4, 8, auto and off. Other factors are set with the `factor`
-option.
+`Ctrl+m` cycles the factor: 2, 4, 8, auto and off, keeping the other filters and options as they
+are (it sends `vf-command all factor cycle`). Other factors are set with the `factor` option.
 
 Any `--hwdec` mode works. With VA-API (`--hwdec=vaapi`) or Vulkan (`--gpu-api=vulkan --hwdec=vulkan`),
 frames stay on the GPU so less CPU use. If a driver shows wrong colours or glitches
-with this, `MOTIONBLADE_NO_ZEROCOPY=1` goes back to copying.
+with this, `zerocopy=no` goes back to copying.
 Formats: 8/10/16-bit 4:2:0, 4:2:2, 4:4:4, planar or NV12/P010.
+
+`MOTIONBLADE_VERBOSE=1` prints which GPU and queue are used; `MOTIONBLADE_PROFILE=1` prints the
+GPU time spent in each pass when the filter is closed.
 
 ## Tests
 

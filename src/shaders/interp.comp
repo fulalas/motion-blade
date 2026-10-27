@@ -37,6 +37,11 @@ layout(binding = 11, r8) uniform writeonly image2D oC2;
 #endif
 
 #define NC 5
+#ifdef NV
+const bool nv = true;
+#else
+const bool nv = false;
+#endif
 
 int bw, bh;
 float ms;
@@ -110,15 +115,6 @@ void quad_cubic(sampler2D T, vec2 pos, vec2 inv, out float o[4])
     }
 }
 
-vec2 csmp(sampler2D T1, sampler2D T2, vec2 p)
-{
-#ifdef NV
-    return textureLod(T1, p, 0.0).rg;
-#else
-    return vec2(textureLod(T1, p, 0.0).r, textureLod(T2, p, 0.0).r);
-#endif
-}
-
 float outq(float v)
 {
 #ifdef DEPTH16
@@ -169,10 +165,8 @@ void main()
                 ivec2 cp = (q0 >> pc.i1.zw) + ivec2(cx, cy);
                 if (cp.x >= pc.i1.x || cp.y >= pc.i1.y)
                     continue;
-#ifdef NV
                 imageStore(oC1, cp, useA ? texelFetch(AC1, cp, 0) : texelFetch(BC1, cp, 0));
-#else
-                imageStore(oC1, cp, useA ? texelFetch(AC1, cp, 0) : texelFetch(BC1, cp, 0));
+#ifndef NV
                 imageStore(oC2, cp, useA ? texelFetch(AC2, cp, 0) : texelFetch(BC2, cp, 0));
 #endif
             }
@@ -249,13 +243,8 @@ void main()
         for (int y = 0; y < 4 && !fb; y++)
             for (int x = 0; x < 4; x++) {
                 vec2 p = vec2(q0 + ivec2(x - 1, y - 1)) + 0.5;
-#ifdef DEPTH16
                 float a = textureLod(AL, (p + oa) * inv, 0.0).r;
                 float b = textureLod(BL, (p + ob) * inv, 0.0).r;
-#else
-                float a = textureLod(AY, (p + oa) * inv, 0.0).r;
-                float b = textureLod(BY, (p + ob) * inv, 0.0).r;
-#endif
                 D[y * 4 + x] = abs((a - b) * 255.0 - dcl);
             }
         for (int j = 0; j < 4; j++) {
@@ -336,22 +325,27 @@ void main()
     int CW = pc.i1.x, CH = pc.i1.y;
     vec2 cinv = 1.0 / vec2(CW, CH);
     vec2 cs = vec2(1 << sx, 1 << sy);
+    float ga[4] = float[4](0.0, 0.0, 0.0, 0.0), gb[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    vec2 gca = vec2(0.0), gcb = vec2(0.0);
+    bool gc1 = sx == 1 && sy == 1;
     if (nq > 0.0) {
         vec2 qc = (vec2(q0) + 1.0) / cs;
-        vec2 dc2 = abs(csmp(AC1, AC2, (qc + goa / cs) * cinv) - csmp(BC1, BC2, (qc + gob / cs) * cinv));
+        gca = chroma2(AC1, AC2, (qc + goa / cs) * cinv, nv);
+        gcb = chroma2(BC1, BC2, (qc + gob / cs) * cinv, nv);
+        vec2 dc2 = abs(gca - gcb);
         float dyq = 0.0;
         for (int j = 0; j < 4; j++) {
             vec2 pp = vec2(q0 + ivec2(j & 1, j >> 1)) + 0.5;
-            dyq = max(dyq, abs(textureLod(AY, (pp + goa) * inv, 0.0).r - textureLod(BY, (pp + gob) * inv, 0.0).r));
+            ga[j] = textureLod(AY, (pp + goa) * inv, 0.0).r;
+            gb[j] = textureLod(BY, (pp + gob) * inv, 0.0).r;
+            dyq = max(dyq, abs(ga[j] - gb[j]));
         }
         gsw = smoothstep(pc.f3.w, pc.f3.w * 2.5, max(max(dc2.x, dc2.y), dyq) * 255.0 * pc.f2.x);
     }
     for (int j = 0; j < 4; j++) {
         ivec2 p = q0 + ivec2(j & 1, j >> 1);
         if (nn[j] > 0.0) {
-            vec2 pp = vec2(p) + 0.5;
-            float ga = textureLod(AY, (pp + goa) * inv, 0.0).r, gb = textureLod(BY, (pp + gob) * inv, 0.0).r;
-            float fv = mix((1.0 - t) * ga + t * gb, t < 0.5 ? ga : gb, gsw);
+            float fv = mix((1.0 - t) * ga[j] + t * gb[j], t < 0.5 ? ga[j] : gb[j], gsw);
             acc4[j] = mix(acc4[j], fv, nn[j]);
         }
         if (p.x < W && p.y < H)
@@ -389,7 +383,11 @@ void main()
                 acc.xy += ca * (a - t * dcc) + cb * (b + (1.0 - t) * dcc);
             }
             if (nq > 0.0) {
-                vec2 sa = csmp(AC1, AC2, (pc2 + goa / cs) * cinv), sb = csmp(BC1, BC2, (pc2 + gob / cs) * cinv);
+                vec2 sa = gca, sb = gcb;
+                if (!gc1) {
+                    sa = chroma2(AC1, AC2, (pc2 + goa / cs) * cinv, nv);
+                    sb = chroma2(BC1, BC2, (pc2 + gob / cs) * cinv, nv);
+                }
                 acc.xy = mix(acc.xy, mix((1.0 - t) * sa + t * sb, t < 0.5 ? sa : sb, gsw), nq);
             }
 #ifdef NV

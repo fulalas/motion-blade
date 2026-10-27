@@ -38,8 +38,10 @@ void main()
         vec2 w = vec2(bx * 8 - 4, by * 8 - 4), lim = vec2(pc.i0.zw) - 16.0;
         load_x(X, bx * 8 - 4, by * 8 - 4, lane);
         float s0 = sad_y(Y, cur.xy);
-        float best_s = s0, best_m = g_ml, best_c = s0 + pc.f1.y * l1(cur.xy);
-        vec2 best_v = cur.xy;
+        best_s = s0;
+        best_m = g_ml;
+        best_c = s0 + pc.f1.y * l1(cur.xy);
+        best_v = cur.xy;
         for (int k = 0; k < 25; k++) {
             if (k == 12)
                 continue;
@@ -48,12 +50,7 @@ void main()
                 continue;
             float s = sad_y(Y, u);
             float c = s + pc.f1.y * l1(u);
-            if (c < best_c) {
-                best_c = c;
-                best_s = s;
-                best_m = g_ml;
-                best_v = u;
-            }
+            consider(u, s, c);
         }
         float R = pc.f3.x, S = pc.f3.y;
         vec2 seed = best_v;
@@ -64,26 +61,14 @@ void main()
                     continue;
                 float s = sad_y(Y, u);
                 float c = s + pc.f1.y * l1(u);
-                if (c < best_c) {
-                    best_c = c;
-                    best_s = s;
-                    best_m = g_ml;
-                    best_v = u;
-                }
+                consider(u, s, c);
             }
         seed = best_v;
         for (int k = 0; k < 8; k++) {
-            const ivec2 dirs[8] = ivec2[8](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1),
-                                           ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1), ivec2(1, 1));
-            vec2 u = seed + vec2(dirs[k]);
+            vec2 u = seed + vec2(DIR8[k]);
             float s = sad_y(Y, u);
             float c = s + pc.f1.y * l1(u);
-            if (c < best_c) {
-                best_c = c;
-                best_s = s;
-                best_m = g_ml;
-                best_v = u;
-            }
+            consider(u, s, c);
         }
         bool ok = best_s < pc.f2.x * s0 && s0 - best_s > pc.f2.y;
         if (ok && pc.i1.x != 0) {

@@ -13,9 +13,21 @@
 #include <unistd.h>
 #endif
 
+#include <stdarg.h>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
+
 #define MAXLEV 6
 #define BS 8
 #define STAT_SCALE 16.0
+#define ME_HALF_PX 2500000L
+#define BAR_Y_MAX 24
+#define BAR_C_TOL 10
+#define ALIGN_UP(x, a) (((x) + (a) - 1) & ~(size_t)((a) - 1))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define NIMP 32
 
 static const uint32_t spv_down[] =
 #include "shaders/down.h"
@@ -110,6 +122,46 @@ typedef struct {
     const char *name;
 } vpipe;
 
+enum {
+    P_DOWN, P_NORM, P_FULL, P_ITER, P_REFINE, P_PROJ, P_CROSS, P_LOCAL, P_SEL, P_VMED, P_SUB, P_CONF, P_CUTDEC,
+    P_ILLUM, P_ILMED, P_BARS, P_AGREE, P_GMED, P_AGSPREAD, P_INTERP, P_COUNT
+};
+
+#define SPV(x) x, sizeof(x)
+
+static const struct {
+    const uint32_t *spv;
+    size_t size;
+    const char *types;
+    int sg;
+    const char *name;
+} pipe_defs[P_COUNT] = {
+    [P_DOWN] = {SPV(spv_down), "SI", 0, "p_down"},
+    [P_NORM] = {SPV(spv_norm), "SI", 0, "p_norm"},
+    [P_FULL] = {SPV(spv_full), "SSB", 0, "p_full"},
+    [P_ITER] = {SPV(spv_iter), "SSBBBBBB", 1, "p_iter"},
+    [P_REFINE] = {SPV(spv_refine), "SSBB", 1, "p_refine"},
+    [P_PROJ] = {SPV(spv_proj), "BB", 0, "p_proj"},
+    [P_CROSS] = {SPV(spv_cross), "SSBBBB", 1, "p_cross"},
+    [P_LOCAL] = {SPV(spv_local), "SSBBBB", 1, "p_local"},
+    [P_SEL] = {SPV(spv_sel), "SSSSBBBBBBBBBB", 1, "p_sel"},
+    [P_VMED] = {SPV(spv_vmed), "BB", 0, "p_vmed"},
+    [P_SUB] = {SPV(spv_sub), "SSBBB", 1, "p_sub"},
+    [P_CONF] = {SPV(spv_conf), "BBBB", 0, "p_conf"},
+    [P_CUTDEC] = {SPV(spv_cutdec), "BB", 0, "p_cutdec"},
+    [P_ILLUM] = {SPV(spv_illum), "SSSSBB", 0, "p_illum"},
+    [P_ILMED] = {SPV(spv_ilmed), "BB", 0, "p_ilmed"},
+    [P_BARS] = {SPV(spv_bars), "SSB", 0, "p_bars"},
+    [P_AGREE] = {SPV(spv_agree), "SSSSSSBB", 0, "p_agree"},
+    [P_GMED] = {SPV(spv_gmed), "BB", 0, "p_gmed"},
+    [P_AGSPREAD] = {SPV(spv_agspread), "BBBB", 0, "p_agspread"},
+    [P_INTERP] = {NULL, 0, "SSSSSSBBBIIISSBBBBB", 0, "p_interp"},
+};
+
+static const uint32_t *const spv_interp[2][2] = {{spv_interp8, spv_interp16}, {spv_interp8nv, spv_interp16nv}};
+static const size_t spv_interp_size[2][2] = {{sizeof(spv_interp8), sizeof(spv_interp16)},
+                                             {sizeof(spv_interp8nv), sizeof(spv_interp16nv)}};
+
 typedef struct {
     const vimg *im;
     const vbuf *b;
@@ -152,7 +204,18 @@ typedef struct {
 typedef struct {
     atomic_int refs;
     atomic_int busy[MAXX];
+    atomic_uint rel[MAXX];
+    atomic_uint seq;
 } xpool;
+
+typedef struct {
+    vimg im;
+    uint64_t ino;
+    uint32_t off, pitch;
+    uint64_t mod;
+    int plane, users;
+    unsigned last;
+} imp_ent;
 
 #define NFR 4
 
@@ -164,8 +227,8 @@ typedef struct {
     int x0, y0, w, h, xidx;
     void (*rel[4])(void *);
     void *relo[4];
-    int nrel;
-    vimg imp[2];
+    int nrel, nb;
+    imp_ent *imp[2];
     int busy, nq;
     unsigned serial;
     const char *qname[64];
@@ -184,12 +247,13 @@ struct mb_ctx {
     xpool *xp;
     size_t xoff[3], xpitch[3], xsize;
     int has_mod, has_foreign, gpu_in, bf_slot, bf_pending, bf_tick, bg_ver;
-    unsigned bf_serial;
+    unsigned bf_serial, imp_tick;
     uint32_t imp_bits;
     PFN_vkGetMemoryFdPropertiesKHR getfdprops;
+    imp_ent imp[NIMP];
+    int nimp;
     vimg bgy, bgc;
     vbuf bflags;
-    vpipe p_bars, p_agree, p_gmed, p_agspread;
     VkInstance inst;
     VkPhysicalDevice pd;
     VkDevice dev;
@@ -203,15 +267,17 @@ struct mb_ctx {
     int fifo[NSLOT], fifo_n;
     float ts_period;
     PFN_vkCmdPushDescriptorSetKHR pushdesc;
-    int prof;
+    int prof, ts, full_sg;
     double prof_ms[32];
     const char *prof_name[32];
     int prof_n;
-    vpipe p_down, p_norm, p_full, p_iter, p_refine, p_cross, p_local, p_proj, p_sel, p_vmed, p_sub, p_conf, p_cutdec, p_illum, p_ilmed, p_interp;
+    vpipe pipes[P_COUNT];
     gframe fr[NFR];
     vbuf fa[MAXLEV], fb[MAXLEV], pfa[MAXLEV], pfb[MAXLEV], tmp[MAXLEV], qfb;
     int lw[MAXLEV], lh[MAXLEV], bw[MAXLEV], bh[MAXLEV];
     vbuf tf4, slots, xkeys, eslots, tf0, tf1, stat, pstat, qstat, dummy, fbw, agw, agw2, gmv, ill0, ill1, hist;
+    vbuf *gbufs[24];
+    int ngbufs;
     size_t off[3], rowb[3], rows[3];
     params p;
     mb_stats st;
@@ -226,15 +292,31 @@ struct mb_ctx {
     int ok;
     uint32_t sg_size;
     mb_vkdev vd;
+    mb_host host;
     VkSemaphore wsem[4], ssem[4];
     uint64_t wval[4], sval[4];
     int nwait, nsig;
 };
 
 #define S(c) (&(c)->sl[(c)->cur])
+#define P(c, x) (&(c)->pipes[P_##x])
 
+static void mb_log(const mb_ctx *c, int level, const char *fmt, ...)
+{
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (c->host.log) {
+        c->host.log(c->host.opaque, level, buf);
+        return;
+    }
+    if (level < MB_LOG_VERBOSE || getenv("MOTIONBLADE_VERBOSE"))
+        fprintf(stderr, "motionblade: %s\n", buf);
+}
 
-#define VK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { fprintf(stderr, "motionblade: %s failed (%d)\n", #x, r_); return -1; } } while (0)
+#define VK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { mb_log(c, MB_LOG_ERR, "%s failed (%d)", #x, r_); return -1; } } while (0)
 
 static int memtype(mb_ctx *c, uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid)
 {
@@ -282,11 +364,15 @@ static void buf_free(mb_ctx *c, vbuf *b)
     memset(b, 0, sizeof(*b));
 }
 
-static int img_create(mb_ctx *c, vimg *im, int w, int h, VkFormat fmt)
+static const VkImageSubresourceRange COLOR_RANGE = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+static VkImageCreateInfo img_info(vimg *im, int w, int h, VkFormat fmt, VkImageUsageFlags usage)
 {
     memset(im, 0, sizeof(*im));
     im->w = w;
     im->h = h;
+    im->aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+    im->layout = VK_IMAGE_LAYOUT_GENERAL;
     VkImageCreateInfo ic = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ic.imageType = VK_IMAGE_TYPE_2D;
     ic.format = fmt;
@@ -294,8 +380,26 @@ static int img_create(mb_ctx *c, vimg *im, int w, int h, VkFormat fmt)
     ic.mipLevels = ic.arrayLayers = 1;
     ic.samples = VK_SAMPLE_COUNT_1_BIT;
     ic.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ic.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-               VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    ic.usage = usage;
+    return ic;
+}
+
+static int img_view(mb_ctx *c, vimg *im, VkFormat fmt)
+{
+    VkImageViewCreateInfo vc = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vc.image = im->img;
+    vc.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vc.format = fmt;
+    vc.subresourceRange = COLOR_RANGE;
+    VK(vkCreateImageView(c->dev, &vc, NULL, &im->view));
+    return 0;
+}
+
+static int img_create(mb_ctx *c, vimg *im, int w, int h, VkFormat fmt)
+{
+    VkImageCreateInfo ic = img_info(im, w, h, fmt,
+                                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
+                                        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     VK(vkCreateImage(c->dev, &ic, NULL, &im->img));
     VkMemoryRequirements mr;
     vkGetImageMemoryRequirements(c->dev, im->img, &mr);
@@ -305,13 +409,7 @@ static int img_create(mb_ctx *c, vimg *im, int w, int h, VkFormat fmt)
     VkMemoryAllocateInfo ma = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, mr.size, (uint32_t)mt};
     VK(vkAllocateMemory(c->dev, &ma, NULL, &im->mem));
     VK(vkBindImageMemory(c->dev, im->img, im->mem, 0));
-    VkImageViewCreateInfo vc = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    vc.image = im->img;
-    vc.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    vc.format = fmt;
-    vc.subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    VK(vkCreateImageView(c->dev, &vc, NULL, &im->view));
-    return 0;
+    return img_view(c, im, fmt);
 }
 
 static void img_free(mb_ctx *c, vimg *im)
@@ -333,6 +431,7 @@ static int pipe_create(mb_ctx *c, vpipe *p, const uint32_t *code, size_t size, c
         return -1;
     strncpy(p->types, types, sizeof(p->types) - 1);
     p->name = name;
+    (void)sg;
     int n = (int)strlen(types);
     VkDescriptorSetLayoutBinding b[32];
     for (int i = 0; i < n; i++) {
@@ -361,8 +460,11 @@ static int pipe_create(mb_ctx *c, vpipe *p, const uint32_t *code, size_t size, c
                                                  VK_SHADER_STAGE_COMPUTE_BIT, sm, "main", NULL};
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT rs = {
         VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT, NULL, c->sg_size};
-    if (sg && c->sg_size)
+    if (sg && c->sg_size) {
         ci.stage.pNext = &rs;
+        if (c->full_sg)
+            ci.stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT_EXT;
+    }
     ci.layout = p->pl;
     VkResult r = vkCreateComputePipelines(c->dev, VK_NULL_HANDLE, 1, &ci, NULL, &p->p);
     vkDestroyShaderModule(c->dev, sm, NULL);
@@ -397,7 +499,8 @@ static void host_barrier(mb_ctx *c)
                          NULL);
 }
 
-static void dispatch(mb_ctx *c, const vpipe *p, const vres *res, const pcs *pc, uint32_t gx, uint32_t gy)
+static void dispatch_n(mb_ctx *c, const vpipe *p, const vres *res, const pcs *pc, uint32_t gx, uint32_t gy,
+                       const char *name)
 {
     int n = (int)strlen(p->types);
     VkWriteDescriptorSet w[32];
@@ -423,35 +526,51 @@ static void dispatch(mb_ctx *c, const vpipe *p, const vres *res, const pcs *pc, 
     vkCmdPushConstants(S(c)->cb, p->pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcs), pc);
     vkCmdDispatch(S(c)->cb, gx, gy, 1);
     barrier(c);
-    if (c->prof && S(c)->nq < 63) {
-        S(c)->qname[S(c)->nq] = p->name;
+    if (c->prof && c->ts && S(c)->nq < 63) {
+        S(c)->qname[S(c)->nq] = name;
         vkCmdWriteTimestamp(S(c)->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, S(c)->qp, (uint32_t)(2 + S(c)->nq++));
     }
 }
 
+static void dispatch(mb_ctx *c, const vpipe *p, const vres *res, const pcs *pc, uint32_t gx, uint32_t gy)
+{
+    dispatch_n(c, p, res, pc, gx, gy, p->name);
+}
+
 static void slot_release(mb_ctx *c, slot *sl)
 {
-    for (int k = 0; k < 2; k++)
-        img_free(c, &sl->imp[k]);
+    (void)c;
+    for (int k = 0; k < 2; k++) {
+        if (sl->imp[k])
+            sl->imp[k]->users--;
+        sl->imp[k] = NULL;
+    }
     for (int k = 0; k < sl->nrel; k++)
         sl->rel[k](sl->relo[k]);
     sl->nrel = 0;
 }
 
-static void slot_wait(mb_ctx *c, int i)
+static int slot_wait(mb_ctx *c, int i)
 {
     slot *sl = &c->sl[i];
     if (!sl->busy)
-        return;
-    vkWaitForFences(c->dev, 1, &sl->fence, VK_TRUE, UINT64_MAX);
-    vkResetFences(c->dev, 1, &sl->fence);
+        return 0;
+    VkResult r = VK_TIMEOUT;
+    for (int t = 0; t < 5 && r == VK_TIMEOUT; t++)
+        r = vkWaitForFences(c->dev, 1, &sl->fence, VK_TRUE, 1000000000ull);
     sl->busy = 0;
     slot_release(c, sl);
     sl->gpu_ms = 0;
+    if (r != VK_SUCCESS) {
+        mb_log(c, MB_LOG_ERR, "waiting for the GPU failed (%d)", r);
+        c->ok = 0;
+        return -1;
+    }
+    vkResetFences(c->dev, 1, &sl->fence);
     uint64_t ts[66];
-    if (vkGetQueryPoolResults(c->dev, sl->qp, 0, (uint32_t)(2 + sl->nq), sizeof(ts), ts, 8, VK_QUERY_RESULT_64_BIT) !=
-        VK_SUCCESS)
-        return;
+    if (!c->ts || vkGetQueryPoolResults(c->dev, sl->qp, 0, (uint32_t)(2 + sl->nq), sizeof(ts), ts, 8,
+                                        VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
+        return 0;
     uint64_t prev = ts[0];
     for (int k = 0; k < sl->nq; k++) {
         double ms = (double)(ts[2 + k] - prev) * c->ts_period / 1e6;
@@ -465,6 +584,7 @@ static void slot_wait(mb_ctx *c, int i)
             c->prof_ms[j] += ms;
     }
     sl->gpu_ms = (double)(ts[1] - ts[0]) * c->ts_period / 1e6;
+    return 0;
 }
 
 static int in_fifo(const mb_ctx *c, int i)
@@ -483,13 +603,12 @@ static int cmd_begin(mb_ctx *c)
     for (int k = 0; k < NSLOT && i < 0; k++)
         if (!in_fifo(c, (c->next_slot + k) % NSLOT))
             i = (c->next_slot + k) % NSLOT;
-    if (i < 0)
+    if (i < 0 || slot_wait(c, i) < 0)
         return -1;
-    slot_wait(c, i);
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL,
                                    VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
     if (vkResetCommandBuffer(c->sl[i].cb, 0) != VK_SUCCESS || vkBeginCommandBuffer(c->sl[i].cb, &bi) != VK_SUCCESS) {
-        fprintf(stderr, "motionblade: could not begin command buffer\n");
+        mb_log(c, MB_LOG_ERR, "could not begin command buffer");
         c->ok = 0;
         return -1;
     }
@@ -497,8 +616,10 @@ static int cmd_begin(mb_ctx *c)
     c->next_slot = (i + 1) % NSLOT;
     c->recording = 1;
     c->sl[i].xidx = -1;
-    vkCmdResetQueryPool(S(c)->cb, S(c)->qp, 0, 66);
-    vkCmdWriteTimestamp(S(c)->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, S(c)->qp, 0);
+    if (c->ts) {
+        vkCmdResetQueryPool(S(c)->cb, S(c)->qp, 0, 66);
+        vkCmdWriteTimestamp(S(c)->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, S(c)->qp, 0);
+    }
     S(c)->nq = 0;
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT,
                           VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
@@ -523,7 +644,8 @@ static int cmd_end(mb_ctx *c, int has_out)
         return 0;
     c->recording = 0;
     slot *sl = S(c);
-    vkCmdWriteTimestamp(sl->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, sl->qp, 1);
+    if (c->ts)
+        vkCmdWriteTimestamp(sl->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, sl->qp, 1);
     VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &sl->cb;
@@ -542,7 +664,7 @@ static int cmd_end(mb_ctx *c, int has_out)
     }
     c->nwait = c->nsig = 0;
     if (vkEndCommandBuffer(sl->cb) != VK_SUCCESS || qsubmit(c, &si, sl->fence) != VK_SUCCESS) {
-        fprintf(stderr, "motionblade: could not submit command buffer\n");
+        mb_log(c, MB_LOG_ERR, "could not submit command buffer");
         c->ok = 0;
         return -1;
     }
@@ -559,25 +681,34 @@ static void idle(mb_ctx *c)
         slot_wait(c, i);
 }
 
-static double cmd_submit(mb_ctx *c)
+static int cmd_submit(mb_ctx *c)
 {
     int i = c->cur;
     if (cmd_end(c, 0) < 0)
         return -1;
-    slot_wait(c, i);
-    return c->sl[i].gpu_ms;
+    return slot_wait(c, i);
+}
+
+static VkImageMemoryBarrier img_barrier(VkImage img, VkAccessFlags src, VkAccessFlags dst, VkImageLayout from,
+                                        VkImageLayout to, uint32_t srcq, uint32_t dstq)
+{
+    VkImageMemoryBarrier ib = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    ib.srcAccessMask = src;
+    ib.dstAccessMask = dst;
+    ib.oldLayout = from;
+    ib.newLayout = to;
+    ib.srcQueueFamilyIndex = srcq;
+    ib.dstQueueFamilyIndex = dstq;
+    ib.image = img;
+    ib.subresourceRange = COLOR_RANGE;
+    return ib;
 }
 
 static void to_general(mb_ctx *c, vimg *im)
 {
-    VkImageMemoryBarrier ib = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    ib.srcAccessMask = 0;
-    ib.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-    ib.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    ib.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    ib.srcQueueFamilyIndex = ib.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    ib.image = im->img;
-    ib.subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier ib =
+        img_barrier(im->img, 0, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
     vkCmdPipelineBarrier(S(c)->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0,
                          NULL, 1, &ib);
 }
@@ -603,7 +734,7 @@ static int pick_device(mb_ctx *c)
     VkPhysicalDevice pds[16];
     VkResult er = vkEnumeratePhysicalDevices(c->inst, &np, pds);
     if (er != VK_SUCCESS && er != VK_INCOMPLETE) {
-        fprintf(stderr, "motionblade: vkEnumeratePhysicalDevices failed (%d)\n", er);
+        mb_log(c, MB_LOG_ERR, "vkEnumeratePhysicalDevices failed (%d)", er);
         return -1;
     }
     int best = -1, score = -1;
@@ -614,6 +745,8 @@ static int pick_device(mb_ctx *c)
                 : pp.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2
                 : pp.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU            ? 0
                                                                           : 1;
+        if (c->host.device && c->host.device[0] && !strcmp(c->host.device, pp.deviceName))
+            s = 4;
         if (s > score) {
             score = s;
             best = (int)i;
@@ -625,15 +758,20 @@ static int pick_device(mb_ctx *c)
     return 0;
 }
 
-static int sg_enabled(const mb_vkdev *d)
+static int sg_enabled(const mb_vkdev *d, int *full)
 {
+    *full = 0;
     for (const VkBaseInStructure *b = d->features ? d->features->pNext : NULL; b; b = b->pNext) {
-        if (b->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES &&
-            ((const VkPhysicalDeviceVulkan13Features *)b)->subgroupSizeControl)
-            return 1;
-        if (b->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES &&
-            ((const VkPhysicalDeviceSubgroupSizeControlFeatures *)b)->subgroupSizeControl)
-            return 1;
+        if (b->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES) {
+            const VkPhysicalDeviceVulkan13Features *f = (const void *)b;
+            *full = f->computeFullSubgroups;
+            return f->subgroupSizeControl;
+        }
+        if (b->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES) {
+            const VkPhysicalDeviceSubgroupSizeControlFeatures *f = (const void *)b;
+            *full = f->computeFullSubgroups;
+            return f->subgroupSizeControl;
+        }
     }
     return 0;
 }
@@ -648,7 +786,7 @@ static int vk_init(mb_ctx *c, const mb_vkdev *d)
         c->pd = d->pd;
         c->dev = d->dev;
         if (!d->features || !d->features->features.shaderStorageImageExtendedFormats) {
-            fprintf(stderr, "motionblade: the player's Vulkan device lacks shaderStorageImageExtendedFormats\n");
+            mb_log(c, MB_LOG_WARN, "the player's Vulkan device lacks shaderStorageImageExtendedFormats");
             return -1;
         }
     } else if (pick_device(c) < 0) {
@@ -658,37 +796,39 @@ static int vk_init(mb_ctx *c, const mb_vkdev *d)
     vkGetPhysicalDeviceProperties(c->pd, &pp);
     c->ts_period = pp.limits.timestampPeriod;
     c->max_groups = pp.limits.maxComputeWorkGroupCount[0];
-    int verbose = getenv("MOTIONBLADE_VERBOSE") != NULL;
-    if (verbose)
-        fprintf(stderr, "motionblade: using %s\n", pp.deviceName);
+    mb_log(c, MB_LOG_VERBOSE, "using %s", pp.deviceName);
     vkGetPhysicalDeviceMemoryProperties(c->pd, &c->mp);
     uint32_t nq = 16;
     VkQueueFamilyProperties qfp[16];
     vkGetPhysicalDeviceQueueFamilyProperties(c->pd, &nq, qfp);
     c->qf = UINT32_MAX;
-    if (d && d->qf < nq && (qfp[d->qf].queueFlags & VK_QUEUE_COMPUTE_BIT) && qfp[d->qf].timestampValidBits)
+    if (d && d->qf < nq && (qfp[d->qf].queueFlags & VK_QUEUE_COMPUTE_BIT))
         c->qf = d->qf;
-    for (int pass = 0; pass < 2 && c->qf == UINT32_MAX && !d; pass++)
+    for (int pass = 0; pass < 3 && c->qf == UINT32_MAX && !d; pass++)
         for (uint32_t i = 0; i < nq; i++) {
             VkQueueFlags f = qfp[i].queueFlags;
-            if ((f & VK_QUEUE_COMPUTE_BIT) && qfp[i].timestampValidBits && (pass || !(f & VK_QUEUE_GRAPHICS_BIT))) {
+            if ((f & VK_QUEUE_COMPUTE_BIT) && (pass == 2 || qfp[i].timestampValidBits) &&
+                (pass || !(f & VK_QUEUE_GRAPHICS_BIT))) {
                 c->qf = i;
                 break;
             }
         }
     if (c->qf == UINT32_MAX) {
         if (d)
-            fprintf(stderr, "motionblade: queue family %u cannot run compute with timestamps\n", d->qf);
+            mb_log(c, MB_LOG_WARN, "queue family %u cannot run compute", d->qf);
         return -1;
     }
+    c->ts = qfp[c->qf].timestampValidBits != 0;
     uint32_t next = 0;
     vkEnumerateDeviceExtensionProperties(c->pd, NULL, &next, NULL);
     VkExtensionProperties *exts = calloc(next ? next : 1, sizeof(*exts));
     if (!exts)
         return -1;
     vkEnumerateDeviceExtensionProperties(c->pd, NULL, &next, exts);
-    int has_prio = 0, has_sgctl = 0, has_fd = 0, has_dma = 0, has_mod = 0, has_foreign = 0;
+    int has_prio = 0, has_sgctl = 0, has_fd = 0, has_dma = 0, has_mod = 0, has_foreign = 0, has_push = 0;
     for (uint32_t i = 0; i < next; i++) {
+        if (!strcmp(exts[i].extensionName, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME))
+            has_push = 1;
         if (!strcmp(exts[i].extensionName, VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME))
             has_mod = 1;
         if (!strcmp(exts[i].extensionName, VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME))
@@ -705,7 +845,11 @@ static int vk_init(mb_ctx *c, const mb_vkdev *d)
     free(exts);
 
     if (pp.apiVersion < VK_API_VERSION_1_1) {
-        fprintf(stderr, "motionblade: %s does not support Vulkan 1.1\n", pp.deviceName);
+        mb_log(c, MB_LOG_WARN, "%s does not support Vulkan 1.1", pp.deviceName);
+        return -1;
+    }
+    if (!d && !has_push) {
+        mb_log(c, MB_LOG_WARN, "%s lacks push descriptors", pp.deviceName);
         return -1;
     }
     VkPhysicalDeviceSubgroupSizeControlPropertiesEXT sgc = {
@@ -716,25 +860,33 @@ static int vk_init(mb_ctx *c, const mb_vkdev *d)
     vkGetPhysicalDeviceProperties2(c->pd, &pp2);
     VkSubgroupFeatureFlags need = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_CLUSTERED_BIT;
     if ((sgp.supportedOperations & need) != need || !(sgp.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT)) {
-        fprintf(stderr, "motionblade: %s lacks clustered subgroup operations\n", pp.deviceName);
+        mb_log(c, MB_LOG_WARN, "%s lacks clustered subgroup operations", pp.deviceName);
         return -1;
     }
+    VkPhysicalDeviceSubgroupSizeControlFeaturesEXT sgf = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
+    if (has_sgctl && !d) {
+        VkPhysicalDeviceFeatures2 f2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &sgf};
+        vkGetPhysicalDeviceFeatures2(c->pd, &f2);
+    }
+    int shared_full = 0;
     uint32_t sg_min = has_sgctl ? sgc.minSubgroupSize : sgp.subgroupSize;
-    int can_req = has_sgctl && (!d || sg_enabled(d)) && (sgc.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT);
+    int can_req = has_sgctl && (d ? sg_enabled(d, &shared_full) : (int)sgf.subgroupSizeControl) &&
+                  (sgc.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT);
     if (sg_min >= 16 && can_req && sgc.minSubgroupSize <= 32 && sgc.maxSubgroupSize >= 32 &&
         sgc.maxComputeWorkgroupSubgroups >= 2) {
         c->sg_size = 32;
     } else if (sg_min < 16) {
         if (!can_req || sgc.maxSubgroupSize < 16 || sgc.maxComputeWorkgroupSubgroups < 4) {
-            fprintf(stderr, "motionblade: %s cannot run 16-wide subgroups\n", pp.deviceName);
+            mb_log(c, MB_LOG_WARN, "%s cannot run 16-wide subgroups", pp.deviceName);
             return -1;
         }
         c->sg_size = 16;
     }
+    c->full_sg = c->sg_size && (d ? shared_full : (int)sgf.computeFullSubgroups);
 
     if (d) {
-        if (verbose)
-            fprintf(stderr, "motionblade: sharing the player's Vulkan device, queue family %u\n", c->qf);
+        mb_log(c, MB_LOG_VERBOSE, "sharing the player's Vulkan device, queue family %u", c->qf);
         return vk_setup(c);
     }
     float pri = 1;
@@ -759,8 +911,9 @@ static int vk_init(mb_ctx *c, const mb_vkdev *d)
         }
     }
 #endif
-    VkPhysicalDeviceSubgroupSizeControlFeaturesEXT sgf = {
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT, NULL, VK_TRUE, VK_FALSE};
+    sgf.pNext = NULL;
+    sgf.subgroupSizeControl = VK_TRUE;
+    sgf.computeFullSubgroups = c->full_sg ? VK_TRUE : VK_FALSE;
     VkPhysicalDeviceFeatures feat = {0};
     feat.shaderStorageImageExtendedFormats = VK_TRUE;
     VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
@@ -784,8 +937,7 @@ static int vk_init(mb_ctx *c, const mb_vkdev *d)
         dci.enabledExtensionCount = next_base;
         VK(vkCreateDevice(c->pd, &dci, NULL, &c->dev));
     }
-    if (verbose)
-        fprintf(stderr, "motionblade: queue family %u%s\n", c->qf, res == VK_SUCCESS ? ", low priority" : "");
+    mb_log(c, MB_LOG_VERBOSE, "queue family %u%s", c->qf, res == VK_SUCCESS ? ", low priority" : "");
     if (c->has_dmabuf) {
         c->getfd = (PFN_vkGetMemoryFdKHR)vkGetDeviceProcAddr(c->dev, "vkGetMemoryFdKHR");
         c->getfdprops = (PFN_vkGetMemoryFdPropertiesKHR)vkGetDeviceProcAddr(c->dev, "vkGetMemoryFdPropertiesKHR");
@@ -802,7 +954,7 @@ static int vk_setup(mb_ctx *c)
     if (!c->pushdesc)
         c->pushdesc = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->dev, "vkCmdPushDescriptorSet");
     if (!c->pushdesc) {
-        fprintf(stderr, "motionblade: the Vulkan device lacks push descriptors\n");
+        mb_log(c, MB_LOG_WARN, "the Vulkan device lacks push descriptors");
         return -1;
     }
     VkCommandPoolCreateInfo cpi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, NULL,
@@ -823,42 +975,16 @@ static int vk_setup(mb_ctx *c)
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     VK(vkCreateSampler(c->dev, &sci, NULL, &c->smp));
     c->prof = getenv("MOTIONBLADE_PROFILE") != NULL;
-
-#define PIPE(P, S, T) do { if (pipe_create(c, &c->P, S, sizeof(S), T, #P, 0) < 0) return -1; } while (0)
-#define PIPE_SG(P, S, T) do { if (pipe_create(c, &c->P, S, sizeof(S), T, #P, 1) < 0) return -1; } while (0)
-    PIPE(p_down, spv_down, "SI");
-    PIPE(p_norm, spv_norm, "SI");
-    PIPE(p_full, spv_full, "SSB");
-    PIPE_SG(p_iter, spv_iter, "SSBBBBBB");
-    PIPE_SG(p_refine, spv_refine, "SSBB");
-    PIPE(p_proj, spv_proj, "BB");
-    PIPE_SG(p_cross, spv_cross, "SSBBBB");
-    PIPE_SG(p_local, spv_local, "SSBBBB");
-    PIPE_SG(p_sel, spv_sel, "SSSSBBBBBBBBBB");
-    PIPE(p_vmed, spv_vmed, "BB");
-    PIPE_SG(p_sub, spv_sub, "SSBBB");
-    PIPE(p_conf, spv_conf, "BBBB");
-    PIPE(p_cutdec, spv_cutdec, "BB");
-    PIPE(p_illum, spv_illum, "SSSSBB");
-    PIPE(p_ilmed, spv_ilmed, "BB");
-    PIPE(p_bars, spv_bars, "SSB");
-    PIPE(p_agree, spv_agree, "SSSSSSBB");
-    PIPE(p_gmed, spv_gmed, "BB");
-    PIPE(p_agspread, spv_agspread, "BBBB");
-    const char *ti = "SSSSSSBBBIIISSBBBBB";
-    if (c->fmt.nv) {
-        if (c->bps == 1)
-            PIPE(p_interp, spv_interp8nv, ti);
-        else
-            PIPE(p_interp, spv_interp16nv, ti);
-    } else {
-        if (c->bps == 1)
-            PIPE(p_interp, spv_interp8, ti);
-        else
-            PIPE(p_interp, spv_interp16, ti);
+    for (int i = 0; i < P_COUNT; i++) {
+        const uint32_t *spv = pipe_defs[i].spv;
+        size_t size = pipe_defs[i].size;
+        if (i == P_INTERP) {
+            spv = spv_interp[c->fmt.nv][c->bps - 1];
+            size = spv_interp_size[c->fmt.nv][c->bps - 1];
+        }
+        if (pipe_create(c, &c->pipes[i], spv, size, pipe_defs[i].types, pipe_defs[i].name, pipe_defs[i].sg) < 0)
+            return -1;
     }
-#undef PIPE
-#undef PIPE_SG
     return 0;
 }
 
@@ -885,7 +1011,7 @@ static size_t layout(const mb_ctx *c, int w, int h, size_t off[3], size_t rowb[3
     size_t o = 0;
     for (int i = 0; i < c->nplanes; i++) {
         off[i] = o;
-        o += (rowb[i] * rows[i] + 255) & ~(size_t)255;
+        o += ALIGN_UP(rowb[i] * rows[i], 256);
     }
     return o;
 }
@@ -899,11 +1025,11 @@ static void set_geom(mb_ctx *c)
     while (nlev < MAXLEV && (fmt->w >> nlev) >= 48 && (fmt->h >> nlev) >= 48)
         nlev++;
     c->nlev = nlev;
-    int h = c->p.me_half < 0 ? (long)c->full.w * c->full.h > 2500000 : c->p.me_half;
+    int h = c->p.me_half < 0 ? (long)c->full.w * c->full.h > ME_HALF_PX : c->p.me_half;
     c->mb = h && nlev > 2 ? 1 : 0;
     for (int L = 0; L < nlev; L++) {
-        c->lw[L] = (fmt->w + (1 << L) - 1) >> L;
-        c->lh[L] = (fmt->h + (1 << L) - 1) >> L;
+        c->lw[L] = cdim(fmt->w, L);
+        c->lh[L] = cdim(fmt->h, L);
         c->bw[L] = (c->lw[L] + BS - 1) / BS;
         c->bh[L] = (c->lh[L] + BS - 1) / BS;
     }
@@ -948,10 +1074,17 @@ static void res_geom_free(mb_ctx *c)
     img_free(c, &c->oy);
     img_free(c, &c->oc1);
     img_free(c, &c->oc2);
-    vbuf *bufs[] = {&c->slots, &c->xkeys, &c->eslots, &c->tf4,  &c->tf0, &c->tf1,  &c->stat, &c->pstat,
-                    &c->qstat, &c->qfb,   &c->dummy,  &c->fbw, &c->agw, &c->agw2, &c->gmv, &c->ill0, &c->ill1, &c->hist};
-    for (size_t i = 0; i < sizeof(bufs) / sizeof(bufs[0]); i++)
-        buf_free(c, bufs[i]);
+    for (int i = 0; i < c->ngbufs; i++)
+        buf_free(c, c->gbufs[i]);
+    c->ngbufs = 0;
+}
+
+static int gbuf(mb_ctx *c, vbuf *b, VkDeviceSize size)
+{
+    if (c->ngbufs >= (int)(sizeof(c->gbufs) / sizeof(c->gbufs[0])))
+        return -1;
+    c->gbufs[c->ngbufs++] = b;
+    return buf_create(c, b, size, 0);
 }
 
 static int res_geom_init(mb_ctx *c)
@@ -978,18 +1111,12 @@ static int res_geom_init(mb_ctx *c)
             buf_create(c, &c->pfb[L], sz, 0) || buf_create(c, &c->tmp[L], sz, 0))
             return -1;
     }
-    int nb = c->bw[c->mb] * c->bh[c->mb];
-    if (buf_create(c, &c->qfb, (VkDeviceSize)nb * 16, 0) || buf_create(c, &c->pstat, 64, 0) ||
-        buf_create(c, &c->qstat, 64, 0))
-        return -1;
-    if (buf_create(c, &c->slots, (VkDeviceSize)nb * 4 * 4, 0) || buf_create(c, &c->xkeys, (VkDeviceSize)nb * 4 * 4, 0) ||
-        buf_create(c, &c->eslots, (VkDeviceSize)nb * 4 * 4, 0) || buf_create(c, &c->tf4, (VkDeviceSize)nb * 64, 0) ||
-        buf_create(c, &c->tf0, (VkDeviceSize)nb * 16, 0) || buf_create(c, &c->tf1, (VkDeviceSize)nb * 16, 0) ||
-        buf_create(c, &c->stat, 64, 0) || buf_create(c, &c->dummy, 64, 0) || buf_create(c, &c->hist, 128, 0) ||
-        buf_create(c, &c->fbw, (VkDeviceSize)nb * 4, 0) || buf_create(c, &c->agw, (VkDeviceSize)nb * 8, 0) ||
-        buf_create(c, &c->agw2, (VkDeviceSize)nb * 4, 0) || buf_create(c, &c->gmv, 16, 0) ||
-        buf_create(c, &c->ill0, (VkDeviceSize)nb * 16, 0) ||
-        buf_create(c, &c->ill1, (VkDeviceSize)nb * 16, 0))
+    VkDeviceSize nb = (VkDeviceSize)c->bw[c->mb] * c->bh[c->mb];
+    if (gbuf(c, &c->qfb, nb * 16) || gbuf(c, &c->pstat, 64) || gbuf(c, &c->qstat, 64) || gbuf(c, &c->slots, nb * 16) ||
+        gbuf(c, &c->xkeys, nb * 16) || gbuf(c, &c->eslots, nb * 16) || gbuf(c, &c->tf4, nb * 64) ||
+        gbuf(c, &c->tf0, nb * 16) || gbuf(c, &c->tf1, nb * 16) || gbuf(c, &c->stat, 64) || gbuf(c, &c->dummy, 64) ||
+        gbuf(c, &c->hist, 128) || gbuf(c, &c->fbw, nb * 4) || gbuf(c, &c->agw, nb * 8) || gbuf(c, &c->agw2, nb * 4) ||
+        gbuf(c, &c->gmv, 16) || gbuf(c, &c->ill0, nb * 16) || gbuf(c, &c->ill1, nb * 16))
         return -1;
     if (cmd_begin(c) < 0)
         return -1;
@@ -1033,11 +1160,6 @@ static int fidx(const mb_ctx *c, int back)
     return (c->ib - back + NFR) % NFR;
 }
 
-static int mbase(const mb_ctx *c)
-{
-    return c->mb;
-}
-
 static const vimg *lev_img(mb_ctx *c, int k, int L)
 {
     return L == 0 && !c->lnorm ? &c->fr[k].y : &c->fr[k].lev[L];
@@ -1066,10 +1188,20 @@ static unsigned px(const mb_ctx *c, const mb_image *src, int i, int x, int y)
     return c->bps == 1 ? r[x] : ((const uint16_t *)r)[x];
 }
 
+static unsigned chroma_mid(const mb_ctx *c)
+{
+    return c->bps == 1 ? 128 : c->lnorm ? 1u << (c->full.depth - 1) : 32768;
+}
+
+static float chroma_mid_f(const mb_ctx *c)
+{
+    return (float)chroma_mid(c) / (c->bps == 1 ? 255.0f : 65535.0f);
+}
+
 static int black_span(const mb_ctx *c, const mb_image *src, int y, int x0, int x1)
 {
-    unsigned sc = c->bps == 1 ? 1 : c->lnorm ? 1u << (c->full.depth - 8) : 256;
-    unsigned ymax = 24 * sc, lo = 118 * sc, hi = 138 * sc;
+    unsigned sc = chroma_mid(c) / 128, mid = chroma_mid(c);
+    unsigned ymax = BAR_Y_MAX * sc, lo = mid - BAR_C_TOL * sc, hi = mid + BAR_C_TOL * sc;
     int sx = c->full.cshift_x, cy = y >> c->full.cshift_y;
     for (int x = x0; x < x1; x += 2) {
         if (px(c, src, 0, x, y) > ymax)
@@ -1121,9 +1253,7 @@ static int detect_bars(const mb_ctx *c, const barsrc *b, int *rx, int *ry, int *
         r--;
     if (top == H / 4 || bot == H - H / 4 || l == W / 4 || r == W - W / 4)
         return -1;
-    int x0 = l & ~7, y0 = top & ~7, x1 = (r + 7) & ~7, y1 = (bot + 7) & ~7;
-    x1 = x1 > W ? W : x1;
-    y1 = y1 > H ? H : y1;
+    int x0 = l & ~7, y0 = top & ~7, x1 = MIN((r + 7) & ~7, W), y1 = MIN((bot + 7) & ~7, H);
     if ((x1 - x0) & 1 || (y1 - y0) & 1 || (double)(x1 - x0) * (y1 - y0) > 0.96 * W * H)
         x0 = y0 = 0, x1 = W, y1 = H;
     *rx = x0, *ry = y0, *rw = x1 - x0, *rh = y1 - y0;
@@ -1135,6 +1265,12 @@ static void plane_org(const mb_ctx *c, int i, int x0, int y0, size_t *xb, size_t
     int ncomp = c->fmt.nv ? 2 : 1;
     *xb = i ? (size_t)(x0 >> c->fmt.cshift_x) * ncomp * c->bps : (size_t)x0 * c->bps;
     *yr = i ? (size_t)(y0 >> c->fmt.cshift_y) : (size_t)y0;
+}
+
+static void copy_rows(uint8_t *d, ptrdiff_t ds, const uint8_t *s, ptrdiff_t ss, size_t rows, size_t rowb)
+{
+    for (size_t y = 0; y < rows; y++)
+        memcpy(d + (ptrdiff_t)y * ds, s + (ptrdiff_t)y * ss, rowb);
 }
 
 static void copy_border(const mb_ctx *c, int i, int x0, int y0, size_t rowb, size_t rows, uint8_t *d, ptrdiff_t ds,
@@ -1158,36 +1294,26 @@ static void build_levels(mb_ctx *c, int k)
     if (c->lnorm) {
         pcs pc = {{c->lw[0], c->lh[0]}, {luma_scale(c)}};
         vres r[2] = {{&f->y, NULL}, {&f->lev[0], NULL}};
-        dispatch(c, &c->p_norm, r, &pc, (c->lw[0] + 15) / 16, (c->lh[0] + 15) / 16);
+        dispatch(c, P(c, NORM), r, &pc, (c->lw[0] + 15) / 16, (c->lh[0] + 15) / 16);
     }
     for (int L = 1; L < c->nlev; L++) {
         pcs pc = {{c->lw[L], c->lh[L], c->lw[L - 1], c->lh[L - 1]}, {0}};
         vres r[2] = {{lev_img(c, k, L - 1), NULL}, {&f->lev[L], NULL}};
-        dispatch(c, &c->p_down, r, &pc, (c->lw[L] + 15) / 16, (c->lh[L] + 15) / 16);
+        dispatch(c, P(c, DOWN), r, &pc, (c->lw[L] + 15) / 16, (c->lh[L] + 15) / 16);
     }
-}
-
-static VkImageSubresourceLayers sub(const vimg *im)
-{
-    return (VkImageSubresourceLayers){im->aspect ? im->aspect : VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-}
-
-static VkImageLayout lay(const vimg *im)
-{
-    return im->layout ? im->layout : VK_IMAGE_LAYOUT_GENERAL;
 }
 
 static void copy_rect(mb_ctx *c, const vimg *from, int fx, int fy, const vimg *to, int tx, int ty, int w, int h)
 {
-    VkImageCopy r = {sub(from), {fx, fy, 0}, sub(to), {tx, ty, 0}, {(uint32_t)w, (uint32_t)h, 1}};
-    vkCmdCopyImage(S(c)->cb, from->img, lay(from), to->img, lay(to), 1, &r);
+    VkImageCopy r = {{from->aspect, 0, 0, 1}, {fx, fy, 0}, {to->aspect, 0, 0, 1}, {tx, ty, 0}, {(uint32_t)w, (uint32_t)h, 1}};
+    vkCmdCopyImage(S(c)->cb, from->img, from->layout, to->img, to->layout, 1, &r);
 }
 
 static void copy_overlap(mb_ctx *c, const vimg *from, int fx, int fy, const vimg *to, int tx, int ty)
 {
-    int x0 = fx > tx ? fx : tx, y0 = fy > ty ? fy : ty;
-    int x1 = fx + from->w < tx + to->w ? fx + from->w : tx + to->w;
-    int y1 = fy + from->h < ty + to->h ? fy + from->h : ty + to->h;
+    int x0 = MAX(fx, tx), y0 = MAX(fy, ty);
+    int x1 = MIN(fx + from->w, tx + to->w);
+    int y1 = MIN(fy + from->h, ty + to->h);
     if (x1 > x0 && y1 > y0)
         copy_rect(c, from, x0 - fx, y0 - fy, to, x0 - tx, y0 - ty, x1 - x0, y1 - y0);
 }
@@ -1206,7 +1332,7 @@ static int bar_rects(const mb_ctx *c, int i, int W, int H, int rect[4][4])
 
 static void tmpl_black(mb_ctx *c)
 {
-    unsigned mid = c->bps == 1 ? 128 : c->lnorm ? 1u << (c->full.depth - 1) : 32768;
+    unsigned mid = chroma_mid(c);
     for (int i = 1; i < c->nplanes; i++) {
         uint8_t *p = c->tmpl + c->toff[i];
         size_t n = c->trowb[i] * c->trows[i] / c->bps;
@@ -1259,9 +1385,8 @@ static int set_crop(mb_ctx *c, int x0, int y0, int w, int h)
             for (int i = 0; i < c->nplanes; i++) {
                 size_t xb, yr;
                 plane_org(c, i, x0, y0, &xb, &yr);
-                for (size_t y = 0; y < c->rows[i]; y++)
-                    memcpy((uint8_t *)up->map + c->off[i] + y * c->rowb[i],
-                           c->tmpl + c->toff[i] + (y + yr) * c->trowb[i] + xb, c->rowb[i]);
+                copy_rows((uint8_t *)up->map + c->off[i], (ptrdiff_t)c->rowb[i],
+                          c->tmpl + c->toff[i] + yr * c->trowb[i] + xb, (ptrdiff_t)c->trowb[i], c->rows[i], c->rowb[i]);
             }
         }
         for (int k = 0; k < NFR; k++) {
@@ -1330,8 +1455,8 @@ static void track_bars(mb_ctx *c, const barsrc *b)
     }
     int cx1 = c->x0 + c->fmt.w, cy1 = c->y0 + c->fmt.h;
     if (x0 < c->x0 || y0 < c->y0 || x0 + w > cx1 || y0 + h > cy1) {
-        int ux0 = x0 < c->x0 ? x0 : c->x0, uy0 = y0 < c->y0 ? y0 : c->y0;
-        int ux1 = x0 + w > cx1 ? x0 + w : cx1, uy1 = y0 + h > cy1 ? y0 + h : cy1;
+        int ux0 = MIN(x0, c->x0), uy0 = MIN(y0, c->y0);
+        int ux1 = MAX(x0 + w, cx1), uy1 = MAX(y0 + h, cy1);
         c->nstable = 0;
         set_crop(c, ux0, uy0, ux1 - ux0, uy1 - uy0);
         return;
@@ -1369,7 +1494,7 @@ static int push_begin(mb_ctx *c)
     c->eos = 0;
     c->npush++;
     if (c->nfr >= 2 && c->me_valid) {
-        int B = mbase(c);
+        int B = c->mb;
         rot3(&c->qfb, &c->pfb[B], &c->fb[B]);
         rot3(&c->qstat, &c->pstat, &c->stat);
         for (int L = B; L < c->nlev; L++) {
@@ -1424,9 +1549,8 @@ void mb_push(mb_ctx *c, const mb_image *src)
     for (int i = 0; i < c->nplanes; i++) {
         size_t xb, yr;
         plane_org(c, i, c->x0, c->y0, &xb, &yr);
-        uint8_t *d = (uint8_t *)up->map + c->off[i];
-        for (size_t y = 0; y < c->rows[i]; y++)
-            memcpy(d + y * c->rowb[i], src->data[i] + (ptrdiff_t)(y + yr) * src->stride[i] + xb, c->rowb[i]);
+        copy_rows((uint8_t *)up->map + c->off[i], (ptrdiff_t)c->rowb[i],
+                  src->data[i] + (ptrdiff_t)yr * src->stride[i] + xb, src->stride[i], c->rows[i], c->rowb[i]);
     }
     copy_b2i(c, up, c->off[0], &f->y);
     copy_b2i(c, up, c->off[1], &f->c1);
@@ -1435,20 +1559,25 @@ void mb_push(mb_ctx *c, const mb_image *src)
     push_end(c);
 }
 
+static void xcopy_rect(mb_ctx *c, const xbuf *x, int i, const vimg *im, int sx, int sy, size_t dx, size_t dy, int w,
+                       int h)
+{
+    uint32_t px = (uint32_t)((i && c->fmt.nv ? 2 : 1) * c->bps);
+    VkBufferImageCopy r = {c->xoff[i] + dy * c->xpitch[i] + dx * px, (uint32_t)(c->xpitch[i] / px), 0,
+                           {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {sx, sy, 0}, {(uint32_t)w, (uint32_t)h, 1}};
+    vkCmdCopyImageToBuffer(S(c)->cb, im->img, VK_IMAGE_LAYOUT_GENERAL, x->b.buf, 1, &r);
+}
+
 static void xfill_bars_gpu(mb_ctx *c, xbuf *x)
 {
     if (x->ver == c->bars_ver)
         return;
     const vimg *im[2] = {&c->bgy, &c->bgc};
     for (int i = 0; i < 2; i++) {
-        uint32_t px = (uint32_t)((i ? 2 : 1) * c->bps);
         int rect[4][4], n = bar_rects(c, i, im[i]->w, im[i]->h, rect);
-        for (int k = 0; k < n; k++) {
-            VkBufferImageCopy r = {c->xoff[i] + (size_t)rect[k][1] * c->xpitch[i] + (size_t)rect[k][0] * px,
-                                   (uint32_t)(c->xpitch[i] / px), 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-                                   {rect[k][0], rect[k][1], 0}, {(uint32_t)rect[k][2], (uint32_t)rect[k][3], 1}};
-            vkCmdCopyImageToBuffer(S(c)->cb, im[i]->img, VK_IMAGE_LAYOUT_GENERAL, x->b.buf, 1, &r);
-        }
+        for (int k = 0; k < n; k++)
+            xcopy_rect(c, x, i, im[i], rect[k][0], rect[k][1], (size_t)rect[k][0], (size_t)rect[k][1], rect[k][2],
+                       rect[k][3]);
     }
     x->ver = c->bars_ver;
 }
@@ -1460,34 +1589,32 @@ static void poll_slots(mb_ctx *c)
             slot_wait(c, i);
 }
 
-static int import_plane(mb_ctx *c, const mb_dmabuf_in *in, int p, vimg *im)
+static void plane_dims(const mb_ctx *c, int p, int *w, int *h)
 {
-    memset(im, 0, sizeof(*im));
-#ifdef _WIN32
-    (void)c;
-    (void)in;
-    (void)p;
-    return -1;
-#else
-    int fd = in->fd[in->obj[p]];
-    int w = p ? cdim(c->full.w, c->full.cshift_x) : c->full.w;
-    int h = p ? cdim(c->full.h, c->full.cshift_y) : c->full.h;
+    *w = p ? cdim(c->full.w, c->full.cshift_x) : c->full.w;
+    *h = p ? cdim(c->full.h, c->full.cshift_y) : c->full.h;
+}
+
+static void imp_free(mb_ctx *c, imp_ent *e)
+{
+    img_free(c, &e->im);
+    memset(e, 0, sizeof(*e));
+}
+
+#ifndef _WIN32
+static int import_image(mb_ctx *c, const mb_dmabuf_in *in, int p, vimg *im)
+{
+    int fd = in->fd[in->obj[p]], w, h;
+    plane_dims(c, p, &w, &h);
     VkFormat fmt = plane_fmt(c, p ? 2 : 1);
     VkSubresourceLayout pl = {in->offset[p], 0, in->pitch[p], 0, 0};
     VkImageDrmFormatModifierExplicitCreateInfoEXT ex = {VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
                                                         NULL, in->modifier, 1, &pl};
     VkExternalMemoryImageCreateInfo ei = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO, &ex,
                                           VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
-    VkImageCreateInfo ic = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, &ei};
-    ic.imageType = VK_IMAGE_TYPE_2D;
-    ic.format = fmt;
-    ic.extent = (VkExtent3D){(uint32_t)w, (uint32_t)h, 1};
-    ic.mipLevels = ic.arrayLayers = 1;
-    ic.samples = VK_SAMPLE_COUNT_1_BIT;
+    VkImageCreateInfo ic = img_info(im, w, h, fmt, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    ic.pNext = &ei;
     ic.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
-    ic.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    im->w = w;
-    im->h = h;
     if (vkCreateImage(c->dev, &ic, NULL, &im->img) != VK_SUCCESS)
         goto fail;
     if (!c->imp_bits) {
@@ -1512,37 +1639,67 @@ static int import_plane(mb_ctx *c, const mb_dmabuf_in *in, int p, vimg *im)
         close(dfd);
         goto fail;
     }
-    if (vkBindImageMemory(c->dev, im->img, im->mem, 0) != VK_SUCCESS)
-        goto fail;
-    VkImageViewCreateInfo vc = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    vc.image = im->img;
-    vc.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    vc.format = fmt;
-    vc.subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    if (vkCreateImageView(c->dev, &vc, NULL, &im->view) != VK_SUCCESS)
+    if (vkBindImageMemory(c->dev, im->img, im->mem, 0) != VK_SUCCESS || img_view(c, im, fmt) < 0)
         goto fail;
     return 0;
 fail:
     img_free(c, im);
     return -1;
+}
+#endif
+
+static imp_ent *import_plane(mb_ctx *c, const mb_dmabuf_in *in, int p)
+{
+#ifdef _WIN32
+    (void)c;
+    (void)in;
+    (void)p;
+    return NULL;
+#else
+    struct stat st;
+    if (fstat(in->fd[in->obj[p]], &st) < 0)
+        return NULL;
+    imp_ent *e = NULL, *victim = NULL;
+    c->imp_tick++;
+    for (int i = 0; i < c->nimp; i++) {
+        imp_ent *x = &c->imp[i];
+        if (x->im.img && x->ino == (uint64_t)st.st_ino && x->plane == p && x->off == in->offset[p] && x->pitch == in->pitch[p] &&
+            x->mod == in->modifier)
+            e = x;
+        else if (!x->im.img ? !victim || victim->im.img
+                            : !x->users && (!victim || (victim->im.img && x->last < victim->last)))
+            victim = x;
+    }
+    if (!e) {
+        if (c->nimp < NIMP)
+            victim = &c->imp[c->nimp++];
+        if (!victim)
+            return NULL;
+        if (victim->im.img)
+            imp_free(c, victim);
+        if (import_image(c, in, p, &victim->im) < 0)
+            return NULL;
+        e = victim;
+        e->ino = (uint64_t)st.st_ino;
+        e->off = in->offset[p];
+        e->pitch = in->pitch[p];
+        e->mod = in->modifier;
+        e->plane = p;
+    }
+    e->last = c->imp_tick;
+    e->users++;
+    return e;
 #endif
 }
 
 static void ext_own(mb_ctx *c, const vimg *a, const vimg *b, int acquire)
 {
     uint32_t ext = c->has_foreign ? VK_QUEUE_FAMILY_FOREIGN_EXT : VK_QUEUE_FAMILY_EXTERNAL;
+    VkAccessFlags use = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
     VkImageMemoryBarrier ib[2];
-    for (int k = 0; k < 2; k++) {
-        ib[k] = (VkImageMemoryBarrier){VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-        ib[k].srcAccessMask = acquire ? 0 : VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
-        ib[k].dstAccessMask = acquire ? VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT : 0;
-        ib[k].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-        ib[k].newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        ib[k].srcQueueFamilyIndex = acquire ? ext : c->qf;
-        ib[k].dstQueueFamilyIndex = acquire ? c->qf : ext;
-        ib[k].image = (k ? b : a)->img;
-        ib[k].subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    }
+    for (int k = 0; k < 2; k++)
+        ib[k] = img_barrier((k ? b : a)->img, acquire ? 0 : use, acquire ? use : 0, VK_IMAGE_LAYOUT_GENERAL,
+                            VK_IMAGE_LAYOUT_GENERAL, acquire ? ext : c->qf, acquire ? c->qf : ext);
     VkPipelineStageFlags work = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
     vkCmdPipelineBarrier(S(c)->cb, acquire ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : work,
                          acquire ? work : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 2, ib);
@@ -1572,8 +1729,9 @@ static int plane_pair_init(mb_ctx *c, vimg *y, vimg *uv)
 {
     if (y->img)
         return 0;
-    if (img_create(c, y, c->full.w, c->full.h, plane_fmt(c, 1)) < 0 ||
-        img_create(c, uv, cdim(c->full.w, c->full.cshift_x), cdim(c->full.h, c->full.cshift_y), plane_fmt(c, 2)) < 0) {
+    int cw, ch;
+    plane_dims(c, 1, &cw, &ch);
+    if (img_create(c, y, c->full.w, c->full.h, plane_fmt(c, 1)) < 0 || img_create(c, uv, cw, ch, plane_fmt(c, 2)) < 0) {
         img_free(c, y);
         img_free(c, uv);
         return -1;
@@ -1614,19 +1772,19 @@ int mb_push_dmabuf(mb_ctx *c, const mb_dmabuf_in *in)
     if (!c->ok || !c->has_mod || !c->fmt.nv)
         return -1;
     poll_slots(c);
-    vimg im[2];
-    int ok = import_plane(c, in, 0, &im[0]) == 0;
-    ok = import_plane(c, in, 1, &im[1]) == 0 && ok;
+    imp_ent *im[2] = {import_plane(c, in, 0), NULL};
+    im[1] = im[0] ? import_plane(c, in, 1) : NULL;
     c->gpu_in = 1;
-    if (ok)
+    if (im[1])
         gpu_bars(c);
-    if (!ok || !c->ok || push_begin(c) < 0) {
-        img_free(c, &im[0]);
-        img_free(c, &im[1]);
+    if (!im[1] || !c->ok || push_begin(c) < 0) {
+        for (int k = 0; k < 2; k++)
+            if (im[k])
+                im[k]->users--;
         return -1;
     }
     memcpy(S(c)->imp, im, sizeof(im));
-    vimg *py = &S(c)->imp[0], *pu = &S(c)->imp[1];
+    vimg *py = &im[0]->im, *pu = &im[1]->im;
     if (bg_init(c) < 0) {
         c->ok = 0;
         return -1;
@@ -1659,9 +1817,9 @@ static void push_planes(mb_ctx *c, const vimg *py, const vimg *pu)
             py = &c->bgy;
             pu = &c->bgc;
         }
-        pcs pc = {{c->full.w, c->full.h, sx, sy}, {24.0f / 255.0f, 10.0f / 255.0f}};
+        pcs pc = {{c->full.w, c->full.h, sx, sy}, {BAR_Y_MAX / 255.0f, BAR_C_TOL / 255.0f}};
         vres r[3] = {{py, NULL}, {pu, NULL}, {NULL, &c->bflags}};
-        dispatch(c, &c->p_bars, r, &pc, (uint32_t)(pu->w + 15) / 16, (uint32_t)(pu->h + 15) / 16);
+        dispatch(c, P(c, BARS), r, &pc, (uint32_t)(pu->w + 15) / 16, (uint32_t)(pu->h + 15) / 16);
         c->bf_pending = 1;
         c->bf_slot = c->cur;
         c->bf_serial = c->serial + 1;
@@ -1671,8 +1829,7 @@ static void push_planes(mb_ctx *c, const vimg *py, const vimg *pu)
 static vimg frame_plane(const mb_ctx *c, const mb_vkframe *f, int p, VkImageLayout layout)
 {
     vimg im = {.img = f->img[f->nimg == 2 ? p : 0], .layout = layout};
-    im.w = p ? cdim(c->full.w, c->full.cshift_x) : c->full.w;
-    im.h = p ? cdim(c->full.h, c->full.cshift_y) : c->full.h;
+    plane_dims(c, p, &im.w, &im.h);
     im.aspect = f->nimg == 2 ? VK_IMAGE_ASPECT_COLOR_BIT : p ? VK_IMAGE_ASPECT_PLANE_1_BIT : VK_IMAGE_ASPECT_PLANE_0_BIT;
     return im;
 }
@@ -1691,14 +1848,8 @@ static void frame_begin(mb_ctx *c, mb_vkframe *f, VkImageLayout layout, VkAccess
 {
     VkImageMemoryBarrier ib[2];
     for (int i = 0; i < f->nimg; i++) {
-        ib[i] = (VkImageMemoryBarrier){VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-        ib[i].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-        ib[i].dstAccessMask = access;
-        ib[i].oldLayout = f->layout[i];
-        ib[i].newLayout = layout;
-        ib[i].srcQueueFamilyIndex = ib[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ib[i].image = f->img[i];
-        ib[i].subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        ib[i] = img_barrier(f->img[i], VK_ACCESS_MEMORY_WRITE_BIT, access, f->layout[i], layout,
+                            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
         c->wsem[c->nwait] = f->sem[i];
         c->wval[c->nwait++] = f->sem_value[i];
     }
@@ -1737,10 +1888,13 @@ int mb_push_vk(mb_ctx *c, mb_vkframe *in)
     vimg pu = frame_plane(c, in, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     push_planes(c, &py, &pu);
     frame_end(c, in, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    if (cmd_end(c, 0) < 0 || cmd_begin(c) < 0)
+    if (cmd_end(c, 0) < 0)
         return -1;
-    push_end(c);
-    return cmd_end(c, 0);
+    if (cmd_begin(c) == 0) {
+        push_end(c);
+        cmd_end(c, 0);
+    }
+    return 0;
 }
 
 static void vk_copy_out(mb_ctx *c, mb_vkframe *out)
@@ -1763,12 +1917,19 @@ void mb_flush(mb_ctx *c)
     c->eos = 1;
 }
 
-static void estimate(mb_ctx *c, int dir)
+static void me_pair(const mb_ctx *c, int dir, int *kx, int *ky)
 {
     int kp = fidx(c, 1);
-    int kx = dir ? c->ib : kp, ky = dir ? kp : c->ib;
+    *kx = dir ? c->ib : kp;
+    *ky = dir ? kp : c->ib;
+}
+
+static void estimate(mb_ctx *c, int dir)
+{
+    int kx, ky;
+    me_pair(c, dir, &kx, &ky);
     vbuf *F = dir ? c->fb : c->fa, *T = dir ? c->pfb : c->pfa;
-    int top = c->nlev - 1, B = mbase(c);
+    int top = c->nlev - 1, B = c->mb;
     for (int L = top; L >= B; L--) {
         const vimg *X = lev_img(c, kx, L), *Y = lev_img(c, ky, L);
         int nb = c->bw[L] * c->bh[L];
@@ -1776,7 +1937,7 @@ static void estimate(mb_ctx *c, int dir)
         if (L == top) {
             pcs pc = {{c->bw[L], c->bh[L], c->lw[L], c->lh[L], c->p.coarse_r}, {c->p.lam_full}};
             vres r[3] = {{X, NULL}, {Y, NULL}, {NULL, &F[L]}};
-            dispatch(c, &c->p_full, r, &pc, (uint32_t)nb, 1);
+            dispatch(c, P(c, FULL), r, &pc, (uint32_t)nb, 1);
             have = 1;
         }
         int niter = L == B ? c->p.iters0 : c->p.iters;
@@ -1794,10 +1955,8 @@ static void estimate(mb_ctx *c, int dir)
                          {NULL, c->have_prev ? &T[L] : &c->dummy},
                          {NULL, dir ? &c->fa[L] : &c->dummy},
                          {NULL, &c->hist}};
-            dispatch(c, &c->p_iter, r, &pc, (uint32_t)(nb + 3) / 4, 1);
             static const char *const iter_names[MAXLEV] = {"iter_L0", "iter_L1", "iter_L2", "iter_L3", "iter_L4", "iter_L5"};
-            if (c->prof && S(c)->nq > 0)
-                S(c)->qname[S(c)->nq - 1] = iter_names[L];
+            dispatch_n(c, P(c, ITER), r, &pc, (uint32_t)(nb + 3) / 4, 1, iter_names[L]);
             swapbuf(&F[L], &c->tmp[L]);
             have = 1;
         }
@@ -1805,41 +1964,41 @@ static void estimate(mb_ctx *c, int dir)
             pcs pc = {{c->bw[L], c->bh[L], c->lw[L], c->lh[L], L == B && dir == 0, c->p.refine, L == B, dir}, {0}};
             set_dc(c, &pc);
             vres r[4] = {{X, NULL}, {Y, NULL}, {NULL, &F[L]}, {NULL, &c->stat}};
-            dispatch(c, &c->p_refine, r, &pc, (uint32_t)(nb + 3) / 4, 1);
+            dispatch(c, P(c, REFINE), r, &pc, (uint32_t)(nb + 3) / 4, 1);
         }
     }
 }
 
 static void cross_fix(mb_ctx *c, int dir)
 {
-    int B = mbase(c), bw = c->bw[B], bh = c->bh[B], nb = bw * bh;
-    int kp = fidx(c, 1);
+    int B = c->mb, bw = c->bw[B], bh = c->bh[B], nb = bw * bh, kx, ky;
+    me_pair(c, dir, &kx, &ky);
     vkCmdFillBuffer(S(c)->cb, c->xkeys.buf, 0, VK_WHOLE_SIZE, 0xffffffffu);
     barrier(c);
     {
         pcs pc = {{bw, bh, 0, 0, 0}, {1.0f}};
         vres r[2] = {{NULL, dir ? &c->fa[B] : &c->fb[B]}, {NULL, &c->xkeys}};
-        dispatch(c, &c->p_proj, r, &pc, (uint32_t)(nb + 63) / 64, 1);
+        dispatch(c, P(c, PROJ), r, &pc, (uint32_t)(nb + 63) / 64, 1);
     }
     vbuf *F = dir ? c->fb : c->fa;
     pcs pc = {{bw, bh, c->lw[B], c->lh[B]}, {0, 0, 0, 0, c->p.pen_xfix, c->p.pen_len, 0, 0, c->p.xrel, c->p.xabs, c->p.xmin}};
-    vres r[6] = {{lev_img(c, dir ? c->ib : kp, B), NULL}, {lev_img(c, dir ? kp : c->ib, B), NULL}, {NULL, &F[B]},
+    vres r[6] = {{lev_img(c, kx, B), NULL}, {lev_img(c, ky, B), NULL}, {NULL, &F[B]},
                  {NULL, &c->tmp[B]}, {NULL, dir ? &c->fa[B] : &c->fb[B]}, {NULL, &c->xkeys}};
-    dispatch(c, &c->p_cross, r, &pc, (uint32_t)(nb + 63) / 64, 1);
+    dispatch(c, P(c, CROSS), r, &pc, (uint32_t)(nb + 63) / 64, 1);
     swapbuf(&F[B], &c->tmp[B]);
 }
 
 static void local_fix(mb_ctx *c, int dir)
 {
-    int B = mbase(c), bw = c->bw[B], bh = c->bh[B], nb = bw * bh;
-    int kp = fidx(c, 1);
+    int B = c->mb, bw = c->bw[B], bh = c->bh[B], nb = bw * bh, kx, ky;
+    me_pair(c, dir, &kx, &ky);
     vbuf *F = dir ? c->fb : c->fa;
     int chk = c->p.xchk && (dir || c->have_prev);
     pcs pc = {{bw, bh, c->lw[B], c->lh[B], chk, dir},
               {0, 0, 0, 0, 0, c->p.pen_len, c->p.tsup_rel, c->p.tsup_abs, c->p.xrel, c->p.xabs, c->p.xnoise, c->p.xbad, c->p.xr, c->p.xs}};
-    vres r[6] = {{lev_img(c, dir ? c->ib : kp, B), NULL}, {lev_img(c, dir ? kp : c->ib, B), NULL}, {NULL, &F[B]},
+    vres r[6] = {{lev_img(c, kx, B), NULL}, {lev_img(c, ky, B), NULL}, {NULL, &F[B]},
                  {NULL, &c->tmp[B]}, {NULL, dir ? &c->fa[B] : (c->have_prev ? &c->pfb[B] : &c->dummy)}, {NULL, &c->stat}};
-    dispatch(c, &c->p_local, r, &pc, (uint32_t)(nb + 63) / 64, 1);
+    dispatch(c, P(c, LOCAL), r, &pc, (uint32_t)(nb + 63) / 64, 1);
     swapbuf(&F[B], &c->tmp[B]);
 }
 
@@ -1857,11 +2016,11 @@ static void run_me(mb_ctx *c)
         cross_fix(c, dir);
     for (int dir = 0; dir < 2 && c->p.xloc; dir++)
         local_fix(c, dir);
-    int B = mbase(c);
+    int B = c->mb;
     pcs pc = {{c->bw[B] * c->bh[B]}, {(float)(STAT_SCALE / ((double)c->bw[B] * c->bh[B] * 256)), (float)c->p.scut, (float)c->p.scut_rel,
                     (float)c->p.zcut_rel, (float)c->p.zcut_min, c->p.cut_sd, c->p.cut_kmin}};
     vres r[2] = {{NULL, &c->stat}, {NULL, &c->hist}};
-    dispatch(c, &c->p_cutdec, r, &pc, 1, 1);
+    dispatch(c, P(c, CUTDEC), r, &pc, 1, 1);
     c->me_valid = 1;
 }
 
@@ -1878,16 +2037,15 @@ static void read_out(mb_ctx *c, const slot *sl, mb_image *dst)
             copy_border(c, i, sl->x0, sl->y0, rowb[i], rows[i], dst->data[i], dst->stride[i], c->tmpl + c->toff[i],
                         (ptrdiff_t)c->trowb[i]);
         }
-        for (size_t y = 0; y < rows[i]; y++)
-            memcpy(dst->data[i] + (ptrdiff_t)(y + yr) * dst->stride[i] + xb, s + y * rowb[i], rowb[i]);
+        copy_rows(dst->data[i] + (ptrdiff_t)yr * dst->stride[i] + xb, dst->stride[i], s, (ptrdiff_t)rowb[i], rows[i],
+                  rowb[i]);
     }
 }
 
 static void copy_image(const mb_ctx *c, const mb_image *dst, const mb_image *src)
 {
     for (int k = 0; k < c->nplanes; k++)
-        for (size_t y = 0; y < c->trows[k]; y++)
-            memcpy(dst->data[k] + (ptrdiff_t)y * dst->stride[k], src->data[k] + (ptrdiff_t)y * src->stride[k], c->trowb[k]);
+        copy_rows(dst->data[k], dst->stride[k], src->data[k], src->stride[k], c->trows[k], c->trowb[k]);
 }
 
 static int xbuf_create(mb_ctx *c, xbuf *x)
@@ -1938,6 +2096,25 @@ static void xbuf_free(mb_ctx *c, xbuf *x)
     x->fd = -1;
 }
 
+static void xrelease(xpool *xp, int i)
+{
+    atomic_store(&xp->rel[i], atomic_fetch_add(&xp->seq, 1) + 1);
+    atomic_store(&xp->busy[i], 0);
+}
+
+static int xcreate(mb_ctx *c, int i)
+{
+    if (xbuf_create(c, &c->xb[i]) < 0) {
+        xbuf_free(c, &c->xb[i]);
+        return -1;
+    }
+    atomic_store(&c->xp->busy[i], 1);
+    atomic_store(&c->xp->rel[i], atomic_load(&c->xp->seq) - 63);
+    if (i == c->nx)
+        c->nx++;
+    return i;
+}
+
 int mb_export_init(mb_ctx *c)
 {
     if (!c->ok || !c->has_dmabuf || !c->getfd || (c->fmt.depth > 8 && c->lnorm))
@@ -1946,9 +2123,9 @@ int mb_export_init(mb_ctx *c)
         return 0;
     size_t o = 0;
     for (int i = 0; i < c->nplanes; i++) {
-        c->xpitch[i] = (c->trowb[i] + 255) & ~(size_t)255;
+        c->xpitch[i] = ALIGN_UP(c->trowb[i], 256);
         c->xoff[i] = o;
-        o += (c->xpitch[i] * c->trows[i] + 4095) & ~(size_t)4095;
+        o += ALIGN_UP(c->xpitch[i] * c->trows[i], 4096);
     }
     c->xsize = o;
     c->xp = calloc(1, sizeof(*c->xp));
@@ -1956,30 +2133,46 @@ int mb_export_init(mb_ctx *c)
         return -1;
     atomic_init(&c->xp->refs, 1);
     for (int i = 0; i < 4; i++)
-        if (xbuf_create(c, &c->xb[c->nx++]) < 0) {
-            xbuf_free(c, &c->xb[--c->nx]);
+        if (xcreate(c, c->nx) < 0)
             break;
-        }
+    for (int i = 0; i < c->nx; i++)
+        atomic_store(&c->xp->busy[i], 0);
     return c->nx ? 0 : -1;
 }
 
 static int xacquire(mb_ctx *c)
 {
-    for (int k = 0; k < c->nx; k++) {
-        int i = (c->xnext + k) % c->nx, z = 0;
-        if (atomic_compare_exchange_strong(&c->xp->busy[i], &z, 1)) {
-            c->xnext = (i + 1) % c->nx;
-            return i;
+    xpool *xp = c->xp;
+    unsigned now = atomic_load(&xp->seq);
+    int best = -1, hole = -1;
+    unsigned age = 0;
+    for (int i = 0; i < c->nx; i++) {
+        if (!c->xb[i].b.buf) {
+            hole = hole < 0 ? i : hole;
+            continue;
+        }
+        if (atomic_load(&xp->busy[i]))
+            continue;
+        unsigned a = now - atomic_load(&xp->rel[i]);
+        if (i >= 4 && a > 64) {
+            xbuf_free(c, &c->xb[i]);
+            hole = hole < 0 ? i : hole;
+            continue;
+        }
+        if (best < 0 || a > age) {
+            best = i;
+            age = a;
         }
     }
-    if (c->nx >= MAXX)
+    int grow = hole >= 0 ? hole : c->nx < MAXX ? c->nx : -1;
+    if ((best < 0 || (age < 2 && c->nx < 8)) && grow >= 0 && xcreate(c, grow) >= 0)
+        return grow;
+    if (best < 0)
         return -1;
-    if (xbuf_create(c, &c->xb[c->nx]) < 0) {
-        xbuf_free(c, &c->xb[c->nx]);
+    int z = 0;
+    if (!atomic_compare_exchange_strong(&xp->busy[best], &z, 1))
         return -1;
-    }
-    atomic_store(&c->xp->busy[c->nx], 1);
-    return c->nx++;
+    return best;
 }
 
 static mb_image xbuf_image(const mb_ctx *c, const xbuf *x)
@@ -2006,15 +2199,9 @@ static void xfill_bars(mb_ctx *c, xbuf *x)
 static void xcopy_out(mb_ctx *c, xbuf *x)
 {
     const vimg *im[3] = {&c->oy, &c->oc1, &c->oc2};
-    int ncomp = c->fmt.nv ? 2 : 1;
     for (int i = 0; i < c->nplanes; i++) {
-        size_t xb, yr;
-        plane_org(c, i, c->x0, c->y0, &xb, &yr);
-        uint32_t px = (uint32_t)((i ? ncomp : 1) * c->bps);
-        VkBufferImageCopy r = {c->xoff[i] + yr * c->xpitch[i] + xb, (uint32_t)(c->xpitch[i] / px), 0,
-                               {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0},
-                               {(uint32_t)im[i]->w, (uint32_t)im[i]->h, 1}};
-        vkCmdCopyImageToBuffer(S(c)->cb, im[i]->img, VK_IMAGE_LAYOUT_GENERAL, x->b.buf, 1, &r);
+        int sx = i ? c->fmt.cshift_x : 0, sy = i ? c->fmt.cshift_y : 0;
+        xcopy_rect(c, x, i, im[i], 0, 0, (size_t)(c->x0 >> sx), (size_t)(c->y0 >> sy), im[i]->w, im[i]->h);
     }
 }
 
@@ -2026,7 +2213,7 @@ static int xfill_desc(mb_ctx *c, int i, mb_dmabuf *out)
     out->fd = dup(c->xb[i].fd);
 #endif
     if (out->fd < 0) {
-        atomic_store(&c->xp->busy[i], 0);
+        xrelease(c->xp, i);
         return -1;
     }
     out->nplanes = c->nplanes;
@@ -2044,7 +2231,7 @@ static int xfill_desc(mb_ctx *c, int i, mb_dmabuf *out)
 void mb_dmabuf_release(void *pool, int idx)
 {
     xpool *xp = pool;
-    atomic_store(&xp->busy[idx], 0);
+    xrelease(xp, idx);
     if (atomic_fetch_sub(&xp->refs, 1) == 1)
         free(xp);
 }
@@ -2068,15 +2255,16 @@ int mb_submit_vk(mb_ctx *c, double t, mb_vkframe *out)
     int la = c->p.la && !c->eos && c->have_prev && c->me_valid;
     if (!c->ok || c->nfr < 2 || c->fifo_n >= MB_MAX_PENDING || (c->p.la && !c->eos && !la) || (out && !frame_ok(c, out)))
         return -1;
-    int xi = c->xp && !out ? xacquire(c) : -1;
-    if ((c->xp && !out && xi < 0) || cmd_begin(c) < 0) {
+    int want_x = c->xp && !out;
+    int xi = want_x ? xacquire(c) : -1;
+    if ((want_x && xi < 0) || cmd_begin(c) < 0) {
         if (xi >= 0)
-            atomic_store(&c->xp->busy[xi], 0);
+            xrelease(c->xp, xi);
         return -1;
     }
     if (!c->me_valid)
         run_me(c);
-    int ka, kb, kc, kz, past, lb = mbase(c);
+    int ka, kb, kc, kz, past, lb = c->mb;
     vbuf *FA0, *FB0, *NFA, *PFB, *SC, *SP;
     if (la) {
         ka = fidx(c, 2), kb = fidx(c, 1), kc = fidx(c, 0), kz = fidx(c, 3);
@@ -2103,12 +2291,12 @@ int mb_submit_vk(mb_ctx *c, double t, mb_vkframe *out)
             continue;
         pcs pc = {{bw, bh, 0, 0, dir}, {(float)(dir ? -(1 - t) : -t)}};
         vres r[2] = {{NULL, dir ? NFA : PFB}, {NULL, &c->eslots}};
-        dispatch(c, &c->p_proj, r, &pc, (uint32_t)(nb + 63) / 64, 1);
+        dispatch(c, P(c, PROJ), r, &pc, (uint32_t)(nb + 63) / 64, 1);
     }
     for (int dir = 0; dir < 2; dir++) {
         pcs pc = {{bw, bh, 0, 0, dir}, {(float)(dir ? 1 - t : t)}};
         vres r[2] = {{NULL, dir ? FB0 : FA0}, {NULL, &c->slots}};
-        dispatch(c, &c->p_proj, r, &pc, (uint32_t)(nb + 63) / 64, 1);
+        dispatch(c, P(c, PROJ), r, &pc, (uint32_t)(nb + 63) / 64, 1);
     }
     vbuf *tfin = &c->dummy, *tfout = &c->tf0;
     for (int pass = 0; pass < c->p.sel_passes; pass++) {
@@ -2119,54 +2307,53 @@ int mb_submit_vk(mb_ctx *c, double t, mb_vkframe *out)
         vres r[14] = {{lev_img(c, ka, lb), NULL}, {lev_img(c, kb, lb), NULL}, {lev_img(c, kc, lb), NULL},
                       {lev_img(c, kz, lb), NULL}, {NULL, FA0}, {NULL, FB0}, {NULL, &c->slots}, {NULL, tfin},
                       {NULL, tfout}, {NULL, NFA}, {NULL, PFB}, {NULL, &c->stat}, {NULL, SP}, {NULL, &c->eslots}};
-        dispatch(c, &c->p_sel, r, &pc, (uint32_t)(nb + 3) / 4, 1);
+        dispatch(c, P(c, SEL), r, &pc, (uint32_t)(nb + 3) / 4, 1);
         tfin = tfout;
         tfout = tfout == &c->tf0 ? &c->tf1 : &c->tf0;
     }
     if (c->p.vm_thr > 0) {
         pcs pc = {{bw, bh}, {c->p.vm_thr}};
         vres r[2] = {{NULL, tfin}, {NULL, tfout}};
-        dispatch(c, &c->p_vmed, r, &pc, (uint32_t)(nb + 63) / 64, 1);
+        dispatch(c, P(c, VMED), r, &pc, (uint32_t)(nb + 63) / 64, 1);
         tfin = tfout;
     }
     c->last_tf = tfin;
     {
         pcs pc = {{bw, bh}, {0, 0, c->p.fb_spread, c->p.fb_avg, (float)t, c->p.fb_ilo, c->p.fb_ihi}};
         vres r[4] = {{NULL, tfin}, {NULL, &c->fbw}, {NULL, FA0}, {NULL, FB0}};
-        dispatch(c, &c->p_conf, r, &pc, (uint32_t)(nb + 63) / 64, 1);
+        dispatch(c, P(c, CONF), r, &pc, (uint32_t)(nb + 63) / 64, 1);
     }
     const vimg *ac2 = c->fmt.nv ? &A->c1 : &A->c2, *bc2 = c->fmt.nv ? &B->c1 : &B->c2;
     {
-        pcs pc = {{c->fmt.w, c->fmt.h, bw, bh, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y, c->fmt.nv, 0, 0, 0, 0, 0, 0, lb},
+        pcs pc = {{bw, bh, c->fmt.w, c->fmt.h, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y, c->fmt.nv, 0, 0, 0, 0, 0, 0, lb},
                   {(float)t, luma_scale(c)}};
         vres r[6] = {{&A->c1, NULL}, {&B->c1, NULL}, {ac2, NULL}, {bc2, NULL}, {NULL, tfin}, {NULL, &c->ill0}};
-        dispatch(c, &c->p_illum, r, &pc, (uint32_t)(nb + 63) / 64, 1);
+        dispatch(c, P(c, ILLUM), r, &pc, (uint32_t)(nb + 63) / 64, 1);
         pcs pm = {{bw, bh}};
         vres rm[2] = {{NULL, &c->ill0}, {NULL, &c->ill1}};
-        dispatch(c, &c->p_ilmed, rm, &pm, (uint32_t)(nb + 63) / 64, 1);
+        dispatch(c, P(c, ILMED), rm, &pm, (uint32_t)(nb + 63) / 64, 1);
         pcs pa = {{bw, bh, c->fmt.w, c->fmt.h, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y, c->fmt.nv, 0, 0, 0, 0, 0, 0, lb},
-                  {(float)t, 255.0f * luma_scale(c), c->p.ag_lo, c->p.ag_hi, c->p.ag_flat, 0,
-                   c->bps == 1 ? 128.0f / 255.0f : c->lnorm ? (float)(1 << (c->fmt.depth - 1)) / 65535.0f : 0.5f, c->p.ag_sat}};
+                  {(float)t, 255.0f * luma_scale(c), c->p.ag_lo, c->p.ag_hi, c->p.ag_flat, 0, chroma_mid_f(c), c->p.ag_sat}};
         pcs pg = {{bw, bh}};
         vres rg[2] = {{NULL, tfin}, {NULL, &c->gmv}};
-        dispatch(c, &c->p_gmed, rg, &pg, 1, 1);
+        dispatch(c, P(c, GMED), rg, &pg, 1, 1);
         vres ra[8] = {{&A->y, NULL}, {&B->y, NULL}, {&A->c1, NULL}, {&B->c1, NULL},
                       {ac2, NULL},   {bc2, NULL},   {NULL, &c->agw}, {NULL, &c->gmv}};
-        dispatch(c, &c->p_agree, ra, &pa, (uint32_t)(nb + 63) / 64, 1);
+        dispatch(c, P(c, AGREE), ra, &pa, (uint32_t)(nb + 63) / 64, 1);
         pcs ps = {{bw, bh, c->p.ag_r}, {c->p.ag_src, (float)t}};
         vres rs[4] = {{NULL, &c->agw}, {NULL, &c->agw2}, {NULL, tfin}, {NULL, &c->gmv}};
-        dispatch(c, &c->p_agspread, rs, &ps, (uint32_t)(nb + 63) / 64, 1);
+        dispatch(c, P(c, AGSPREAD), rs, &ps, (uint32_t)(nb + 63) / 64, 1);
     }
     {
         pcs pc = {{bw, bh, c->lw[lb], c->lh[lb], c->p.sub_ref},
                   {(float)t, c->p.sub_thr / (float)(1 << lb), c->p.pen_sub, luma_scale(c), c->p.pen_sref}};
         vres r[5] = {{lev_img(c, ka, lb), NULL}, {lev_img(c, kb, lb), NULL}, {NULL, tfin}, {NULL, &c->tf4}, {NULL, &c->ill1}};
-        dispatch(c, &c->p_sub, r, &pc, (uint32_t)(nb * 4 + 63) / 64, 1);
+        dispatch(c, P(c, SUB), r, &pc, (uint32_t)(nb * 4 + 63) / 64, 1);
     }
     {
         float maxv, step;
         out_range(c, &maxv, &step);
-        pcs pc = {{c->fmt.w, c->fmt.h, bw, bh, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y, 0, 0, 0, 0, 0, 0, 0, lb},
+        pcs pc = {{c->fmt.w, c->fmt.h, bw, bh, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y, c->fmt.nv, 0, 0, 0, 0, 0, 0, lb},
                   {(float)t, c->p.sigma, c->p.pen_occ, c->p.pen_bad, c->p.pen_fb, c->p.wprior, c->p.cthr, c->p.pen_fbm,
                    luma_scale(c), maxv, step, 0, c->p.fg_pix, c->p.ws_lo, c->p.ws_hi, c->p.ag_sw}};
         vres r[19] = {{&A->y, NULL},  {&B->y, NULL},  {&A->c1, NULL},   {&B->c1, NULL},
@@ -2174,17 +2361,19 @@ int mb_submit_vk(mb_ctx *c, double t, mb_vkframe *out)
                       {NULL, FB0}, {&c->oy, NULL}, {&c->oc1, NULL}, {c->fmt.nv ? &c->oc1 : &c->oc2, NULL},
                       {lev_img(c, ka, 0), NULL}, {lev_img(c, kb, 0), NULL}, {NULL, SC}, {NULL, &c->fbw}, {NULL, &c->ill1},
                       {NULL, &c->agw2}, {NULL, &c->gmv}};
-        dispatch(c, &c->p_interp, r, &pc, (uint32_t)((c->fmt.w + 1) / 2 + 7) / 8, (uint32_t)((c->fmt.h + 1) / 2 + 7) / 8);
+        dispatch(c, P(c, INTERP), r, &pc, (uint32_t)((c->fmt.w + 1) / 2 + 7) / 8, (uint32_t)((c->fmt.h + 1) / 2 + 7) / 8);
     }
     S(c)->xidx = xi;
+    S(c)->nb = nb;
     if (out) {
         vk_copy_out(c, out);
     } else if (xi >= 0) {
+        xbuf *x = &c->xb[xi];
         if (cropped(c) && c->gpu_in)
-            xfill_bars_gpu(c, &c->xb[S(c)->xidx]);
+            xfill_bars_gpu(c, x);
         else if (cropped(c))
-            xfill_bars(c, &c->xb[S(c)->xidx]);
-        xcopy_out(c, &c->xb[S(c)->xidx]);
+            xfill_bars(c, x);
+        xcopy_out(c, x);
     } else {
         copy_i2b(c, &c->oy, &S(c)->down, c->off[0]);
         copy_i2b(c, &c->oc1, &S(c)->down, c->off[1]);
@@ -2213,7 +2402,7 @@ int mb_debug_field(mb_ctx *c, int which, float *out, int *w, int *h)
     vbuf *f = which == 0 ? &c->last_fa : which == 1 ? &c->last_fb : c->last_tf;
     if (!f || !f->buf)
         return -1;
-    int n = c->bw[mbase(c)] * c->bh[mbase(c)];
+    int n = c->bw[c->mb] * c->bh[c->mb];
     vbuf tmp;
     if (buf_create(c, &tmp, (VkDeviceSize)n * 16, 1) < 0 || cmd_begin(c) < 0) {
         buf_free(c, &tmp);
@@ -2227,8 +2416,8 @@ int mb_debug_field(mb_ctx *c, int which, float *out, int *w, int *h)
         return -1;
     }
     memcpy(out, tmp.map, (size_t)n * 16);
-    *w = c->bw[mbase(c)];
-    *h = c->bh[mbase(c)];
+    *w = c->bw[c->mb];
+    *h = c->bh[c->mb];
     buf_free(c, &tmp);
     return 0;
 }
@@ -2252,7 +2441,7 @@ static slot *pop_slot(mb_ctx *c, int *cut)
     c->fifo_n--;
     slot *sl = &c->sl[i];
     slot_wait(c, i);
-    double e = ((uint32_t *)sl->statcopy.map)[0] * STAT_SCALE / ((double)c->bw[mbase(c)] * c->bh[mbase(c)] * 256);
+    double e = ((uint32_t *)sl->statcopy.map)[0] * STAT_SCALE / ((double)sl->nb * 256);
     *cut = ((uint32_t *)sl->statcopy.map)[2] != 0;
     c->st.mean_err = e;
     c->st.scene_cut = *cut;
@@ -2269,7 +2458,7 @@ int mb_retrieve(mb_ctx *c, mb_image *dst)
     if (sl->xidx >= 0) {
         mb_image s = xbuf_image(c, &c->xb[sl->xidx]);
         copy_image(c, dst, &s);
-        atomic_store(&c->xp->busy[sl->xidx], 0);
+        xrelease(c->xp, sl->xidx);
         sl->xidx = -1;
         return cut;
     }
@@ -2303,7 +2492,7 @@ void mb_reset(mb_ctx *c)
     for (int i = 0; i < NSLOT; i++) {
         slot_wait(c, i);
         if (c->sl[i].xidx >= 0 && c->xp)
-            atomic_store(&c->xp->busy[c->sl[i].xidx], 0);
+            xrelease(c->xp, c->sl[i].xidx);
         c->sl[i].xidx = -1;
     }
     c->fifo_n = 0;
@@ -2413,10 +2602,17 @@ int mb_set_param(mb_ctx *c, const char *name, double v)
         c->mb = mb;
         return c->ok && nm != mb ? set_crop(c, c->x0, c->y0, c->fmt.w, c->fmt.h) : 0;
     }
-    if (!strcmp(name, "sel_passes") || !strcmp(name, "iters0")) {
-        if (v < 1)
+    static const struct {
+        const char *name;
+        double lo, hi;
+    } lim[] = {{"sel_passes", 1, 8}, {"iters0", 1, 16}, {"iters", 0, 16}, {"coarse_r", 0, 16}, {"xfix", 0, 2},
+               {"ag_r", 0, 16}, {"xs", 0.25, 16}, {"xr", 0, 64}, {"refine", 0, 1}, {"la", 0, 1}, {"me_half", -1, 1},
+               {"dc_lo", 0, 1}, {"dc_hi", 0, 1}, {"sub_ref", 0, 8}};
+    for (size_t i = 0; i < sizeof(lim) / sizeof(lim[0]); i++)
+        if (!strcmp(name, lim[i].name) && (v < lim[i].lo || v > lim[i].hi))
             return -1;
-    }
+    if ((!strcmp(name, "dc_lo") && v >= p->dc_hi) || (!strcmp(name, "dc_hi") && v <= p->dc_lo))
+        return -1;
     P_(pen_parent) P_(pen_temporal) P_(pen_update) P_(pen_zero) P_(pen_cross) P_(pen_len) P_(lam_full) P_(dc_lo) P_(dc_hi) P_(skip)
     P_(coarse_r) P_(iters) P_(iters0) P_(refine) P_(sel_passes) P_(pen_inc) P_(sigma) P_(pen_occ) P_(pen_bad)
     P_(wprior) P_(cthr) P_(pen_fb) P_(fb_spread) P_(fb_avg) P_(fg_sel) P_(fg_pix) P_(pen_one) P_(one_rel) P_(one_min) P_(one_tex) P_(one_sw) P_(pen_fbm) P_(unc_min) P_(uncov) P_(unc_cont) P_(xfix) P_(tsup) P_(xloc) P_(tex) P_(tref) P_(twaive) P_(xchk) P_(xbad) P_(xnoise) P_(xr) P_(xs) P_(tsup_rel) P_(tsup_abs) P_(tsup_pen) P_(tsup_min) P_(pen_xfix) P_(xrel) P_(xabs) P_(xmin) P_(vm_thr) P_(ws_lo) P_(ws_hi) P_(sub_thr) P_(pen_sub) P_(sub_ref) P_(pen_sref) P_(la) P_(bar_wait) P_(bars) P_(tz_pen) P_(ag_lo) P_(ag_hi) P_(ag_flat) P_(ag_r) P_(ag_sat) P_(ag_sw) P_(ag_src) P_(fb_ilo) P_(fb_ihi) P_(scut) P_(scut_rel) P_(zcut_rel) P_(zcut_min) P_(cut_sd) P_(cut_kmin)
@@ -2445,13 +2641,11 @@ void mb_destroy(mb_ctx *c)
         res_geom_free(c);
         for (int i = 0; i < NSLOT; i++)
             slot_release(c, &c->sl[i]);
+        for (int i = 0; i < c->nimp; i++)
+            imp_free(c, &c->imp[i]);
         img_free(c, &c->bgy);
         img_free(c, &c->bgc);
         buf_free(c, &c->bflags);
-        pipe_free(c, &c->p_bars);
-        pipe_free(c, &c->p_agree);
-        pipe_free(c, &c->p_gmed);
-        pipe_free(c, &c->p_agspread);
         for (int i = 0; i < c->nx; i++)
             xbuf_free(c, &c->xb[i]);
         if (c->xp && atomic_fetch_sub(&c->xp->refs, 1) == 1)
@@ -2467,22 +2661,8 @@ void mb_destroy(mb_ctx *c)
         }
         buf_free(c, &c->up[0]);
         buf_free(c, &c->up[1]);
-        pipe_free(c, &c->p_down);
-        pipe_free(c, &c->p_norm);
-        pipe_free(c, &c->p_full);
-        pipe_free(c, &c->p_iter);
-        pipe_free(c, &c->p_refine);
-        pipe_free(c, &c->p_proj);
-        pipe_free(c, &c->p_cross);
-        pipe_free(c, &c->p_local);
-        pipe_free(c, &c->p_sel);
-        pipe_free(c, &c->p_vmed);
-        pipe_free(c, &c->p_sub);
-        pipe_free(c, &c->p_conf);
-        pipe_free(c, &c->p_cutdec);
-        pipe_free(c, &c->p_illum);
-        pipe_free(c, &c->p_ilmed);
-        pipe_free(c, &c->p_interp);
+        for (int i = 0; i < P_COUNT; i++)
+            pipe_free(c, &c->pipes[i]);
         if (c->smp)
             vkDestroySampler(c->dev, c->smp, NULL);
         if (c->cp)
@@ -2496,7 +2676,7 @@ void mb_destroy(mb_ctx *c)
     free(c);
 }
 
-mb_ctx *mb_create_vk(const mb_format *fmt, const mb_vkdev *d)
+mb_ctx *mb_create_ex(const mb_format *fmt, const mb_vkdev *d, const mb_host *host)
 {
     if (fmt->w < 64 || fmt->h < 64 || fmt->depth < 8 || fmt->depth > 16 || fmt->cshift_x < 0 || fmt->cshift_x > 1 ||
         fmt->cshift_y < 0 || fmt->cshift_y > 1 || fmt->lsb_pad < 0 || fmt->lsb_pad > 8 ||
@@ -2505,6 +2685,8 @@ mb_ctx *mb_create_vk(const mb_format *fmt, const mb_vkdev *d)
     mb_ctx *c = calloc(1, sizeof(*c));
     if (!c)
         return NULL;
+    if (host)
+        c->host = *host;
     c->fmt = c->full = *fmt;
     c->bps = fmt->depth > 8 ? 2 : 1;
     c->nplanes = fmt->nv ? 2 : 3;
@@ -2513,17 +2695,17 @@ mb_ctx *mb_create_vk(const mb_format *fmt, const mb_vkdev *d)
     c->hist_clear = 1;
     set_geom(c);
     if (vk_init(c, d) < 0) {
-        fprintf(stderr, "motionblade: Vulkan init failed\n");
+        mb_log(c, MB_LOG_WARN, "Vulkan init failed");
         mb_destroy(c);
         return NULL;
     }
-    if ((uint32_t)(c->bw[0] * c->bh[0] + 3) / 4 > c->max_groups) {
-        fprintf(stderr, "motionblade: %dx%d is too large for this GPU\n", fmt->w, fmt->h);
+    if ((uint32_t)(c->bw[c->mb] * c->bh[c->mb] + 3) / 4 > c->max_groups) {
+        mb_log(c, MB_LOG_WARN, "%dx%d is too large for this GPU", fmt->w, fmt->h);
         mb_destroy(c);
         return NULL;
     }
     if (res_fixed_init(c) < 0 || res_geom_init(c) < 0) {
-        fprintf(stderr, "motionblade: Vulkan init failed\n");
+        mb_log(c, MB_LOG_ERR, "Vulkan init failed");
         mb_destroy(c);
         return NULL;
     }
@@ -2531,7 +2713,17 @@ mb_ctx *mb_create_vk(const mb_format *fmt, const mb_vkdev *d)
     return c;
 }
 
+mb_ctx *mb_create_vk(const mb_format *fmt, const mb_vkdev *d)
+{
+    return mb_create_ex(fmt, d, NULL);
+}
+
 mb_ctx *mb_create(const mb_format *fmt)
 {
-    return mb_create_vk(fmt, NULL);
+    return mb_create_ex(fmt, NULL, NULL);
+}
+
+int mb_ok(const mb_ctx *c)
+{
+    return c && c->ok;
 }

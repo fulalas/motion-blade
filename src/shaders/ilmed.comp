@@ -14,7 +14,7 @@ void main()
     int bx = id % bw, by = id / bw;
     vec3 v[9];
     for (int k = 0; k < 9; k++) {
-        v[k] = iv[bidx(ivec2(bx + k % 3 - 1, by + k / 3 - 1), ivec2(bw, bh))].xyz;
+        v[k] = iv[nbr3(k, ivec2(bx, by), ivec2(bw, bh))].xyz;
     }
     vec3 r = vec3(0.0);
     for (int ch = 0; ch < 3; ch++)

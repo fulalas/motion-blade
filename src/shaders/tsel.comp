@@ -1,6 +1,5 @@
 #version 450
 #extension GL_GOOGLE_include_directive : enable
-#extension GL_KHR_shader_subgroup_clustered : enable
 #include "common.glsl"
 #include "sad.glsl"
 layout(local_size_x = 64) in;
@@ -35,6 +34,19 @@ float zsad_bc(vec2 p, vec2 u, float t)
     row16(B, p + (1.0 - t) * u, rb);
     row16(C, p + (2.0 - t) * u, rc);
     return zsad(rb, rc);
+}
+
+float zsad_ab(vec2 p, vec2 u, float t)
+{
+    float ra[16], rb[16];
+    row16(A, p - t * u, ra);
+    row16(B, p + (1.0 - t) * u, rb);
+    return zsad(ra, rb);
+}
+
+vec2 cons_err(vec2 c, vec2 u, float t)
+{
+    return vec2(l1(fat(0, c - t * u) - u), l1(fat(1, c + (1.0 - t) * u) + u));
 }
 
 float tolf(vec2 u) { return float(pc.i2.x) * 0.01 * l1(u) + float(pc.i2.y) * 0.01; }
@@ -93,8 +105,7 @@ void main()
         for (int i = 0; i < n; i++) {
             vec2 u = cl[i];
             float th = cons_thr(pc.f0.z, u);
-            nsup = nsup || (past && fut && l1(fat(0, cc - t * u) - u) <= th && l1(fat(1, cc + (1.0 - t) * u) + u) <= th &&
-                            both_sup(cc, u, t));
+            nsup = nsup || (past && fut && all(lessThanEqual(cons_err(cc, u, t), vec2(th))) && both_sup(cc, u, t));
         }
         for (int i = 0; i < 2 && !nsup; i++) {
             uint key = ek[id * 4 + i];
@@ -119,18 +130,15 @@ void main()
     }
     int n2 = n;
     if (pc.i1.x == 0) {
-        ivec2 d[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
         for (int k = 0; k < 4; k++) {
-            int q = bidx(ivec2(bx, by) + d[k], ivec2(bw, bh));
+            int q = bidx(ivec2(bx, by) + DIR8[k], ivec2(bw, bh));
             add(fa[q].xy);
             add(-fb[q].xy);
         }
     } else {
         add(tp[id].xy);
-        ivec2 d[8] = ivec2[8](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1),
-                              ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1), ivec2(1, 1));
         for (int k = 0; k < 8; k++) {
-            add(tp[bidx(ivec2(bx, by) + d[k], ivec2(bw, bh))].xy);
+            add(tp[bidx(ivec2(bx, by) + DIR8[k], ivec2(bw, bh))].xy);
         }
     }
     vec2 row0 = vec2(bx * 8 - 4, by * 8 - 4 + lane) + 0.5;
@@ -152,14 +160,11 @@ void main()
     bool best_sup = true, best_ok = false;
     for (int i = 0; i < n2; i++) {
         vec2 u = cl[i];
-        float ra[16], rb[16];
-        row16(A, row0 - t * u, ra);
-        row16(B, row0 + (1.0 - t) * u, rb);
-        float s = zsad(ra, rb);
+        float s = zsad_ab(row0, u, t);
         float m2 = g_ml;
         float thr = cons_thr(pc.f0.z, u);
-        bool okA = l1(fat(0, c - t * u) - u) <= thr;
-        bool okB = l1(fat(1, c + (1.0 - t) * u) + u) <= thr;
+        vec2 e = cons_err(c, u, t);
+        bool okA = e.x <= thr, okB = e.y <= thr;
         bool sup = true;
         float pen = float(int(!okA) + int(!okB));
         bool chk = anysup && l1(u) >= minsup;
@@ -193,12 +198,10 @@ void main()
         }
     }
     if (tsup && l1(best_v - tv) >= minsup) {
-        float ra[16], rb[16];
-        row16(A, row0 - t * tv, ra);
-        row16(B, row0 + (1.0 - t) * tv, rb);
-        float s = zsad(ra, rb);
+        float s = zsad_ab(row0, tv, t);
         float thr = cons_thr(pc.f0.z, tv);
-        bool okA = l1(fat(0, c - t * tv) - tv) <= thr, okB = l1(fat(1, c + (1.0 - t) * tv) + tv) <= thr;
+        vec2 e = cons_err(c, tv, t);
+        bool okA = e.x <= thr, okB = e.y <= thr;
         float cost = s + pc.f0.y * float(int(!okA) + int(!okB));
         if (cost < best_c) {
             best_c = cost;
@@ -216,14 +219,11 @@ void main()
             for (float dy = -rr; dy <= rr; dy += st)
             for (float dx = -rr; dx <= rr; dx += st) {
                 vec2 u = base + vec2(dx, dy);
-                float ra[16], rb[16];
-                row16(A, row0 - t * u, ra);
-                row16(B, row0 + (1.0 - t) * u, rb);
-                float s = zsad(ra, rb);
+                float s = zsad_ab(row0, u, t);
                 float m2 = g_ml;
                 float thr = cons_thr(pc.f0.z, u);
-                bool okA = l1(fat(0, c - t * u) - u) <= thr;
-                bool okB = l1(fat(1, c + (1.0 - t) * u) + u) <= thr;
+                vec2 e = cons_err(c, u, t);
+                bool okA = e.x <= thr, okB = e.y <= thr;
                 if (pass == 0 && !okA && !okB)
                     continue;
                 float cost = s + pc.f0.y * ((both_sup(c, u, t) && pc.i3.z != 0) ? 0.0 : float(int(!okA) + int(!okB)));
@@ -270,7 +270,8 @@ void main()
             vec2 u = cl[i];
             float thr = cons_thr(pc.f0.z, u);
             vec2 pa = c - t * u, pb = c + (1.0 - t) * u;
-            float ia = l1(fat(0, pa) - u), ib = l1(fat(1, pb) + u);
+            vec2 e = cons_err(c, u, t);
+            float ia = e.x, ib = e.y;
             if (ia <= thr && ib <= thr)
                 continue;
             bool swf = t >= 0.5 || any(lessThan(pa, vec2(8.0))) || any(greaterThanEqual(pa, fr)) || t * ia >= sw;

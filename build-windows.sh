@@ -94,6 +94,12 @@ meson_build() {
 done_mark() { [ -e "$prefix/.done-$1" ]; }
 mark() { touch "$prefix/.done-$1"; }
 
+write_pc() {
+    mkdir -p "$prefix/lib/pkgconfig"
+    printf 'prefix=/\nlibdir=${prefix}/lib\nincludedir=${prefix}/include%s\nName: %s\nDescription: %s\nVersion: %s\nLibs: -L${libdir} %s\nCflags: -I${includedir}\n' \
+        "$6" "$2" "$3" "$4" "$5" >"$prefix/lib/pkgconfig/$1.pc"
+}
+
 _zlib() {
     gettar https://zlib.net/fossils/zlib-1.3.1.tar.gz 9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
     pushd zlib-1.3.1 >/dev/null
@@ -102,9 +108,7 @@ _zlib() {
     install -Dm644 libz.a "$prefix/lib/libz.a"
     install -Dm644 zlib.h "$prefix/include/zlib.h"
     install -Dm644 zconf.h "$prefix/include/zconf.h"
-    mkdir -p "$prefix/lib/pkgconfig"
-    printf 'prefix=/\nlibdir=${prefix}/lib\nincludedir=${prefix}/include\nName: zlib\nDescription: zlib\nVersion: 1.3.1\nLibs: -L${libdir} -lz\nCflags: -I${includedir}\n' \
-        >"$prefix/lib/pkgconfig/zlib.pc"
+    write_pc zlib zlib zlib 1.3.1 -lz
     popd >/dev/null
 }
 
@@ -114,9 +118,7 @@ _iconv() {
     ../configure --host=$TARGET --prefix=/ --disable-shared --enable-static --disable-nls
     install_build
     popd >/dev/null
-    mkdir -p "$prefix/lib/pkgconfig"
-    printf 'prefix=/\nlibdir=${prefix}/lib\nincludedir=${prefix}/include\nName: iconv\nDescription: iconv\nVersion: 1.18\nLibs: -L${libdir} -liconv\nCflags: -I${includedir}\n' \
-        >"$prefix/lib/pkgconfig/iconv.pc"
+    write_pc iconv iconv iconv 1.18 -liconv
 }
 
 _vulkan() {
@@ -145,6 +147,7 @@ _shaderc() {
     popd >/dev/null
     sed 's/-lshaderc_combined/-lshaderc_combined -lc++/' "$prefix/lib/pkgconfig/shaderc_combined.pc" \
         | sed 's/^Name:.*/Name: shaderc/' >"$prefix/lib/pkgconfig/shaderc.pc"
+    grep -q -- '-lc++' "$prefix/lib/pkgconfig/shaderc.pc" || { echo "shaderc.pc: -lshaderc_combined not found, -lc++ not added" >&2; exit 1; }
 }
 
 _spirv_cross() {
@@ -155,8 +158,8 @@ _spirv_cross() {
     install_build
     popd >/dev/null
     local v=$(sed -n 's/^Version: //p' "$prefix/lib/pkgconfig/spirv-cross-c.pc")
-    printf 'prefix=/\nlibdir=${prefix}/lib\nincludedir=${prefix}/include/spirv_cross\nName: spirv-cross-c-shared\nDescription: SPIRV-Cross (static)\nVersion: %s\nLibs: -L${libdir} -lspirv-cross-c -lspirv-cross-hlsl -lspirv-cross-msl -lspirv-cross-glsl -lspirv-cross-reflect -lspirv-cross-util -lspirv-cross-cpp -lspirv-cross-core -lc++\nCflags: -I${includedir}\n' "$v" \
-        >"$prefix/lib/pkgconfig/spirv-cross-c-shared.pc"
+    write_pc spirv-cross-c-shared spirv-cross-c-shared "SPIRV-Cross (static)" "$v" \
+        "-lspirv-cross-c -lspirv-cross-hlsl -lspirv-cross-msl -lspirv-cross-glsl -lspirv-cross-reflect -lspirv-cross-util -lspirv-cross-cpp -lspirv-cross-core -lc++" /spirv_cross
 }
 
 _dav1d() {
@@ -228,8 +231,7 @@ done
 echo "=== building mpv"
 cd "$src_dir"
 build="$work/mpv-build"
-rm -rf "$build"
-meson setup "$build" --cross-file "$prefix/crossfile" \
+[ -f "$build/build.ninja" ] || meson setup "$build" --cross-file "$prefix/crossfile" \
     -D{c,cpp}_args="-I$prefix/include" -D{c,cpp}_link_args="-L$prefix/lib -static -liconv" \
     -Dlibmpv=false -Dtests=false -Dlua=luajit -Djavascript=disabled \
     -D{d3d11,vulkan,shaderc,spirv-cross,iconv,lcms2,zlib}=enabled \
@@ -247,6 +249,6 @@ gpu-api=vulkan
 hwdec=vulkan,auto
 EOF
 cp "$root/README.md" "$root/VERSION" "$root/LICENSE" "$out/"
-printf '@echo off\r\nstart "" "%%~dp0mpv.exe" --vf=motionblade --gpu-api=vulkan --hwdec=vulkan,auto %%*\r\n' >"$out/run.bat"
+printf '@echo off\r\nstart "" "%%~dp0mpv.exe" %%*\r\n' >"$out/run.bat"
 (cd "$work" && zip -qr9 "$out.zip" "$(basename "$out")")
 echo "=== done: $out.zip"

@@ -25,6 +25,24 @@ static void *xalloc(size_t n)
     return p;
 }
 
+static size_t frame_size(int w, int h)
+{
+    return (size_t)w * h * 3 / 2;
+}
+
+static mb_image yuv420(uint8_t *p, int w, int h)
+{
+    size_t ys = (size_t)w * h;
+    return (mb_image){{p, p + ys, p + ys + ys / 4}, {w, w / 2, w / 2}};
+}
+
+static double now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+}
+
 static FILE *open_ffmpeg(const char *path, int nframes, pid_t *pid)
 {
     char nf[16];
@@ -78,7 +96,7 @@ static int read_y4m(const char *path, seq *s, int maxn, int skip)
         close_in(fp, pid);
         return -1;
     }
-    size_t fsz = (size_t)s->w * s->h * 3 / 2;
+    size_t fsz = frame_size(s->w, s->h);
     s->f = xalloc((size_t)(maxn > 0 ? maxn : 1) * sizeof(*s->f));
     s->n = 0;
     char line[256];
@@ -99,6 +117,11 @@ static int read_y4m(const char *path, seq *s, int maxn, int skip)
     return 0;
 }
 
+static double db(double mse)
+{
+    return mse < 1e-10 ? 99 : 10 * log10(255.0 * 255.0 / mse);
+}
+
 static double psnr(const uint8_t *a, const uint8_t *b, size_t n)
 {
     double se = 0;
@@ -106,8 +129,7 @@ static double psnr(const uint8_t *a, const uint8_t *b, size_t n)
         int d = a[i] - b[i];
         se += d * d;
     }
-    double mse = se / n;
-    return mse < 1e-10 ? 99 : 10 * log10(255.0 * 255.0 / mse);
+    return db(se / n);
 }
 
 static int cmpdbl(const void *a, const void *b)
@@ -136,113 +158,138 @@ static double worst_blocks(const uint8_t *a, const uint8_t *b, int w, int h)
     for (int i = 0; i < k; i++)
         s += m[i];
     free(m);
-    s /= k;
-    return s < 1e-10 ? 99 : 10 * log10(255.0 * 255.0 / s);
+    return db(s / k);
 }
 
 static double ssim(const uint8_t *a, const uint8_t *b, int w, int h)
 {
     const double C1 = 6.5025, C2 = 58.5225;
+    size_t pw = (size_t)w + 1;
+    int64_t *P = xalloc(sizeof(int64_t) * 5 * pw);
+    int64_t *pa = P, *pb = pa + pw, *paa = pb + pw, *pbb = paa + pw, *pab = pbb + pw;
     double sum = 0;
     int cnt = 0;
-    for (int y = 0; y + 8 <= h; y += 4)
+    for (int y = 0; y + 8 <= h; y += 4) {
+        memset(P, 0, sizeof(int64_t) * 5 * pw);
+        for (int j = 0; j < 8; j++) {
+            const uint8_t *ra = a + (size_t)(y + j) * w, *rb = b + (size_t)(y + j) * w;
+            for (int x = 0; x < w; x++) {
+                int va = ra[x], vb = rb[x];
+                pa[x + 1] += va;
+                pb[x + 1] += vb;
+                paa[x + 1] += va * va;
+                pbb[x + 1] += vb * vb;
+                pab[x + 1] += va * vb;
+            }
+        }
+        for (int x = 0; x < w; x++) {
+            pa[x + 1] += pa[x];
+            pb[x + 1] += pb[x];
+            paa[x + 1] += paa[x];
+            pbb[x + 1] += pbb[x];
+            pab[x + 1] += pab[x];
+        }
         for (int x = 0; x + 8 <= w; x += 4) {
-            double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
-            for (int j = 0; j < 8; j++)
-                for (int i = 0; i < 8; i++) {
-                    int pa = a[(y + j) * w + x + i], pb = b[(y + j) * w + x + i];
-                    sa += pa;
-                    sb += pb;
-                    saa += pa * pa;
-                    sbb += pb * pb;
-                    sab += pa * pb;
-                }
+            double sa = pa[x + 8] - pa[x], sb = pb[x + 8] - pb[x];
+            double saa = paa[x + 8] - paa[x], sbb = pbb[x + 8] - pbb[x], sab = pab[x + 8] - pab[x];
             double ma = sa / 64, mb = sb / 64;
             double va = saa / 64 - ma * ma, vb = sbb / 64 - mb * mb, cab = sab / 64 - ma * mb;
             sum += ((2 * ma * mb + C1) * (2 * cab + C2)) / ((ma * ma + mb * mb + C1) * (va + vb + C2));
             cnt++;
         }
+    }
+    free(P);
     return sum / cnt;
 }
+
+typedef struct {
+    const char *name;
+    int depth, nv, lsb_pad, bps, sh;
+} tfmt;
+
+static const tfmt fmts[] = {
+    {"yuv420p", 8, 0, 0, 1, 0},
+    {"nv12", 8, 1, 0, 1, 0},
+    {"p010", 16, 1, 6, 2, 8},
+    {"yuv420p10", 10, 0, 0, 2, 2},
+    {"p016", 16, 1, 0, 2, 0},
+};
 
 typedef struct {
     uint8_t *buf;
     mb_image im;
 } conv;
 
-static void conv_alloc(conv *cv, int fm, int w, int h)
+static void conv_alloc(conv *cv, const tfmt *f, int w, int h)
 {
-    int bps = fm >= 2 ? 2 : 1;
+    int bps = f->bps;
     size_t ys = (size_t)w * h * bps, cs = (size_t)(w / 2) * (h / 2) * bps;
     cv->buf = xalloc(ys + 2 * cs);
     cv->im.data[0] = cv->buf;
     cv->im.stride[0] = (ptrdiff_t)w * bps;
-    if (fm == 1 || fm == 2) {
-        cv->im.data[1] = cv->buf + ys;
+    cv->im.data[1] = cv->buf + ys;
+    if (f->nv) {
         cv->im.stride[1] = (ptrdiff_t)w * bps;
     } else {
-        cv->im.data[1] = cv->buf + ys;
         cv->im.data[2] = cv->buf + ys + cs;
         cv->im.stride[1] = cv->im.stride[2] = (ptrdiff_t)(w / 2) * bps;
     }
 }
 
-static void to_fmt(conv *cv, int fm, const uint8_t *src, int w, int h)
+static void wr(uint8_t *p, int v, const tfmt *f)
+{
+    if (f->bps == 1)
+        *p = (uint8_t)v;
+    else
+        *(uint16_t *)p = (uint16_t)(f->sh ? v << f->sh : v * 257);
+}
+
+static int rd(const uint8_t *p, const tfmt *f)
+{
+    if (f->bps == 1)
+        return *p;
+    int v = *(const uint16_t *)p;
+    v = f->sh ? (v + (1 << (f->sh - 1))) >> f->sh : (v + 128) / 257;
+    return v > 255 ? 255 : v;
+}
+
+static void to_fmt(conv *cv, const tfmt *f, const uint8_t *src, int w, int h)
 {
     const uint8_t *Y = src, *U = src + (size_t)w * h, *V = U + (size_t)(w / 2) * (h / 2);
-    int sh = fm == 2 ? 8 : 2;
+    int bps = f->bps;
     for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++) {
-            int v = Y[y * w + x];
-            if (fm < 2)
-                cv->im.data[0][y * cv->im.stride[0] + x] = v;
-            else
-                ((uint16_t *)(cv->im.data[0] + y * cv->im.stride[0]))[x] = (uint16_t)(fm == 2 ? v * 257 : v << sh);
-        }
+        for (int x = 0; x < w; x++)
+            wr(cv->im.data[0] + y * cv->im.stride[0] + x * bps, Y[y * w + x], f);
     for (int y = 0; y < h / 2; y++)
         for (int x = 0; x < w / 2; x++) {
             int u = U[y * (w / 2) + x], v = V[y * (w / 2) + x];
-            if (fm == 1) {
-                cv->im.data[1][y * cv->im.stride[1] + 2 * x] = u;
-                cv->im.data[1][y * cv->im.stride[1] + 2 * x + 1] = v;
-            } else if (fm == 2) {
-                uint16_t *r = (uint16_t *)(cv->im.data[1] + y * cv->im.stride[1]);
-                r[2 * x] = (uint16_t)(u * 257);
-                r[2 * x + 1] = (uint16_t)(v * 257);
-            } else if (fm == 3) {
-                ((uint16_t *)(cv->im.data[1] + y * cv->im.stride[1]))[x] = (uint16_t)(u << 2);
-                ((uint16_t *)(cv->im.data[2] + y * cv->im.stride[2]))[x] = (uint16_t)(v << 2);
+            uint8_t *r1 = cv->im.data[1] + y * cv->im.stride[1];
+            if (f->nv) {
+                wr(r1 + 2 * x * bps, u, f);
+                wr(r1 + (2 * x + 1) * bps, v, f);
+            } else {
+                wr(r1 + x * bps, u, f);
+                wr(cv->im.data[2] + y * cv->im.stride[2] + x * bps, v, f);
             }
         }
 }
 
-static int rd16(const uint8_t *p, int fm)
-{
-    int v = *(const uint16_t *)p;
-    v = fm == 2 ? (v + 128) / 257 : (v + 2) >> 2;
-    return v > 255 ? 255 : v;
-}
-
-static void from_fmt(const conv *cv, int fm, uint8_t *dst, int w, int h)
+static void from_fmt(const conv *cv, const tfmt *f, uint8_t *dst, int w, int h)
 {
     uint8_t *Y = dst, *U = dst + (size_t)w * h, *V = U + (size_t)(w / 2) * (h / 2);
+    int bps = f->bps;
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++)
-            Y[y * w + x] = fm < 2 ? cv->im.data[0][y * cv->im.stride[0] + x]
-                                  : (uint8_t)rd16(cv->im.data[0] + y * cv->im.stride[0] + 2 * x, fm);
+            Y[y * w + x] = (uint8_t)rd(cv->im.data[0] + y * cv->im.stride[0] + x * bps, f);
     for (int y = 0; y < h / 2; y++)
         for (int x = 0; x < w / 2; x++) {
             const uint8_t *r1 = cv->im.data[1] + y * cv->im.stride[1];
-            if (fm == 1) {
-                U[y * (w / 2) + x] = r1[2 * x];
-                V[y * (w / 2) + x] = r1[2 * x + 1];
-            } else if (fm == 2) {
-                U[y * (w / 2) + x] = (uint8_t)rd16(r1 + 4 * x, fm);
-                V[y * (w / 2) + x] = (uint8_t)rd16(r1 + 4 * x + 2, fm);
+            if (f->nv) {
+                U[y * (w / 2) + x] = (uint8_t)rd(r1 + 2 * x * bps, f);
+                V[y * (w / 2) + x] = (uint8_t)rd(r1 + (2 * x + 1) * bps, f);
             } else {
-                const uint8_t *r2 = cv->im.data[2] + y * cv->im.stride[2];
-                U[y * (w / 2) + x] = (uint8_t)rd16(r1 + 2 * x, fm);
-                V[y * (w / 2) + x] = (uint8_t)rd16(r2 + 2 * x, fm);
+                U[y * (w / 2) + x] = (uint8_t)rd(r1 + x * bps, f);
+                V[y * (w / 2) + x] = (uint8_t)rd(cv->im.data[2] + y * cv->im.stride[2] + x * bps, f);
             }
         }
 }
@@ -291,15 +338,19 @@ static void dump_fields(mb_ctx *c, const char *path, int fw, int fh)
 static void usage(void)
 {
     fprintf(stderr, "eval in.y4m|in.mkv [-n frames] [-skip k] [-step s] [-mode motionblade|blend|repeat] [-cmp full.y4m]\n"
-                    "     [-o out.y4m] [-p name=value]... [-q] [-export]\n");
+                    "     [-o out.y4m] [-p name=value]... [-q] [-export] [-fmt ");
+    for (size_t i = 0; i < sizeof(fmts) / sizeof(fmts[0]); i++)
+        fprintf(stderr, "%s%s", i ? "|" : "", fmts[i].name);
+    fprintf(stderr, "] [-dump frame[:fields.ppm]]\n");
     exit(1);
 }
 
 int main(int argc, char **argv)
 {
-    const char *in = NULL, *out = NULL, *cmp = NULL, *mode = "motionblade";
+    const char *in = NULL, *out = NULL, *cmp = NULL, *mode = "motionblade", *dumpf = NULL;
     int maxn = 1000, step = 2, quiet = 0, skip = 0, nometric = 0, repeat = 1, fm = 0, dumpk = -1, xport = 0;
     char *params[64];
+    char dumpbuf[4096];
     int np = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-n") && i + 1 < argc) maxn = atoi(argv[++i]);
@@ -310,10 +361,17 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
         else if (!strcmp(argv[i], "-p") && i + 1 < argc && np < 64) params[np++] = argv[++i];
         else if (!strcmp(argv[i], "-q")) quiet = 1;
-        else if (!strcmp(argv[i], "-dump") && i + 1 < argc) dumpk = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-dump") && i + 1 < argc) {
+            dumpk = atoi(argv[++i]);
+            dumpf = strchr(argv[i], ':');
+            if (dumpf)
+                dumpf++;
+        }
         else if (!strcmp(argv[i], "-fmt") && i + 1 < argc) {
             i++;
-            fm = !strcmp(argv[i], "nv12") ? 1 : !strcmp(argv[i], "p010") ? 2 : !strcmp(argv[i], "yuv420p10") ? 3 : 0;
+            for (size_t j = 0; j < sizeof(fmts) / sizeof(fmts[0]); j++)
+                if (!strcmp(argv[i], fmts[j].name))
+                    fm = (int)j;
         }
         else if (!strcmp(argv[i], "-repeat") && i + 1 < argc) repeat = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-nometric")) nometric = 1, quiet = 1;
@@ -337,13 +395,20 @@ int main(int argc, char **argv)
         return 1;
     }
     int w = s.w, h = s.h;
-    size_t ysz = (size_t)w * h, fsz = ysz * 3 / 2;
-    mb_format fmt = {w, h, fm == 2 ? 16 : fm == 3 ? 10 : 8, 1, 1, fm == 1 || fm == 2};
+    size_t ysz = (size_t)w * h, fsz = frame_size(w, h);
+    const tfmt *tf = &fmts[fm];
+    mb_format fmt = {w, h, tf->depth, 1, 1, tf->nv, tf->lsb_pad};
     conv ca, cb, co;
     if (fm) {
-        conv_alloc(&ca, fm, w, h);
-        conv_alloc(&cb, fm, w, h);
-        conv_alloc(&co, fm, w, h);
+        conv_alloc(&ca, tf, w, h);
+        conv_alloc(&cb, tf, w, h);
+        conv_alloc(&co, tf, w, h);
+    }
+    if (dumpk >= 0 && !dumpf && out) {
+        snprintf(dumpbuf, sizeof(dumpbuf), "%s.fields.ppm", out);
+        dumpf = dumpbuf;
+    } else if (dumpk >= 0 && !dumpf) {
+        dumpf = "/tmp/motionblade-out/fields.ppm";
     }
     mb_ctx *c = mb_create(&fmt);
     if (!c) {
@@ -354,10 +419,13 @@ int main(int argc, char **argv)
         fprintf(stderr, "dma-buf export not available\n");
         return 1;
     }
+    int la = 1;
     for (int i = 0; i < np; i++) {
         char *eq = strchr(params[i], '=');
         if (!eq) usage();
         *eq = 0;
+        if (!strcmp(params[i], "la"))
+            la = atof(eq + 1) != 0;
         if (mb_set_param(c, params[i], atof(eq + 1)) < 0) {
             fprintf(stderr, "unknown param %s\n", params[i]);
             return 1;
@@ -368,16 +436,8 @@ int main(int argc, char **argv)
         fputs(s.hdr, fo);
     uint8_t *res = xalloc(fsz);
     double swb = 0, spc = 0, sp = 0, ss = 0, sit = 0, worst = 99;
-    int cnt = 0, worsti = -1, la = 1;
-    for (int i = 0; i < np; i++)
-        if (!strcmp(params[i], "la"))
-            la = atof(params[i] + 3) != 0;
-    double wall0 = 0;
-    {
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        wall0 = ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
-    }
+    int cnt = 0, worsti = -1;
+    double wall0 = now_ms();
     for (int rep_i = 0; rep_i < repeat; rep_i++)
     for (int k = 0; (k + 1) * step < s.n; k++) {
         if (k == 0 && rep_i > 0)
@@ -391,10 +451,10 @@ int main(int argc, char **argv)
                 }
                 uint8_t *P = s.f[j * step];
                 if (fm) {
-                    to_fmt(&cb, fm, P, w, h);
+                    to_fmt(&cb, tf, P, w, h);
                     mb_push(c, &cb.im);
                 } else {
-                    mb_image ip = {{P, P + ysz, P + ysz + ysz / 4}, {w, w / 2, w / 2}};
+                    mb_image ip = yuv420(P, w, h);
                     mb_push(c, &ip);
                 }
             }
@@ -412,13 +472,13 @@ int main(int argc, char **argv)
                 }
                 R = sc.f[k * step + m];
             } else if (!strcmp(mode, "motionblade")) {
-                mb_image io = {{res, res + ysz, res + ysz + ysz / 4}, {w, w / 2, w / 2}};
+                mb_image io = yuv420(res, w, h);
                 if (mb_interpolate(c, t, fm ? &co.im : &io) < 0) {
                     fprintf(stderr, "interpolation failed at frame %d\n", k * step + m);
                     return 1;
                 }
                 if (fm)
-                    from_fmt(&co, fm, res, w, h);
+                    from_fmt(&co, tf, res, w, h);
                 mb_get_stats(c, &st);
             } else if (!strcmp(mode, "blend")) {
                 for (size_t i = 0; i < fsz; i++)
@@ -427,7 +487,7 @@ int main(int argc, char **argv)
                 memcpy(res, t < 0.5 ? A : B, fsz);
             }
             if (k * step + m == dumpk && !strcmp(mode, "motionblade")) {
-                dump_fields(c, "/tmp/motionblade-out/fields.ppm", w, h);
+                dump_fields(c, dumpf, w, h);
             }
             const uint8_t *T = s.f[k * step + m];
             double p = nometric ? 0 : psnr(R, T, ysz), q = nometric ? 0 : ssim(R, T, w, h);
@@ -449,12 +509,13 @@ int main(int argc, char **argv)
                 fprintf(fo, "FRAME\n"), fwrite(R, 1, fsz, fo);
         }
     }
-    {
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        if (nometric)
-            printf("wall %.2f ms per interpolated frame\n", (ts.tv_sec * 1e3 + ts.tv_nsec / 1e6 - wall0) / cnt);
+    double wall1 = now_ms();
+    if (cnt == 0) {
+        fprintf(stderr, "no frame interpolated: %d frames read, need more than %d with -step %d\n", s.n, step, step);
+        return 1;
     }
+    if (nometric)
+        printf("wall %.2f ms per interpolated frame\n", (wall1 - wall0) / cnt);
     printf("MEAN local %.3f | chroma psnr %.3f | ", swb / cnt, spc / cnt);
     printf("MEAN psnr %.3f ssim %.4f  worst %.2f@%d  gpu %.2fms  (%d frames)\n", sp / cnt, ss / cnt, worst, worsti,
            sit / cnt, cnt);

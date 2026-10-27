@@ -21,13 +21,13 @@ void main()
     float src = 0.0;
     vec2 c = vec2(b * 8) + 4.0, t = vec2(pc.f0.y);
     for (int e = 0; e < 9 && pc.f0.x > 0.0; e++) {
-        vec2 u = tf[bidx(b + ivec2(e % 3 - 1, e / 3 - 1), ivec2(bw, bh))].xy;
+        vec2 u = tf[nbr3(e, b, ivec2(bw, bh))].xy;
         if (l1(u - gm[0].xy) <= pc.f0.x)
             continue;
         for (int k = 0; k < 2; k++) {
             ivec2 q = ivec2(floor((c + (k == 0 ? -t : 1.0 - t) * u) / 8.0));
             for (int d = 0; d < 9; d++)
-                src = max(src, nw[bidx(q + ivec2(d % 3 - 1, d / 3 - 1), ivec2(bw, bh))].x);
+                src = max(src, nw[nbr3(d, q, ivec2(bw, bh))].x);
         }
     }
     o[id] = max(max(nw[id].x, m * nw[id].y), src);

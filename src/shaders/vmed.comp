@@ -20,7 +20,7 @@ void main()
     vec4 nv[9];
     int n = 0;
     for (int k = 0; k < 9; k++) {
-        ivec2 q = b + ivec2(k % 3 - 1, k / 3 - 1);
+        ivec2 q = b + off3(k);
         if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(bw, bh))))
             continue;
         vec4 f = ti[q.y * bw + q.x];

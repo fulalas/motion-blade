@@ -50,8 +50,10 @@ void main()
     for (int dy = -2; dy <= 2; dy++)
         for (int dx = -2; dx <= 2; dx++) {
             float s = 0.0;
-            for (int k = 0; k < 9; k++)
-                s += r[dy + 3 + k / 3 - 1][dx + 3 + k % 3 - 1];
+            for (int k = 0; k < 9; k++) {
+                ivec2 o = off3(k);
+                s += r[dy + 3 + o.y][dx + 3 + o.x];
+            }
             float v = mix(r[dy + 3][dx + 3], s / 9.0, pc.f0.w);
             int d = max(abs(dx), abs(dy));
             m = max(m, v * (d == 0 ? 1.0 : d == 1 ? pc.f0.z : pc.f0.z * pc.f0.z));

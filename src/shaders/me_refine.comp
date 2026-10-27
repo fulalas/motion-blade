@@ -25,9 +25,7 @@ void main()
     for (float st = 0.5; st >= 0.25 && pc.i1.y != 0; st *= 0.5) {
         vec2 c = bv;
         for (int k = 0; k < nk; k++) {
-            const ivec2 dirs[8] = ivec2[8](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1),
-                                           ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1), ivec2(1, 1));
-            vec2 v = c + vec2(dirs[k]) * st;
+            vec2 v = c + vec2(DIR8[k]) * st;
             float s = sad_y(Y, v);
             if (s < best) {
                 best = s;

@@ -1,7 +1,8 @@
 #!/bin/sh
 set -e
-D=${MOTIONBLADE_DATA:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)/samples}
+. "$(dirname "$(readlink -f "$0")")/env.sh"
 mkdir -p "$D/suite" "$D/film" && cd "$D"
+trap 'rm -f "$D"/suite/*.tmp.y4m' EXIT
 ffv1() { ffmpeg -nostdin -hide_banner -loglevel error "$@" -c:v ffv1 -level 3 -slices 16 -y; }
 X=https://media.xiph.org/video/derf/y4m
 xiph() {
@@ -20,7 +21,7 @@ B=.bbb/bbb_sunflower_1080p_60fps_normal.mp4
 getbbb() {
     [ -f $B ] && return 0
     mkdir -p .bbb
-    curl -s -o .bbb/bbb.zip https://download.blender.org/demo/movies/BBB/bbb_sunflower_1080p_60fps_normal.mp4.zip
+    curl -sf -o .bbb/bbb.zip https://download.blender.org/demo/movies/BBB/bbb_sunflower_1080p_60fps_normal.mp4.zip
     (cd .bbb && unzip -q -o bbb.zip && rm bbb.zip)
 }
 bbb() { [ -f suite/$1.mkv ] || { getbbb && ffv1 -ss $2 -i $B -frames:v 81 -pix_fmt yuv420p suite/$1.mkv; }; }

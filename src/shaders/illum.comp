@@ -11,7 +11,7 @@ layout(std430, binding = 5) writeonly buffer O { vec4 o[]; };
 
 void main()
 {
-    int bw = pc.i0.z, bh = pc.i0.w;
+    int bw = pc.i0.x, bh = pc.i0.y;
     int id = int(gl_GlobalInvocationID.x);
     if (id >= bw * bh)
         return;
@@ -23,16 +23,13 @@ void main()
     vec2 cs = vec2(1 << sh.x, 1 << sh.y), cinv = 1.0 / vec2(pc.i1.xy);
     vec2 c0 = b0 / cs, coa = oa / cs, cob = ob / cs;
     vec2 dc = vec2(0.0);
+    bool nv = pc.i2.x != 0;
     int nx = 4 >> sh.x, ny = 4 >> sh.y;
     for (int y = 0; y < ny; y++)
         for (int x = 0; x < nx; x++) {
             vec2 p = c0 + vec2(2 * x + 1, 2 * y + 1) * m;
             vec2 ca = (p + coa) * cinv, cb = (p + cob) * cinv;
-            if (pc.i2.x != 0)
-                dc += textureLod(AC1, ca, 0.0).rg - textureLod(BC1, cb, 0.0).rg;
-            else
-                dc += vec2(textureLod(AC1, ca, 0.0).r - textureLod(BC1, cb, 0.0).r,
-                           textureLod(AC2, ca, 0.0).r - textureLod(BC2, cb, 0.0).r);
+            dc += chroma2(AC1, AC2, ca, nv) - chroma2(BC1, BC2, cb, nv);
         }
     o[id] = vec4(tf[id].w / (255.0 * pc.f0.y), dc / float(nx * ny), 0.0);
 }

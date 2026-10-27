@@ -92,8 +92,10 @@ void main()
     if ((flags & 8) != 0)
         add(-crs[id].xy, pc.f1.x);
     add(vec2(0.0), pc.f0.w);
-    float best_c = 1e30, best_s = 0.0, best_m = 0.0;
-    vec2 best_v = vec2(0.0);
+    best_c = 1e30;
+    best_s = 0.0;
+    best_m = 0.0;
+    best_v = vec2(0.0);
     float skip = -1.0;
     if (pc.f1.z > 0.0) {
         float mx = block_sum() / 256.0, ax = 0.0;
@@ -104,12 +106,7 @@ void main()
     for (int i = 0; i < n; i++) {
         float s = sad_y(Y, cl[i]);
         float c = s + pen[i] + pc.f1.y * l1(cl[i]);
-        if (c < best_c) {
-            best_c = c;
-            best_s = s;
-            best_m = g_ml;
-            best_v = cl[i];
-        }
+        consider(cl[i], s, c);
         if (best_s < skip)
             break;
     }
@@ -121,12 +118,7 @@ void main()
         vec2 v = base + (k == 0 ? d1 : d2);
         float s = sad_y(Y, v);
         float c = s + pc.f0.z + pc.f1.y * l1(v);
-        if (c < best_c) {
-            best_c = c;
-            best_s = s;
-            best_m = g_ml;
-            best_v = v;
-        }
+        consider(v, s, c);
     }
     float dcm = block_dc(best_m);
     if (lane == 0)

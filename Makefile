@@ -6,8 +6,9 @@ GFLAGS = -O --target-env=vulkan1.1 -mfmt=c
 
 S = src/shaders
 O = build/eval/shaders
-SH = $(O)/conf.h $(O)/down.h $(O)/norm.h $(O)/me_full.h $(O)/me_iter.h $(O)/me_refine.h $(O)/me_cross.h $(O)/me_local.h $(O)/tproj.h $(O)/tsel.h $(O)/vmed.h $(O)/tsub.h $(O)/illum.h $(O)/ilmed.h $(O)/cutdec.h $(O)/bars.h $(O)/agree.h $(O)/gmed.h $(O)/agspread.h \
-     $(O)/interp8.h $(O)/interp16.h $(O)/interp8nv.h $(O)/interp16nv.h
+PLAIN = $(filter-out interp,$(basename $(notdir $(wildcard $(S)/*.comp))))
+INTERP = $(O)/interp8.h $(O)/interp16.h $(O)/interp8nv.h $(O)/interp16nv.h
+SH = $(PLAIN:%=$(O)/%.h) $(INTERP)
 
 all: eval_vk
 
@@ -16,18 +17,11 @@ shaders: $(SH)
 $(O)/%.h: $(S)/%.comp $(S)/common.glsl $(S)/sad.glsl
 	@mkdir -p $(O)
 	$(GLSLC) $(GFLAGS) -o $@ $<
-$(O)/interp8.h: $(S)/interp.comp $(S)/common.glsl
+$(O)/interp8nv.h $(O)/interp16nv.h: GDEFS += -DNV
+$(O)/interp16.h $(O)/interp16nv.h: GDEFS += -DDEPTH16
+$(INTERP): $(S)/interp.comp $(S)/common.glsl
 	@mkdir -p $(O)
-	$(GLSLC) $(GFLAGS) -o $@ $<
-$(O)/interp16.h: $(S)/interp.comp $(S)/common.glsl
-	@mkdir -p $(O)
-	$(GLSLC) $(GFLAGS) -DDEPTH16 -o $@ $<
-$(O)/interp8nv.h: $(S)/interp.comp $(S)/common.glsl
-	@mkdir -p $(O)
-	$(GLSLC) $(GFLAGS) -DNV -o $@ $<
-$(O)/interp16nv.h: $(S)/interp.comp $(S)/common.glsl
-	@mkdir -p $(O)
-	$(GLSLC) $(GFLAGS) -DNV -DDEPTH16 -o $@ $<
+	$(GLSLC) $(strip $(GFLAGS) $(GDEFS)) -o $@ $<
 
 eval_vk: tools/eval.c src/motionblade_vk.c src/motionblade.h $(SH)
 	$(CC) $(CFLAGS) -Isrc -Ibuild/eval -o $@ tools/eval.c src/motionblade_vk.c $(LDLIBS) -lvulkan
