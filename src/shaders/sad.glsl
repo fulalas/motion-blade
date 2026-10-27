@@ -33,12 +33,14 @@ float zsad(float a[16], float b[16])
     for (int x = 0; x < 16; x++)
         ml += a[x] - b[x];
     g_ml = ml;
-    float mf = subgroupClusteredAdd(ml, 16) / 256.0;
-    float m = g_w > 0.0 ? mf * g_w : 0.0;
+    float m = 0.0;
+    if (g_w > 0.0)
+        m = subgroupClusteredAdd(ml, 16) / 256.0 * g_w;
     float s = 0.0;
     for (int x = 0; x < 16; x++)
         s += abs(a[x] - b[x] - m);
 #ifdef PLAIN_SAD
+    float mf = subgroupClusteredAdd(ml, 16) / 256.0;
     float s0 = 0.0, s1 = 0.0;
     for (int x = 0; x < 16; x++) {
         s0 += abs(a[x] - b[x]);
@@ -89,4 +91,10 @@ void consider(vec2 u, float s, float c)
         best_m = g_ml;
         best_v = u;
     }
+}
+
+void try_v(sampler2D Y, vec2 u, float pen)
+{
+    float s = sad_y(Y, u);
+    consider(u, s, s + pen + pc.f1.y * l1(u));
 }

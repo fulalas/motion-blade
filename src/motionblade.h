@@ -10,6 +10,7 @@ extern "C" {
 #endif
 
 #define MB_MAX_PENDING 7
+#define MB_MIN_SIZE 64
 
 enum { MB_LOG_ERR, MB_LOG_WARN, MB_LOG_INFO, MB_LOG_VERBOSE };
 
@@ -81,9 +82,9 @@ typedef struct mb_vkframe {
 } mb_vkframe;
 
 mb_ctx *mb_create(const mb_format *fmt);
-mb_ctx *mb_create_vk(const mb_format *fmt, const mb_vkdev *d);
 mb_ctx *mb_create_ex(const mb_format *fmt, const mb_vkdev *d, const mb_host *host);
 int mb_ok(const mb_ctx *c);
+int mb_lookahead(const mb_ctx *c);
 int mb_push_vk(mb_ctx *c, mb_vkframe *in);
 int mb_submit_vk(mb_ctx *c, double t, mb_vkframe *out);
 void mb_destroy(mb_ctx *c);

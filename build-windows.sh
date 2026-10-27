@@ -145,9 +145,8 @@ _shaderc() {
         -DSHADERC_SKIP_COPYRIGHT_CHECK=ON -DSPIRV_SKIP_EXECUTABLES=ON -DENABLE_GLSLANG_BINARIES=OFF
     install_build
     popd >/dev/null
-    sed 's/-lshaderc_combined/-lshaderc_combined -lc++/' "$prefix/lib/pkgconfig/shaderc_combined.pc" \
-        | sed 's/^Name:.*/Name: shaderc/' >"$prefix/lib/pkgconfig/shaderc.pc"
-    grep -q -- '-lc++' "$prefix/lib/pkgconfig/shaderc.pc" || { echo "shaderc.pc: -lshaderc_combined not found, -lc++ not added" >&2; exit 1; }
+    local v=$(sed -n 's/^Version: //p' "$prefix/lib/pkgconfig/shaderc_combined.pc")
+    write_pc shaderc shaderc shaderc "$v" "-lshaderc_combined -lc++"
 }
 
 _spirv_cross() {

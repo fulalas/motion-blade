@@ -3,7 +3,6 @@ set -e
 . "$(dirname "$(readlink -f "$0")")/env.sh"
 mkdir -p "$D/suite" "$D/film" && cd "$D"
 trap 'rm -f "$D"/suite/*.tmp.y4m' EXIT
-ffv1() { ffmpeg -nostdin -hide_banner -loglevel error "$@" -c:v ffv1 -level 3 -slices 16 -y; }
 X=https://media.xiph.org/video/derf/y4m
 xiph() {
     [ -f suite/$1.mkv ] && return 0

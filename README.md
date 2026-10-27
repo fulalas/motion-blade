@@ -82,8 +82,8 @@ frames stay on the GPU so less CPU use. If a driver shows wrong colours or glitc
 with this, `zerocopy=no` goes back to copying.
 Formats: 8/10/16-bit 4:2:0, 4:2:2, 4:4:4, planar or NV12/P010.
 
-`MOTIONBLADE_VERBOSE=1` prints which GPU and queue are used; `MOTIONBLADE_PROFILE=1` prints the
-GPU time spent in each pass when the filter is closed.
+`mpv -v` shows which GPU and queue are used (`MOTIONBLADE_VERBOSE=1` does the same for `eval_vk`);
+`MOTIONBLADE_PROFILE=1` prints the GPU time spent in each pass when the filter is closed.
 
 ## Tests
 

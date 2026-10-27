@@ -104,9 +104,7 @@ void main()
         skip = max(subgroupClusteredAdd(ax, 16) * 255.0 * pc.f1.z, 32.0);
     }
     for (int i = 0; i < n; i++) {
-        float s = sad_y(Y, cl[i]);
-        float c = s + pen[i] + pc.f1.y * l1(cl[i]);
-        consider(cl[i], s, c);
+        try_v(Y, cl[i], pen[i]);
         if (best_s < skip)
             break;
     }
@@ -116,9 +114,7 @@ void main()
     vec2 base = best_v;
     for (int k = 0; k < 2 && best_s >= skip; k++) {
         vec2 v = base + (k == 0 ? d1 : d2);
-        float s = sad_y(Y, v);
-        float c = s + pc.f0.z + pc.f1.y * l1(v);
-        consider(v, s, c);
+        try_v(Y, v, pc.f0.z);
     }
     float dcm = block_dc(best_m);
     if (lane == 0)

@@ -28,6 +28,11 @@
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define NIMP 32
+#define NTS 64
+#define NPROF 32
+#define XPOOL_MIN 4
+#define XPOOL_GROW 8
+#define XIDLE 64
 
 static const uint32_t spv_down[] =
 #include "shaders/down.h"
@@ -118,7 +123,7 @@ typedef struct {
     VkPipeline p;
     VkPipelineLayout pl;
     VkDescriptorSetLayout dsl;
-    char types[32];
+    const char *types;
     const char *name;
 } vpipe;
 
@@ -133,34 +138,35 @@ static const struct {
     const uint32_t *spv;
     size_t size;
     const char *types;
-    int sg;
+    int sg, per;
     const char *name;
 } pipe_defs[P_COUNT] = {
-    [P_DOWN] = {SPV(spv_down), "SI", 0, "p_down"},
-    [P_NORM] = {SPV(spv_norm), "SI", 0, "p_norm"},
-    [P_FULL] = {SPV(spv_full), "SSB", 0, "p_full"},
-    [P_ITER] = {SPV(spv_iter), "SSBBBBBB", 1, "p_iter"},
-    [P_REFINE] = {SPV(spv_refine), "SSBB", 1, "p_refine"},
-    [P_PROJ] = {SPV(spv_proj), "BB", 0, "p_proj"},
-    [P_CROSS] = {SPV(spv_cross), "SSBBBB", 1, "p_cross"},
-    [P_LOCAL] = {SPV(spv_local), "SSBBBB", 1, "p_local"},
-    [P_SEL] = {SPV(spv_sel), "SSSSBBBBBBBBBB", 1, "p_sel"},
-    [P_VMED] = {SPV(spv_vmed), "BB", 0, "p_vmed"},
-    [P_SUB] = {SPV(spv_sub), "SSBBB", 1, "p_sub"},
-    [P_CONF] = {SPV(spv_conf), "BBBB", 0, "p_conf"},
-    [P_CUTDEC] = {SPV(spv_cutdec), "BB", 0, "p_cutdec"},
-    [P_ILLUM] = {SPV(spv_illum), "SSSSBB", 0, "p_illum"},
-    [P_ILMED] = {SPV(spv_ilmed), "BB", 0, "p_ilmed"},
-    [P_BARS] = {SPV(spv_bars), "SSB", 0, "p_bars"},
-    [P_AGREE] = {SPV(spv_agree), "SSSSSSBB", 0, "p_agree"},
-    [P_GMED] = {SPV(spv_gmed), "BB", 0, "p_gmed"},
-    [P_AGSPREAD] = {SPV(spv_agspread), "BBBB", 0, "p_agspread"},
-    [P_INTERP] = {NULL, 0, "SSSSSSBBBIIISSBBBBB", 0, "p_interp"},
+    [P_DOWN] = {SPV(spv_down), "SI", 0, 0, "p_down"},
+    [P_NORM] = {SPV(spv_norm), "SI", 0, 0, "p_norm"},
+    [P_FULL] = {SPV(spv_full), "SSB", 0, 1, "p_full"},
+    [P_ITER] = {SPV(spv_iter), "SSBBBBBB", 1, 4, "p_iter"},
+    [P_REFINE] = {SPV(spv_refine), "SSBB", 1, 4, "p_refine"},
+    [P_PROJ] = {SPV(spv_proj), "BB", 0, 64, "p_proj"},
+    [P_CROSS] = {SPV(spv_cross), "SSBBBB", 1, 64, "p_cross"},
+    [P_LOCAL] = {SPV(spv_local), "SSBBBB", 1, 64, "p_local"},
+    [P_SEL] = {SPV(spv_sel), "SSSSBBBBBBBBBB", 1, 4, "p_sel"},
+    [P_VMED] = {SPV(spv_vmed), "BB", 0, 64, "p_vmed"},
+    [P_SUB] = {SPV(spv_sub), "SSBBB", 1, 64, "p_sub"},
+    [P_CONF] = {SPV(spv_conf), "BBBB", 0, 64, "p_conf"},
+    [P_CUTDEC] = {SPV(spv_cutdec), "BB", 0, 1, "p_cutdec"},
+    [P_ILLUM] = {SPV(spv_illum), "SSSSBB", 0, 64, "p_illum"},
+    [P_ILMED] = {SPV(spv_ilmed), "BB", 0, 64, "p_ilmed"},
+    [P_BARS] = {SPV(spv_bars), "SSB", 0, 0, "p_bars"},
+    [P_AGREE] = {SPV(spv_agree), "SSSSSSBB", 0, 64, "p_agree"},
+    [P_GMED] = {SPV(spv_gmed), "BB", 0, 1, "p_gmed"},
+    [P_AGSPREAD] = {SPV(spv_agspread), "BBBB", 0, 64, "p_agspread"},
+    [P_INTERP] = {NULL, 0, "SSSSSSBBBIIISSBBBBB", 0, 0, "p_interp"},
 };
 
-static const uint32_t *const spv_interp[2][2] = {{spv_interp8, spv_interp16}, {spv_interp8nv, spv_interp16nv}};
-static const size_t spv_interp_size[2][2] = {{sizeof(spv_interp8), sizeof(spv_interp16)},
-                                             {sizeof(spv_interp8nv), sizeof(spv_interp16nv)}};
+static const struct {
+    const uint32_t *spv;
+    size_t size;
+} spv_interp[2][2] = {{{SPV(spv_interp8)}, {SPV(spv_interp16)}}, {{SPV(spv_interp8nv)}, {SPV(spv_interp16nv)}}};
 
 typedef struct {
     const vimg *im;
@@ -231,7 +237,7 @@ typedef struct {
     imp_ent *imp[2];
     int busy, nq;
     unsigned serial;
-    const char *qname[64];
+    const char *qname[NTS];
     double gpu_ms;
 } slot;
 
@@ -268,8 +274,8 @@ struct mb_ctx {
     float ts_period;
     PFN_vkCmdPushDescriptorSetKHR pushdesc;
     int prof, ts, full_sg;
-    double prof_ms[32];
-    const char *prof_name[32];
+    double prof_ms[NPROF];
+    const char *prof_name[NPROF];
     int prof_n;
     vpipe pipes[P_COUNT];
     gframe fr[NFR];
@@ -427,11 +433,8 @@ static int pipe_create(mb_ctx *c, vpipe *p, const uint32_t *code, size_t size, c
                        int sg)
 {
     memset(p, 0, sizeof(*p));
-    if (strlen(types) >= sizeof(p->types))
-        return -1;
-    strncpy(p->types, types, sizeof(p->types) - 1);
+    p->types = types;
     p->name = name;
-    (void)sg;
     int n = (int)strlen(types);
     VkDescriptorSetLayoutBinding b[32];
     for (int i = 0; i < n; i++) {
@@ -526,7 +529,7 @@ static void dispatch_n(mb_ctx *c, const vpipe *p, const vres *res, const pcs *pc
     vkCmdPushConstants(S(c)->cb, p->pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcs), pc);
     vkCmdDispatch(S(c)->cb, gx, gy, 1);
     barrier(c);
-    if (c->prof && c->ts && S(c)->nq < 63) {
+    if (c->prof && c->ts && S(c)->nq < NTS - 1) {
         S(c)->qname[S(c)->nq] = name;
         vkCmdWriteTimestamp(S(c)->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, S(c)->qp, (uint32_t)(2 + S(c)->nq++));
     }
@@ -537,9 +540,19 @@ static void dispatch(mb_ctx *c, const vpipe *p, const vres *res, const pcs *pc, 
     dispatch_n(c, p, res, pc, gx, gy, p->name);
 }
 
-static void slot_release(mb_ctx *c, slot *sl)
+static uint32_t groups(const mb_ctx *c, const vpipe *p, int n)
 {
-    (void)c;
+    int per = pipe_defs[p - c->pipes].per;
+    return (uint32_t)((n + per - 1) / per);
+}
+
+static void dispatch1(mb_ctx *c, const vpipe *p, const vres *res, const pcs *pc, int n)
+{
+    dispatch_n(c, p, res, pc, groups(c, p, n), 1, p->name);
+}
+
+static void slot_release(slot *sl)
+{
     for (int k = 0; k < 2; k++) {
         if (sl->imp[k])
             sl->imp[k]->users--;
@@ -559,7 +572,7 @@ static int slot_wait(mb_ctx *c, int i)
     for (int t = 0; t < 5 && r == VK_TIMEOUT; t++)
         r = vkWaitForFences(c->dev, 1, &sl->fence, VK_TRUE, 1000000000ull);
     sl->busy = 0;
-    slot_release(c, sl);
+    slot_release(sl);
     sl->gpu_ms = 0;
     if (r != VK_SUCCESS) {
         mb_log(c, MB_LOG_ERR, "waiting for the GPU failed (%d)", r);
@@ -567,7 +580,7 @@ static int slot_wait(mb_ctx *c, int i)
         return -1;
     }
     vkResetFences(c->dev, 1, &sl->fence);
-    uint64_t ts[66];
+    uint64_t ts[NTS + 2];
     if (!c->ts || vkGetQueryPoolResults(c->dev, sl->qp, 0, (uint32_t)(2 + sl->nq), sizeof(ts), ts, 8,
                                         VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
         return 0;
@@ -578,9 +591,9 @@ static int slot_wait(mb_ctx *c, int i)
         int j = 0;
         while (j < c->prof_n && strcmp(c->prof_name[j], sl->qname[k]))
             j++;
-        if (j == c->prof_n && j < 32)
+        if (j == c->prof_n && j < NPROF)
             c->prof_name[c->prof_n++] = sl->qname[k];
-        if (j < 32)
+        if (j < NPROF)
             c->prof_ms[j] += ms;
     }
     sl->gpu_ms = (double)(ts[1] - ts[0]) * c->ts_period / 1e6;
@@ -617,7 +630,7 @@ static int cmd_begin(mb_ctx *c)
     c->recording = 1;
     c->sl[i].xidx = -1;
     if (c->ts) {
-        vkCmdResetQueryPool(S(c)->cb, S(c)->qp, 0, 66);
+        vkCmdResetQueryPool(S(c)->cb, S(c)->qp, 0, NTS + 2);
         vkCmdWriteTimestamp(S(c)->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, S(c)->qp, 0);
     }
     S(c)->nq = 0;
@@ -963,7 +976,7 @@ static int vk_setup(mb_ctx *c)
     VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, NULL, c->cp,
                                        VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
     VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    VkQueryPoolCreateInfo qpi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_TIMESTAMP, 66, 0};
+    VkQueryPoolCreateInfo qpi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_TIMESTAMP, NTS + 2, 0};
     for (int i = 0; i < NSLOT; i++) {
         VK(vkAllocateCommandBuffers(c->dev, &cai, &c->sl[i].cb));
         VK(vkCreateFence(c->dev, &fci, NULL, &c->sl[i].fence));
@@ -979,8 +992,8 @@ static int vk_setup(mb_ctx *c)
         const uint32_t *spv = pipe_defs[i].spv;
         size_t size = pipe_defs[i].size;
         if (i == P_INTERP) {
-            spv = spv_interp[c->fmt.nv][c->bps - 1];
-            size = spv_interp_size[c->fmt.nv][c->bps - 1];
+            spv = spv_interp[c->fmt.nv][c->bps - 1].spv;
+            size = spv_interp[c->fmt.nv][c->bps - 1].size;
         }
         if (pipe_create(c, &c->pipes[i], spv, size, pipe_defs[i].types, pipe_defs[i].name, pipe_defs[i].sg) < 0)
             return -1;
@@ -1087,23 +1100,33 @@ static int gbuf(mb_ctx *c, vbuf *b, VkDeviceSize size)
     return buf_create(c, b, size, 0);
 }
 
+static int img_general(mb_ctx *c, vimg *im, int w, int h, VkFormat fmt)
+{
+    if (img_create(c, im, w, h, fmt) < 0)
+        return -1;
+    to_general(c, im);
+    return 0;
+}
+
 static int res_geom_init(mb_ctx *c)
 {
     VkFormat fy = plane_fmt(c, 1), fc = plane_fmt(c, c->fmt.nv ? 2 : 1);
     int W = c->fmt.w, H = c->fmt.h;
+    if (cmd_begin(c) < 0)
+        return -1;
     for (int k = 0; k < NFR; k++) {
         gframe *f = &c->fr[k];
-        if (img_create(c, &f->y, W, H, fy) < 0 || img_create(c, &f->c1, c->cw, c->ch, fc) < 0)
+        if (img_general(c, &f->y, W, H, fy) < 0 || img_general(c, &f->c1, c->cw, c->ch, fc) < 0)
             return -1;
-        if (!c->fmt.nv && img_create(c, &f->c2, c->cw, c->ch, fc) < 0)
+        if (!c->fmt.nv && img_general(c, &f->c2, c->cw, c->ch, fc) < 0)
             return -1;
         for (int L = c->lnorm ? 0 : 1; L < c->nlev; L++)
-            if (img_create(c, &f->lev[L], c->lw[L], c->lh[L], VK_FORMAT_R16_SFLOAT) < 0)
+            if (img_general(c, &f->lev[L], c->lw[L], c->lh[L], VK_FORMAT_R16_SFLOAT) < 0)
                 return -1;
     }
-    if (img_create(c, &c->oy, W, H, fy) < 0 || img_create(c, &c->oc1, c->cw, c->ch, fc) < 0)
+    if (img_general(c, &c->oy, W, H, fy) < 0 || img_general(c, &c->oc1, c->cw, c->ch, fc) < 0)
         return -1;
-    if (!c->fmt.nv && img_create(c, &c->oc2, c->cw, c->ch, fc) < 0)
+    if (!c->fmt.nv && img_general(c, &c->oc2, c->cw, c->ch, fc) < 0)
         return -1;
     for (int L = c->mb; L < c->nlev; L++) {
         VkDeviceSize sz = (VkDeviceSize)c->bw[L] * c->bh[L] * 16;
@@ -1118,20 +1141,6 @@ static int res_geom_init(mb_ctx *c)
         gbuf(c, &c->hist, 128) || gbuf(c, &c->fbw, nb * 4) || gbuf(c, &c->agw, nb * 8) || gbuf(c, &c->agw2, nb * 4) ||
         gbuf(c, &c->gmv, 16) || gbuf(c, &c->ill0, nb * 16) || gbuf(c, &c->ill1, nb * 16))
         return -1;
-    if (cmd_begin(c) < 0)
-        return -1;
-    for (int k = 0; k < NFR; k++) {
-        to_general(c, &c->fr[k].y);
-        to_general(c, &c->fr[k].c1);
-        if (!c->fmt.nv)
-            to_general(c, &c->fr[k].c2);
-        for (int L = c->lnorm ? 0 : 1; L < c->nlev; L++)
-            to_general(c, &c->fr[k].lev[L]);
-    }
-    to_general(c, &c->oy);
-    to_general(c, &c->oc1);
-    if (!c->fmt.nv)
-        to_general(c, &c->oc2);
     return cmd_submit(c) < 0 ? -1 : 0;
 }
 
@@ -1147,6 +1156,13 @@ static void out_range(const mb_ctx *c, float *maxv, float *step)
             : c->lnorm  ? (float)(((1 << c->fmt.depth) - 1) / 65535.0)
                         : (float)((65535 - ((1 << pad) - 1)) / 65535.0);
     *step = pad ? (float)((1 << pad) / 65535.0) : 0.0f;
+}
+
+static pcs geom_pc(const mb_ctx *c, int bw, int bh, int lb)
+{
+    pcs pc = {{bw, bh, c->fmt.w, c->fmt.h, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y, c->fmt.nv}};
+    pc.i[15] = lb;
+    return pc;
 }
 
 static void set_dc(const mb_ctx *c, pcs *pc)
@@ -1190,7 +1206,7 @@ static unsigned px(const mb_ctx *c, const mb_image *src, int i, int x, int y)
 
 static unsigned chroma_mid(const mb_ctx *c)
 {
-    return c->bps == 1 ? 128 : c->lnorm ? 1u << (c->full.depth - 1) : 32768;
+    return 1u << (c->full.depth - 1);
 }
 
 static float chroma_mid_f(const mb_ctx *c)
@@ -1330,6 +1346,34 @@ static int bar_rects(const mb_ctx *c, int i, int W, int H, int rect[4][4])
     return n;
 }
 
+static mb_image tmpl_image(const mb_ctx *c)
+{
+    mb_image im = {{0}};
+    for (int i = 0; i < c->nplanes; i++) {
+        im.data[i] = c->tmpl + c->toff[i];
+        im.stride[i] = (ptrdiff_t)c->trowb[i];
+    }
+    return im;
+}
+
+static void stage_planes(const mb_ctx *c, const vbuf *up, const mb_image *src)
+{
+    for (int i = 0; i < c->nplanes; i++) {
+        size_t xb, yr;
+        plane_org(c, i, c->x0, c->y0, &xb, &yr);
+        copy_rows((uint8_t *)up->map + c->off[i], (ptrdiff_t)c->rowb[i],
+                  src->data[i] + (ptrdiff_t)yr * src->stride[i] + xb, src->stride[i], c->rows[i], c->rowb[i]);
+    }
+}
+
+static void upload_planes(mb_ctx *c, const vbuf *up, gframe *f)
+{
+    copy_b2i(c, up, c->off[0], &f->y);
+    copy_b2i(c, up, c->off[1], &f->c1);
+    if (!c->fmt.nv)
+        copy_b2i(c, up, c->off[2], &f->c2);
+}
+
 static void tmpl_black(mb_ctx *c)
 {
     unsigned mid = chroma_mid(c);
@@ -1382,21 +1426,13 @@ static int set_crop(mb_ctx *c, int x0, int y0, int w, int h)
             }
             had_tmpl = 0;
         } else if (had_tmpl) {
-            for (int i = 0; i < c->nplanes; i++) {
-                size_t xb, yr;
-                plane_org(c, i, x0, y0, &xb, &yr);
-                copy_rows((uint8_t *)up->map + c->off[i], (ptrdiff_t)c->rowb[i],
-                          c->tmpl + c->toff[i] + yr * c->trowb[i] + xb, (ptrdiff_t)c->trowb[i], c->rows[i], c->rowb[i]);
-            }
+            mb_image t = tmpl_image(c);
+            stage_planes(c, up, &t);
         }
         for (int k = 0; k < NFR; k++) {
             gframe *f = &c->fr[k];
-            if (had_tmpl) {
-                copy_b2i(c, up, c->off[0], &f->y);
-                copy_b2i(c, up, c->off[1], &f->c1);
-                if (!c->fmt.nv)
-                    copy_b2i(c, up, c->off[2], &f->c2);
-            }
+            if (had_tmpl)
+                upload_planes(c, up, f);
             barrier(c);
             copy_overlap(c, &old[k].y, ox0, oy0, &f->y, x0, y0);
             copy_overlap(c, &old[k].c1, ox0 >> sx, oy0 >> sy, &f->c1, x0 >> sx, y0 >> sy);
@@ -1484,9 +1520,9 @@ static int cropped(const mb_ctx *c)
 
 static void save_bars(mb_ctx *c, const mb_image *src)
 {
+    mb_image t = tmpl_image(c);
     for (int i = 0; i < c->nplanes; i++)
-        copy_border(c, i, c->x0, c->y0, c->rowb[i], c->rows[i], c->tmpl + c->toff[i], (ptrdiff_t)c->trowb[i],
-                    src->data[i], src->stride[i]);
+        copy_border(c, i, c->x0, c->y0, c->rowb[i], c->rows[i], t.data[i], t.stride[i], src->data[i], src->stride[i]);
 }
 
 static int push_begin(mb_ctx *c)
@@ -1545,17 +1581,8 @@ void mb_push(mb_ctx *c, const mb_image *src)
         slot_wait(c, c->up_slot[k]);
     c->up_slot[k] = c->cur;
     c->up_serial[k] = c->serial + 1;
-    vbuf *up = &c->up[k];
-    for (int i = 0; i < c->nplanes; i++) {
-        size_t xb, yr;
-        plane_org(c, i, c->x0, c->y0, &xb, &yr);
-        copy_rows((uint8_t *)up->map + c->off[i], (ptrdiff_t)c->rowb[i],
-                  src->data[i] + (ptrdiff_t)yr * src->stride[i] + xb, src->stride[i], c->rows[i], c->rowb[i]);
-    }
-    copy_b2i(c, up, c->off[0], &f->y);
-    copy_b2i(c, up, c->off[1], &f->c1);
-    if (!c->fmt.nv)
-        copy_b2i(c, up, c->off[2], &f->c2);
+    stage_planes(c, &c->up[k], src);
+    upload_planes(c, &c->up[k], f);
     push_end(c);
 }
 
@@ -1663,16 +1690,20 @@ static imp_ent *import_plane(mb_ctx *c, const mb_dmabuf_in *in, int p)
     c->imp_tick++;
     for (int i = 0; i < c->nimp; i++) {
         imp_ent *x = &c->imp[i];
-        if (x->im.img && x->ino == (uint64_t)st.st_ino && x->plane == p && x->off == in->offset[p] && x->pitch == in->pitch[p] &&
-            x->mod == in->modifier)
+        if (x->im.img && x->ino == (uint64_t)st.st_ino && x->plane == p && x->off == in->offset[p] &&
+            x->pitch == in->pitch[p] && x->mod == in->modifier)
             e = x;
-        else if (!x->im.img ? !victim || victim->im.img
-                            : !x->users && (!victim || (victim->im.img && x->last < victim->last)))
-            victim = x;
     }
     if (!e) {
         if (c->nimp < NIMP)
             victim = &c->imp[c->nimp++];
+        for (int i = 0; !victim && i < c->nimp; i++)
+            if (!c->imp[i].im.img)
+                victim = &c->imp[i];
+        if (!victim)
+            for (int i = 0; i < c->nimp; i++)
+                if (!c->imp[i].users && (!victim || c->imp[i].last < victim->last))
+                    victim = &c->imp[i];
         if (!victim)
             return NULL;
         if (victim->im.img)
@@ -1937,7 +1968,7 @@ static void estimate(mb_ctx *c, int dir)
         if (L == top) {
             pcs pc = {{c->bw[L], c->bh[L], c->lw[L], c->lh[L], c->p.coarse_r}, {c->p.lam_full}};
             vres r[3] = {{X, NULL}, {Y, NULL}, {NULL, &F[L]}};
-            dispatch(c, P(c, FULL), r, &pc, (uint32_t)nb, 1);
+            dispatch1(c, P(c, FULL), r, &pc, nb);
             have = 1;
         }
         int niter = L == B ? c->p.iters0 : c->p.iters;
@@ -1956,7 +1987,7 @@ static void estimate(mb_ctx *c, int dir)
                          {NULL, dir ? &c->fa[L] : &c->dummy},
                          {NULL, &c->hist}};
             static const char *const iter_names[MAXLEV] = {"iter_L0", "iter_L1", "iter_L2", "iter_L3", "iter_L4", "iter_L5"};
-            dispatch_n(c, P(c, ITER), r, &pc, (uint32_t)(nb + 3) / 4, 1, iter_names[L]);
+            dispatch_n(c, P(c, ITER), r, &pc, groups(c, P(c, ITER), nb), 1, iter_names[L]);
             swapbuf(&F[L], &c->tmp[L]);
             have = 1;
         }
@@ -1964,7 +1995,7 @@ static void estimate(mb_ctx *c, int dir)
             pcs pc = {{c->bw[L], c->bh[L], c->lw[L], c->lh[L], L == B && dir == 0, c->p.refine, L == B, dir}, {0}};
             set_dc(c, &pc);
             vres r[4] = {{X, NULL}, {Y, NULL}, {NULL, &F[L]}, {NULL, &c->stat}};
-            dispatch(c, P(c, REFINE), r, &pc, (uint32_t)(nb + 3) / 4, 1);
+            dispatch1(c, P(c, REFINE), r, &pc, nb);
         }
     }
 }
@@ -1978,13 +2009,13 @@ static void cross_fix(mb_ctx *c, int dir)
     {
         pcs pc = {{bw, bh, 0, 0, 0}, {1.0f}};
         vres r[2] = {{NULL, dir ? &c->fa[B] : &c->fb[B]}, {NULL, &c->xkeys}};
-        dispatch(c, P(c, PROJ), r, &pc, (uint32_t)(nb + 63) / 64, 1);
+        dispatch1(c, P(c, PROJ), r, &pc, nb);
     }
     vbuf *F = dir ? c->fb : c->fa;
     pcs pc = {{bw, bh, c->lw[B], c->lh[B]}, {0, 0, 0, 0, c->p.pen_xfix, c->p.pen_len, 0, 0, c->p.xrel, c->p.xabs, c->p.xmin}};
     vres r[6] = {{lev_img(c, kx, B), NULL}, {lev_img(c, ky, B), NULL}, {NULL, &F[B]},
                  {NULL, &c->tmp[B]}, {NULL, dir ? &c->fa[B] : &c->fb[B]}, {NULL, &c->xkeys}};
-    dispatch(c, P(c, CROSS), r, &pc, (uint32_t)(nb + 63) / 64, 1);
+    dispatch1(c, P(c, CROSS), r, &pc, nb);
     swapbuf(&F[B], &c->tmp[B]);
 }
 
@@ -1998,7 +2029,7 @@ static void local_fix(mb_ctx *c, int dir)
               {0, 0, 0, 0, 0, c->p.pen_len, c->p.tsup_rel, c->p.tsup_abs, c->p.xrel, c->p.xabs, c->p.xnoise, c->p.xbad, c->p.xr, c->p.xs}};
     vres r[6] = {{lev_img(c, kx, B), NULL}, {lev_img(c, ky, B), NULL}, {NULL, &F[B]},
                  {NULL, &c->tmp[B]}, {NULL, dir ? &c->fa[B] : (c->have_prev ? &c->pfb[B] : &c->dummy)}, {NULL, &c->stat}};
-    dispatch(c, P(c, LOCAL), r, &pc, (uint32_t)(nb + 63) / 64, 1);
+    dispatch1(c, P(c, LOCAL), r, &pc, nb);
     swapbuf(&F[B], &c->tmp[B]);
 }
 
@@ -2020,7 +2051,7 @@ static void run_me(mb_ctx *c)
     pcs pc = {{c->bw[B] * c->bh[B]}, {(float)(STAT_SCALE / ((double)c->bw[B] * c->bh[B] * 256)), (float)c->p.scut, (float)c->p.scut_rel,
                     (float)c->p.zcut_rel, (float)c->p.zcut_min, c->p.cut_sd, c->p.cut_kmin}};
     vres r[2] = {{NULL, &c->stat}, {NULL, &c->hist}};
-    dispatch(c, P(c, CUTDEC), r, &pc, 1, 1);
+    dispatch1(c, P(c, CUTDEC), r, &pc, 1);
     c->me_valid = 1;
 }
 
@@ -2029,13 +2060,13 @@ static void read_out(mb_ctx *c, const slot *sl, mb_image *dst)
     size_t off[3], rowb[3], rows[3];
     layout(c, sl->w, sl->h, off, rowb, rows);
     int crop = sl->x0 || sl->y0 || sl->w != c->full.w || sl->h != c->full.h;
+    mb_image t = tmpl_image(c);
     for (int i = 0; i < c->nplanes; i++) {
         const uint8_t *s = (const uint8_t *)sl->down.map + off[i];
         size_t xb = 0, yr = 0;
         if (crop) {
             plane_org(c, i, sl->x0, sl->y0, &xb, &yr);
-            copy_border(c, i, sl->x0, sl->y0, rowb[i], rows[i], dst->data[i], dst->stride[i], c->tmpl + c->toff[i],
-                        (ptrdiff_t)c->trowb[i]);
+            copy_border(c, i, sl->x0, sl->y0, rowb[i], rows[i], dst->data[i], dst->stride[i], t.data[i], t.stride[i]);
         }
         copy_rows(dst->data[i] + (ptrdiff_t)yr * dst->stride[i] + xb, dst->stride[i], s, (ptrdiff_t)rowb[i], rows[i],
                   rowb[i]);
@@ -2109,7 +2140,7 @@ static int xcreate(mb_ctx *c, int i)
         return -1;
     }
     atomic_store(&c->xp->busy[i], 1);
-    atomic_store(&c->xp->rel[i], atomic_load(&c->xp->seq) - 63);
+    atomic_store(&c->xp->rel[i], atomic_load(&c->xp->seq) - (XIDLE - 1));
     if (i == c->nx)
         c->nx++;
     return i;
@@ -2132,7 +2163,7 @@ int mb_export_init(mb_ctx *c)
     if (!c->xp)
         return -1;
     atomic_init(&c->xp->refs, 1);
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < XPOOL_MIN; i++)
         if (xcreate(c, c->nx) < 0)
             break;
     for (int i = 0; i < c->nx; i++)
@@ -2154,7 +2185,7 @@ static int xacquire(mb_ctx *c)
         if (atomic_load(&xp->busy[i]))
             continue;
         unsigned a = now - atomic_load(&xp->rel[i]);
-        if (i >= 4 && a > 64) {
+        if (i >= XPOOL_MIN && a > XIDLE) {
             xbuf_free(c, &c->xb[i]);
             hole = hole < 0 ? i : hole;
             continue;
@@ -2165,7 +2196,7 @@ static int xacquire(mb_ctx *c)
         }
     }
     int grow = hole >= 0 ? hole : c->nx < MAXX ? c->nx : -1;
-    if ((best < 0 || (age < 2 && c->nx < 8)) && grow >= 0 && xcreate(c, grow) >= 0)
+    if ((best < 0 || (age < 2 && c->nx < XPOOL_GROW)) && grow >= 0 && xcreate(c, grow) >= 0)
         return grow;
     if (best < 0)
         return -1;
@@ -2189,10 +2220,9 @@ static void xfill_bars(mb_ctx *c, xbuf *x)
 {
     if (x->ver == c->bars_ver || !c->tmpl)
         return;
-    mb_image d = xbuf_image(c, x);
+    mb_image d = xbuf_image(c, x), t = tmpl_image(c);
     for (int i = 0; i < c->nplanes; i++)
-        copy_border(c, i, c->x0, c->y0, c->rowb[i], c->rows[i], d.data[i], d.stride[i], c->tmpl + c->toff[i],
-                    (ptrdiff_t)c->trowb[i]);
+        copy_border(c, i, c->x0, c->y0, c->rowb[i], c->rows[i], d.data[i], d.stride[i], t.data[i], t.stride[i]);
     x->ver = c->bars_ver;
 }
 
@@ -2291,12 +2321,12 @@ int mb_submit_vk(mb_ctx *c, double t, mb_vkframe *out)
             continue;
         pcs pc = {{bw, bh, 0, 0, dir}, {(float)(dir ? -(1 - t) : -t)}};
         vres r[2] = {{NULL, dir ? NFA : PFB}, {NULL, &c->eslots}};
-        dispatch(c, P(c, PROJ), r, &pc, (uint32_t)(nb + 63) / 64, 1);
+        dispatch1(c, P(c, PROJ), r, &pc, nb);
     }
     for (int dir = 0; dir < 2; dir++) {
         pcs pc = {{bw, bh, 0, 0, dir}, {(float)(dir ? 1 - t : t)}};
         vres r[2] = {{NULL, dir ? FB0 : FA0}, {NULL, &c->slots}};
-        dispatch(c, P(c, PROJ), r, &pc, (uint32_t)(nb + 63) / 64, 1);
+        dispatch1(c, P(c, PROJ), r, &pc, nb);
     }
     vbuf *tfin = &c->dummy, *tfout = &c->tf0;
     for (int pass = 0; pass < c->p.sel_passes; pass++) {
@@ -2307,48 +2337,50 @@ int mb_submit_vk(mb_ctx *c, double t, mb_vkframe *out)
         vres r[14] = {{lev_img(c, ka, lb), NULL}, {lev_img(c, kb, lb), NULL}, {lev_img(c, kc, lb), NULL},
                       {lev_img(c, kz, lb), NULL}, {NULL, FA0}, {NULL, FB0}, {NULL, &c->slots}, {NULL, tfin},
                       {NULL, tfout}, {NULL, NFA}, {NULL, PFB}, {NULL, &c->stat}, {NULL, SP}, {NULL, &c->eslots}};
-        dispatch(c, P(c, SEL), r, &pc, (uint32_t)(nb + 3) / 4, 1);
+        dispatch1(c, P(c, SEL), r, &pc, nb);
         tfin = tfout;
         tfout = tfout == &c->tf0 ? &c->tf1 : &c->tf0;
     }
     if (c->p.vm_thr > 0) {
         pcs pc = {{bw, bh}, {c->p.vm_thr}};
         vres r[2] = {{NULL, tfin}, {NULL, tfout}};
-        dispatch(c, P(c, VMED), r, &pc, (uint32_t)(nb + 63) / 64, 1);
+        dispatch1(c, P(c, VMED), r, &pc, nb);
         tfin = tfout;
     }
     c->last_tf = tfin;
     {
         pcs pc = {{bw, bh}, {0, 0, c->p.fb_spread, c->p.fb_avg, (float)t, c->p.fb_ilo, c->p.fb_ihi}};
         vres r[4] = {{NULL, tfin}, {NULL, &c->fbw}, {NULL, FA0}, {NULL, FB0}};
-        dispatch(c, P(c, CONF), r, &pc, (uint32_t)(nb + 63) / 64, 1);
+        dispatch1(c, P(c, CONF), r, &pc, nb);
     }
     const vimg *ac2 = c->fmt.nv ? &A->c1 : &A->c2, *bc2 = c->fmt.nv ? &B->c1 : &B->c2;
     {
-        pcs pc = {{bw, bh, c->fmt.w, c->fmt.h, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y, c->fmt.nv, 0, 0, 0, 0, 0, 0, lb},
-                  {(float)t, luma_scale(c)}};
+        pcs pc = geom_pc(c, bw, bh, lb);
+        pc.f[0] = (float)t;
+        pc.f[1] = luma_scale(c);
         vres r[6] = {{&A->c1, NULL}, {&B->c1, NULL}, {ac2, NULL}, {bc2, NULL}, {NULL, tfin}, {NULL, &c->ill0}};
-        dispatch(c, P(c, ILLUM), r, &pc, (uint32_t)(nb + 63) / 64, 1);
+        dispatch1(c, P(c, ILLUM), r, &pc, nb);
         pcs pm = {{bw, bh}};
         vres rm[2] = {{NULL, &c->ill0}, {NULL, &c->ill1}};
-        dispatch(c, P(c, ILMED), rm, &pm, (uint32_t)(nb + 63) / 64, 1);
-        pcs pa = {{bw, bh, c->fmt.w, c->fmt.h, c->cw, c->ch, c->fmt.cshift_x, c->fmt.cshift_y, c->fmt.nv, 0, 0, 0, 0, 0, 0, lb},
-                  {(float)t, 255.0f * luma_scale(c), c->p.ag_lo, c->p.ag_hi, c->p.ag_flat, 0, chroma_mid_f(c), c->p.ag_sat}};
+        dispatch1(c, P(c, ILMED), rm, &pm, nb);
+        pcs pa = geom_pc(c, bw, bh, lb);
+        float af[8] = {(float)t, 255.0f * luma_scale(c), c->p.ag_lo, c->p.ag_hi, c->p.ag_flat, 0, chroma_mid_f(c), c->p.ag_sat};
+        memcpy(pa.f, af, sizeof(af));
         pcs pg = {{bw, bh}};
         vres rg[2] = {{NULL, tfin}, {NULL, &c->gmv}};
-        dispatch(c, P(c, GMED), rg, &pg, 1, 1);
+        dispatch1(c, P(c, GMED), rg, &pg, 1);
         vres ra[8] = {{&A->y, NULL}, {&B->y, NULL}, {&A->c1, NULL}, {&B->c1, NULL},
                       {ac2, NULL},   {bc2, NULL},   {NULL, &c->agw}, {NULL, &c->gmv}};
-        dispatch(c, P(c, AGREE), ra, &pa, (uint32_t)(nb + 63) / 64, 1);
+        dispatch1(c, P(c, AGREE), ra, &pa, nb);
         pcs ps = {{bw, bh, c->p.ag_r}, {c->p.ag_src, (float)t}};
         vres rs[4] = {{NULL, &c->agw}, {NULL, &c->agw2}, {NULL, tfin}, {NULL, &c->gmv}};
-        dispatch(c, P(c, AGSPREAD), rs, &ps, (uint32_t)(nb + 63) / 64, 1);
+        dispatch1(c, P(c, AGSPREAD), rs, &ps, nb);
     }
     {
         pcs pc = {{bw, bh, c->lw[lb], c->lh[lb], c->p.sub_ref},
                   {(float)t, c->p.sub_thr / (float)(1 << lb), c->p.pen_sub, luma_scale(c), c->p.pen_sref}};
         vres r[5] = {{lev_img(c, ka, lb), NULL}, {lev_img(c, kb, lb), NULL}, {NULL, tfin}, {NULL, &c->tf4}, {NULL, &c->ill1}};
-        dispatch(c, P(c, SUB), r, &pc, (uint32_t)(nb * 4 + 63) / 64, 1);
+        dispatch1(c, P(c, SUB), r, &pc, nb * 4);
     }
     {
         float maxv, step;
@@ -2606,7 +2638,7 @@ int mb_set_param(mb_ctx *c, const char *name, double v)
         const char *name;
         double lo, hi;
     } lim[] = {{"sel_passes", 1, 8}, {"iters0", 1, 16}, {"iters", 0, 16}, {"coarse_r", 0, 16}, {"xfix", 0, 2},
-               {"ag_r", 0, 16}, {"xs", 0.25, 16}, {"xr", 0, 64}, {"refine", 0, 1}, {"la", 0, 1}, {"me_half", -1, 1},
+               {"ag_r", 0, 16}, {"xs", 0.25, 16}, {"xr", 0, 64}, {"refine", 0, 1}, {"la", 0, 1},
                {"dc_lo", 0, 1}, {"dc_hi", 0, 1}, {"sub_ref", 0, 8}};
     for (size_t i = 0; i < sizeof(lim) / sizeof(lim[0]); i++)
         if (!strcmp(name, lim[i].name) && (v < lim[i].lo || v > lim[i].hi))
@@ -2639,8 +2671,16 @@ void mb_destroy(mb_ctx *c)
         else
             vkDeviceWaitIdle(c->dev);
         res_geom_free(c);
-        for (int i = 0; i < NSLOT; i++)
-            slot_release(c, &c->sl[i]);
+        for (int i = 0; i < NSLOT; i++) {
+            slot *sl = &c->sl[i];
+            slot_release(sl);
+            buf_free(c, &sl->down);
+            buf_free(c, &sl->statcopy);
+            if (sl->qp)
+                vkDestroyQueryPool(c->dev, sl->qp, NULL);
+            if (sl->fence)
+                vkDestroyFence(c->dev, sl->fence, NULL);
+        }
         for (int i = 0; i < c->nimp; i++)
             imp_free(c, &c->imp[i]);
         img_free(c, &c->bgy);
@@ -2650,15 +2690,6 @@ void mb_destroy(mb_ctx *c)
             xbuf_free(c, &c->xb[i]);
         if (c->xp && atomic_fetch_sub(&c->xp->refs, 1) == 1)
             free(c->xp);
-        for (int i = 0; i < NSLOT; i++) {
-            slot *sl = &c->sl[i];
-            buf_free(c, &sl->down);
-            buf_free(c, &sl->statcopy);
-            if (sl->qp)
-                vkDestroyQueryPool(c->dev, sl->qp, NULL);
-            if (sl->fence)
-                vkDestroyFence(c->dev, sl->fence, NULL);
-        }
         buf_free(c, &c->up[0]);
         buf_free(c, &c->up[1]);
         for (int i = 0; i < P_COUNT; i++)
@@ -2678,7 +2709,7 @@ void mb_destroy(mb_ctx *c)
 
 mb_ctx *mb_create_ex(const mb_format *fmt, const mb_vkdev *d, const mb_host *host)
 {
-    if (fmt->w < 64 || fmt->h < 64 || fmt->depth < 8 || fmt->depth > 16 || fmt->cshift_x < 0 || fmt->cshift_x > 1 ||
+    if (fmt->w < MB_MIN_SIZE || fmt->h < MB_MIN_SIZE || fmt->depth < 8 || fmt->depth > 16 || fmt->cshift_x < 0 || fmt->cshift_x > 1 ||
         fmt->cshift_y < 0 || fmt->cshift_y > 1 || fmt->lsb_pad < 0 || fmt->lsb_pad > 8 ||
         (fmt->lsb_pad && fmt->depth != 16))
         return NULL;
@@ -2713,11 +2744,6 @@ mb_ctx *mb_create_ex(const mb_format *fmt, const mb_vkdev *d, const mb_host *hos
     return c;
 }
 
-mb_ctx *mb_create_vk(const mb_format *fmt, const mb_vkdev *d)
-{
-    return mb_create_ex(fmt, d, NULL);
-}
-
 mb_ctx *mb_create(const mb_format *fmt)
 {
     return mb_create_ex(fmt, NULL, NULL);
@@ -2726,4 +2752,9 @@ mb_ctx *mb_create(const mb_format *fmt)
 int mb_ok(const mb_ctx *c)
 {
     return c && c->ok;
+}
+
+int mb_lookahead(const mb_ctx *c)
+{
+    return c->p.la;
 }

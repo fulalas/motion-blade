@@ -55,14 +55,16 @@ put cuts_flash "$n"
 
 echo "== speed"
 need_clip "$D/suite/crowd_run_1080p50.mkv"
+speed() { "$E" "$D/suite/crowd_run_1080p50.mkv" -n $N -step $STEP -nometric -repeat $REPEAT "$@"; }
+speed_ms() { speed "$@" | head -1 | awk '{print $2}'; }
 best=99999
 for r in 1 2 3; do
-    ms=$("$E" "$D/suite/crowd_run_1080p50.mkv" -n $N -step $STEP -nometric -repeat $REPEAT | head -1 | awk '{print $2}')
+    ms=$(speed_ms)
     best=$(echo "$ms $best" | awk '{print ($1 < $2) ? $1 : $2}')
 done
 put speed_ms_1080p "$best"
-put half_ms "$("$E" "$D/suite/crowd_run_1080p50.mkv" -n $N -step $STEP -nometric -repeat $REPEAT -p me_half=1 | head -1 | awk '{print $2}')"
-MOTIONBLADE_PROFILE=1 "$E" "$D/suite/crowd_run_1080p50.mkv" -n $N -step $STEP -nometric -repeat $REPEAT 2>&1 | grep "motionblade profile" |
+put half_ms "$(speed_ms -p me_half=1)"
+MOTIONBLADE_PROFILE=1 speed 2>&1 | grep "motionblade profile" |
     awk -v runs=$runs '{printf "pass_%s %s\n", $3, $4 / runs}' >>"$out"
 
 vg=$(RADV_DEBUG=shaderstats,nocache "$E" "$D/suite/crowd_run_1080p50.mkv" -n 3 -q 2>&1 | grep -E "^VGPRs" | tail -1 | awk '{print $2}')
@@ -76,34 +78,37 @@ if [ $update = 1 ]; then
 fi
 [ -f "$B" ] || { echo "no baseline, run with --update first"; rm "$out"; exit 1; }
 
+rule() {
+    case $1 in
+        *_local) echo higher 0.1 ;;
+        *_psnr|*_cpsnr) echo higher 0.05 ;;
+        *_ssim) echo higher 0.002 ;;
+        speed_ms_1080p|half_ms) echo lower "$(echo "$2" | awk '{print $1 * 0.05}')" ;;
+        pass_*) echo lower "$(echo "$2" | awk '{print $1 * 0.10 + 0.05}')" ;;
+        interp_vgprs) echo max 168 ;;
+        gpu_level) echo warn ;;
+        *) echo exact ;;
+    esac
+}
+
 echo "== result (current / baseline)"
 while read -r k v; do
     b=$(awk -v k="$k" '$1 == k {print $2}' "$B")
+    read -r mode tol <<<"$(rule "$k" "$b")"
     st=ok
-    case $k in
-        *_local) tol=0.1 ;;
-        *_psnr|*_cpsnr) tol=0.05 ;;
-        *_ssim) tol=0.002 ;;
-        speed_ms_1080p|half_ms) tol=$(echo "$b" | awk '{print $1 * 0.05}') ;;
-        pass_*) tol=$(echo "$b" | awk '{print $1 * 0.10 + 0.05}') ;;
-        *) tol= ;;
-    esac
     if [ -z "$v" ]; then
         st=FAIL; v="(empty)"
-    elif { [ -n "$tol" ] || [ $k = interp_vgprs ]; } && ! num "$v"; then
+    elif [ -n "$tol" ] && ! num "$v"; then
         st=FAIL; v="(not a number: $v)"
     elif [ -z "$b" ]; then
         st=new
-    elif [ $k = interp_vgprs ]; then
-        [ "$v" -le 168 ] || st=FAIL
-    elif [ $k = gpu_level ]; then
-        [ "$v" = "$b" ] || st=warn
-    elif [ -z "$tol" ]; then
-        [ "$v" = "$b" ] || st=FAIL
     else
-        case $k in
-            speed_*|half_ms|pass_*) st=$(echo "$v $b $tol" | awk '{print ($1 > $2 + $3) ? "FAIL" : ($1 < $2 - $3) ? "better" : "ok"}') ;;
-            *) st=$(echo "$v $b $tol" | awk '{print ($1 < $2 - $3) ? "FAIL" : ($1 > $2 + $3) ? "better" : "ok"}') ;;
+        case $mode in
+            max) [ "$v" -le "$tol" ] || st=FAIL ;;
+            warn) [ "$v" = "$b" ] || st=warn ;;
+            exact) [ "$v" = "$b" ] || st=FAIL ;;
+            lower) st=$(echo "$v $b $tol" | awk '{print ($1 > $2 + $3) ? "FAIL" : ($1 < $2 - $3) ? "better" : "ok"}') ;;
+            higher) st=$(echo "$v $b $tol" | awk '{print ($1 < $2 - $3) ? "FAIL" : ($1 > $2 + $3) ? "better" : "ok"}') ;;
         esac
     fi
     [ "$st" = FAIL ] && fail=1
@@ -111,7 +116,7 @@ while read -r k v; do
 done <"$out"
 while read -r k b; do
     grep -q "^$k " "$out" && continue
-    if [ $k = interp_vgprs ]; then
+    if [ "$(rule "$k" "$b")" = "max 168" ]; then
         printf "%-26s %-34s %-34s %s\n" "$k" "n/a" "$b" "n/a"
         continue
     fi

@@ -398,9 +398,8 @@ int main(int argc, char **argv)
     size_t ysz = (size_t)w * h, fsz = frame_size(w, h);
     const tfmt *tf = &fmts[fm];
     mb_format fmt = {w, h, tf->depth, 1, 1, tf->nv, tf->lsb_pad};
-    conv ca, cb, co;
+    conv cb, co;
     if (fm) {
-        conv_alloc(&ca, tf, w, h);
         conv_alloc(&cb, tf, w, h);
         conv_alloc(&co, tf, w, h);
     }
@@ -419,18 +418,16 @@ int main(int argc, char **argv)
         fprintf(stderr, "dma-buf export not available\n");
         return 1;
     }
-    int la = 1;
     for (int i = 0; i < np; i++) {
         char *eq = strchr(params[i], '=');
         if (!eq) usage();
         *eq = 0;
-        if (!strcmp(params[i], "la"))
-            la = atof(eq + 1) != 0;
         if (mb_set_param(c, params[i], atof(eq + 1)) < 0) {
             fprintf(stderr, "unknown param %s\n", params[i]);
             return 1;
         }
     }
+    int la = mb_lookahead(c);
     FILE *fo = out ? fopen(out, "wb") : NULL;
     if (fo)
         fputs(s.hdr, fo);

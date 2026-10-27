@@ -2,6 +2,8 @@ T=$(dirname "$(readlink -f "$0")")
 D=${MOTIONBLADE_DATA:-$(cd "$T/../.." && pwd)/samples}
 E=${EVAL:-$T/../eval_vk}
 
+ffv1() { ffmpeg -nostdin -hide_banner -loglevel error "$@" -c:v ffv1 -level 3 -slices 16 -y; }
+
 field() { grep -o "$1 [0-9.]*" | awk '{print $NF}'; }
 
 need_eval() { [ -x "$E" ] || { echo "$E: not found or not executable, run make" >&2; exit 1; }; }

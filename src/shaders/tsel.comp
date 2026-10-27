@@ -51,6 +51,11 @@ vec2 cons_err(vec2 c, vec2 u, float t)
 
 float tolf(vec2 u) { return float(pc.i2.x) * 0.01 * l1(u) + float(pc.i2.y) * 0.01; }
 
+bvec2 cons_ok(vec2 c, vec2 u, float t)
+{
+    return lessThanEqual(cons_err(c, u, t), vec2(cons_thr(pc.f0.z, u)));
+}
+
 bool both_sup(vec2 c, vec2 u, float t)
 {
     float tol = tolf(u);
@@ -104,8 +109,7 @@ void main()
         bool nsup = false;
         for (int i = 0; i < n; i++) {
             vec2 u = cl[i];
-            float th = cons_thr(pc.f0.z, u);
-            nsup = nsup || (past && fut && all(lessThanEqual(cons_err(cc, u, t), vec2(th))) && both_sup(cc, u, t));
+            nsup = nsup || (past && fut && all(cons_ok(cc, u, t)) && both_sup(cc, u, t));
         }
         for (int i = 0; i < 2 && !nsup; i++) {
             uint key = ek[id * 4 + i];
@@ -162,9 +166,8 @@ void main()
         vec2 u = cl[i];
         float s = zsad_ab(row0, u, t);
         float m2 = g_ml;
-        float thr = cons_thr(pc.f0.z, u);
-        vec2 e = cons_err(c, u, t);
-        bool okA = e.x <= thr, okB = e.y <= thr;
+        bvec2 ok = cons_ok(c, u, t);
+        bool okA = ok.x, okB = ok.y;
         bool sup = true;
         float pen = float(int(!okA) + int(!okB));
         bool chk = anysup && l1(u) >= minsup;
@@ -199,9 +202,8 @@ void main()
     }
     if (tsup && l1(best_v - tv) >= minsup) {
         float s = zsad_ab(row0, tv, t);
-        float thr = cons_thr(pc.f0.z, tv);
-        vec2 e = cons_err(c, tv, t);
-        bool okA = e.x <= thr, okB = e.y <= thr;
+        bvec2 ok = cons_ok(c, tv, t);
+        bool okA = ok.x, okB = ok.y;
         float cost = s + pc.f0.y * float(int(!okA) + int(!okB));
         if (cost < best_c) {
             best_c = cost;
@@ -221,9 +223,8 @@ void main()
                 vec2 u = base + vec2(dx, dy);
                 float s = zsad_ab(row0, u, t);
                 float m2 = g_ml;
-                float thr = cons_thr(pc.f0.z, u);
-                vec2 e = cons_err(c, u, t);
-                bool okA = e.x <= thr, okB = e.y <= thr;
+                bvec2 ok = cons_ok(c, u, t);
+                bool okA = ok.x, okB = ok.y;
                 if (pass == 0 && !okA && !okB)
                     continue;
                 float cost = s + pc.f0.y * ((both_sup(c, u, t) && pc.i3.z != 0) ? 0.0 : float(int(!okA) + int(!okB)));

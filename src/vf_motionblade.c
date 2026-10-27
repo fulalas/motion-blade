@@ -34,9 +34,9 @@
 
 #include "video/filter/motionblade/motionblade.h"
 
-#define MAXQ 32
+#define MAXQ 24
 #define RATE_TOL 1.05
-#define MIN_SIZE 64
+#define MAX_FACTOR 8
 
 enum { ZC_AUTO, ZC_DRM, ZC_VULKAN, ZC_NO };
 
@@ -73,7 +73,6 @@ struct priv {
     double grid, dfps, last_pts;
     bool fast;
     int64_t dfps_time;
-    int expect;
     struct AVBufferRef *xframes;
     uint32_t fourcc;
     bool hw_failed, export_warned;
@@ -115,9 +114,29 @@ static void teardown(struct priv *p)
     drop_maps(p);
 }
 
+static void finish_oldest_gpu(struct priv *p);
+static void flush_pending(struct mp_filter *f);
+
 static void f_reset(struct mp_filter *f)
 {
     clear_state(f->priv);
+}
+
+static void drop_pair(struct mp_filter *f)
+{
+    struct priv *p = f->priv;
+    flush_pending(f);
+    mp_image_unrefp(&p->prev);
+}
+
+static void stop_ctx(struct mp_filter *f)
+{
+    struct priv *p = f->priv;
+    drop_pair(f);
+    while (p->ngpu)
+        finish_oldest_gpu(p);
+    p->grid = MP_NOPTS_VALUE;
+    teardown(p);
 }
 
 static void f_destroy(struct mp_filter *f)
@@ -144,8 +163,6 @@ static mb_image to_mb(struct mp_image *mpi)
     return im;
 }
 
-static void finish_oldest_gpu(struct priv *p);
-static void flush_pending(struct mp_filter *f);
 
 static bool zc_allows(struct priv *p, int mode)
 {
@@ -538,12 +555,7 @@ static bool setup(struct mp_filter *f, struct mp_image *mpi)
     int swfmt = is_hw(mpi) ? mpi->params.hw_subfmt : mpi->imgfmt;
     if (p->imgfmt == swfmt && p->hwfmt == mpi->imgfmt && p->w == mpi->w && p->h == mpi->h)
         return p->ctx != NULL;
-    flush_pending(f);
-    while (p->ngpu)
-        finish_oldest_gpu(p);
-    mp_image_unrefp(&p->prev);
-    p->grid = MP_NOPTS_VALUE;
-    teardown(p);
+    stop_ctx(f);
     p->hw_failed = false;
     p->export_warned = false;
     p->imgfmt = swfmt;
@@ -551,8 +563,8 @@ static bool setup(struct mp_filter *f, struct mp_image *mpi)
     p->w = mpi->w;
     p->h = mpi->h;
 
-    if (mpi->w < MIN_SIZE || mpi->h < MIN_SIZE) {
-        MP_VERBOSE(f, "%dx%d is smaller than %dx%d, passing through\n", mpi->w, mpi->h, MIN_SIZE, MIN_SIZE);
+    if (mpi->w < MB_MIN_SIZE || mpi->h < MB_MIN_SIZE) {
+        MP_VERBOSE(f, "%dx%d is smaller than %dx%d, passing through\n", mpi->w, mpi->h, MB_MIN_SIZE, MB_MIN_SIZE);
         return false;
     }
     struct mp_regular_imgfmt reg;
@@ -722,7 +734,7 @@ static void submit_interp(struct priv *p, struct mp_image *ref, double t, double
 
 static bool short_gap(double gap, double dfps)
 {
-    return dfps > 0 && gap < RATE_TOL / dfps;
+    return gap < RATE_TOL / dfps;
 }
 
 static bool no_interp(struct priv *p, double gap, double dfps)
@@ -759,17 +771,13 @@ static void emit_pair(struct mp_filter *f, struct mp_image *mpi)
                 step *= k;
             if (p->grid == MP_NOPTS_VALUE || p->grid <= prev->pts || p->grid > mpi->pts + step)
                 p->grid = prev->pts + step;
-            int count = 0;
             for (; p->grid < mpi->pts + step * 0.01; p->grid += step) {
                 double t = (p->grid - prev->pts) / gap;
-                if (t > 0.99) {
+                if (t > 0.99)
                     enqueue_ref(p, mpi, p->grid, step);
-                } else {
+                else
                     submit_interp(p, t < 0.5 ? prev : mpi, t, p->grid, step);
-                    count++;
-                }
             }
-            p->expect = MPMAX(1, count);
         }
         mp_image_unrefp(&p->prev);
         p->prev = mpi;
@@ -784,7 +792,6 @@ static void emit_pair(struct mp_filter *f, struct mp_image *mpi)
             double t = (double)k / n;
             submit_interp(p, t < 0.5 ? prev : mpi, t, prev->pts + gap * t, gap / n);
         }
-        p->expect = n - 1;
         mpi->pkt_duration = gap / n;
     }
     mp_image_unrefp(&p->prev);
@@ -849,16 +856,13 @@ static void handle_frame(struct mp_filter *f, struct mp_image *mpi)
     bool bypass = fast && p->fast;
     p->fast = fast;
     if (bypass) {
-        flush_pending(f);
-        mp_image_unrefp(&p->prev);
+        drop_pair(f);
         mpi->pkt_duration = gap;
         enqueue_real(p, mpi);
         return;
     }
-    if (p->prev && !fast && !pair_ok(p, lp, mpi->pts)) {
-        flush_pending(f);
-        mp_image_unrefp(&p->prev);
-    }
+    if (p->prev && !fast && !pair_ok(p, lp, mpi->pts))
+        drop_pair(f);
     if (!p->prev) {
         while (p->ngpu)
             finish_oldest_gpu(p);
@@ -868,8 +872,7 @@ static void handle_frame(struct mp_filter *f, struct mp_image *mpi)
         MP_VERBOSE(f, "cannot import decoder frames, copying them instead\n");
         mpi = download(p, mpi);
         if (!mpi) {
-            flush_pending(f);
-            mp_image_unrefp(&p->prev);
+            drop_pair(f);
             return;
         }
     }
@@ -917,15 +920,13 @@ static void f_process(struct mp_filter *f)
     }
 
     bool eof_queued = p->nout && p->outq[p->nout - 1].frame.type == MP_FRAME_EOF;
-    if (!eof_queued && p->ngpu < MB_MAX_PENDING && p->nout < MAXQ - 8 && mp_pin_out_request_data(p->in)) {
+    if (!eof_queued && p->ngpu < MB_MAX_PENDING && p->nout < MAXQ && mp_pin_out_request_data(p->in)) {
         struct mp_frame frame = mp_pin_out_read(p->in);
         if (frame.type == MP_FRAME_VIDEO) {
             handle_frame(f, frame.data);
         } else if (frame.type != MP_FRAME_NONE) {
-            if (frame.type == MP_FRAME_EOF) {
-                flush_pending(f);
-                mp_image_unrefp(&p->prev);
-            }
+            if (frame.type == MP_FRAME_EOF)
+                drop_pair(f);
             enqueue(p, frame, false);
         }
         mp_filter_internal_mark_progress(f);
@@ -948,13 +949,8 @@ static void set_factor(struct mp_filter *f, int v)
         return;
     p->factor = v;
     p->grid = MP_NOPTS_VALUE;
-    p->expect = 1;
     if (v < 0 && p->ctx) {
-        flush_pending(f);
-        while (p->ngpu)
-            finish_oldest_gpu(p);
-        mp_image_unrefp(&p->prev);
-        teardown(p);
+        stop_ctx(f);
         p->imgfmt = 0;
     }
     MP_VERBOSE(f, "factor %s\n", factor_str(v));
@@ -971,20 +967,20 @@ static bool f_command(struct mp_filter *f, struct mp_filter_command *cmd)
     }
     if (cmd->type != MP_FILTER_COMMAND_TEXT || strcmp(cmd->cmd, "factor") != 0 || !cmd->arg)
         return false;
-    static const int cycle[] = {2, 4, 8, 0, -1};
-    int v;
+    static const int cycle[] = {2, 4, MAX_FACTOR, 0, -1};
+    int n = MP_ARRAY_SIZE(cycle), v;
     if (!strcmp(cmd->arg, "cycle")) {
         int i = 0;
-        while (i < 4 && cycle[i] != p->factor)
+        while (i < n - 1 && cycle[i] != p->factor)
             i++;
-        v = cycle[(i + 1) % 5];
+        v = cycle[(i + 1) % n];
     } else if (!strcmp(cmd->arg, "auto")) {
         v = 0;
     } else if (!strcmp(cmd->arg, "off")) {
         v = -1;
     } else {
         v = atoi(cmd->arg);
-        if (v < 2 || v > 8)
+        if (v < 2 || v > MAX_FACTOR)
             return false;
     }
     set_factor(f, v);
@@ -1022,7 +1018,6 @@ static struct mp_filter *f_create(struct mp_filter *parent, void *options)
 #endif
     p->grid = MP_NOPTS_VALUE;
     p->last_pts = MP_NOPTS_VALUE;
-    p->expect = 1;
 
     struct mp_autoconvert *conv = mp_autoconvert_create(f);
     if (!conv) {
@@ -1055,7 +1050,7 @@ static struct mp_filter *f_create(struct mp_filter *parent, void *options)
 
 #define OPT_BASE_STRUCT struct opts
 static const m_option_t opts_list[] = {
-    {"factor", OPT_CHOICE(factor, {"auto", 0}), M_RANGE(2, 8)},
+    {"factor", OPT_CHOICE(factor, {"auto", 0}), M_RANGE(2, MAX_FACTOR)},
     {"max-fps", OPT_DOUBLE(max_fps), M_RANGE(0, 1000)},
     {"max-gap", OPT_DOUBLE(max_gap), M_RANGE(0, 10)},
     {"zerocopy", OPT_CHOICE(zerocopy, {"auto", ZC_AUTO}, {"drm", ZC_DRM}, {"vulkan", ZC_VULKAN}, {"no", ZC_NO})},

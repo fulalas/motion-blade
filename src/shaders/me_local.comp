@@ -48,9 +48,7 @@ void main()
             vec2 u = f[bidx(ivec2(bx + k % 5 - 2, by + k / 5 - 2), ivec2(bw, bh))].xy;
             if (u == cur.xy || u == best_v || any(lessThan(w + u, vec2(0.0))) || any(greaterThan(w + u, lim)))
                 continue;
-            float s = sad_y(Y, u);
-            float c = s + pc.f1.y * l1(u);
-            consider(u, s, c);
+            try_v(Y, u, 0.0);
         }
         float R = pc.f3.x, S = pc.f3.y;
         vec2 seed = best_v;
@@ -59,16 +57,12 @@ void main()
                 vec2 u = seed + vec2(dx, dy);
                 if (u == best_v || any(lessThan(w + u, vec2(0.0))) || any(greaterThan(w + u, lim)))
                     continue;
-                float s = sad_y(Y, u);
-                float c = s + pc.f1.y * l1(u);
-                consider(u, s, c);
+                try_v(Y, u, 0.0);
             }
         seed = best_v;
         for (int k = 0; k < 8; k++) {
             vec2 u = seed + vec2(DIR8[k]);
-            float s = sad_y(Y, u);
-            float c = s + pc.f1.y * l1(u);
-            consider(u, s, c);
+            try_v(Y, u, 0.0);
         }
         bool ok = best_s < pc.f2.x * s0 && s0 - best_s > pc.f2.y;
         if (ok && pc.i1.x != 0) {

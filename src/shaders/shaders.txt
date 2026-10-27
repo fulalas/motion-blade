@@ -1,0 +1,1 @@
+conf down norm me_full me_iter me_refine me_cross me_local tproj tsel vmed tsub illum ilmed cutdec bars agree gmed agspread

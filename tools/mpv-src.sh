@@ -17,5 +17,5 @@ mkdir -p "$d/shaders"
 find "$d" "$out/video/filter/vf_motionblade.c" -type l -delete 2>/dev/null || true
 ln -s "$root/src/vf_motionblade.c" "$out/video/filter/vf_motionblade.c"
 ln -s "$root/src/motionblade.h" "$root/src/motionblade_vk.c" "$d/"
-ln -s "$root"/src/shaders/*.comp "$root"/src/shaders/*.glsl "$root/src/shaders/meson.build" "$d/shaders/"
+ln -s "$root"/src/shaders/*.comp "$root"/src/shaders/*.glsl "$root/src/shaders/meson.build" "$root/src/shaders/shaders.txt" "$d/shaders/"
 echo "$out"
