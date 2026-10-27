@@ -9,6 +9,11 @@
 #include <libavutil/hwcontext_drm.h>
 #endif
 
+#if HAVE_VULKAN
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_vulkan.h>
+#endif
+
 #include "common/common.h"
 #include "common/msg.h"
 #include "filters/f_autoconvert.h"
@@ -57,6 +62,7 @@ struct priv {
     struct AVBufferRef *xframes;
     uint32_t fourcc;
     bool hw_failed, nozc;
+    struct AVBufferRef *vkdev, *vkframes;
 };
 
 static void clear_state(struct priv *p)
@@ -87,6 +93,8 @@ static void f_destroy(struct mp_filter *f)
     mb_destroy(p->ctx);
     p->ctx = NULL;
     av_buffer_unref(&p->xframes);
+    av_buffer_unref(&p->vkframes);
+    av_buffer_unref(&p->vkdev);
 }
 
 static mb_image to_mb(struct mp_image *mpi)
@@ -245,13 +253,158 @@ static bool push_hw(struct priv *p, struct mp_image *mpi)
     return true;
 }
 
+#if HAVE_VULKAN
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+static void vk_lock(void *opaque, uint32_t qf, uint32_t qi)
+{
+    AVHWDeviceContext *dc = opaque;
+    AVVulkanDeviceContext *vk = dc->hwctx;
+#if FF_API_VULKAN_SYNC_QUEUES
+    if (vk->lock_queue)
+        vk->lock_queue(dc, qf, qi);
+#else
+    (void)vk, (void)qf, (void)qi;
+#endif
+}
+
+static void vk_unlock(void *opaque, uint32_t qf, uint32_t qi)
+{
+    AVHWDeviceContext *dc = opaque;
+    AVVulkanDeviceContext *vk = dc->hwctx;
+#if FF_API_VULKAN_SYNC_QUEUES
+    if (vk->unlock_queue)
+        vk->unlock_queue(dc, qf, qi);
+#else
+    (void)vk, (void)qf, (void)qi;
+#endif
+}
+#pragma GCC diagnostic pop
+
+static mb_ctx *create_vk(struct mp_filter *f, struct mp_image *mpi, const mb_format *fmt)
+{
+    struct priv *p = f->priv;
+    AVHWFramesContext *hwfc = (AVHWFramesContext *)mpi->hwctx->data;
+    AVHWDeviceContext *dc = hwfc->device_ctx;
+    AVVulkanDeviceContext *vk = dc->hwctx;
+    int qf = -1;
+    for (int i = 0; i < vk->nb_qf && qf < 0; i++)
+        if (vk->qf[i].flags & VK_QUEUE_COMPUTE_BIT)
+            qf = vk->qf[i].idx;
+    for (int i = 0; i < vk->nb_qf && qf < 0; i++)
+        if (vk->qf[i].flags & VK_QUEUE_GRAPHICS_BIT)
+            qf = vk->qf[i].idx;
+    if (qf < 0 || !fmt->nv)
+        return NULL;
+    mb_vkdev d = {
+        .inst = vk->inst,
+        .pd = vk->phys_dev,
+        .dev = vk->act_dev,
+        .qf = qf,
+        .features = &vk->device_features,
+        .lock = vk_lock,
+        .unlock = vk_unlock,
+        .opaque = dc,
+    };
+    mb_ctx *c = mb_create_vk(fmt, &d);
+    if (!c)
+        return NULL;
+    p->vkdev = av_buffer_ref(hwfc->device_ref);
+    if (!p->vkdev || !mp_update_av_hw_frames_pool(&p->vkframes, hwfc->device_ref, IMGFMT_VULKAN, mpi->params.hw_subfmt,
+                                                  mpi->w, mpi->h, false)) {
+        mb_destroy(c);
+        av_buffer_unref(&p->vkdev);
+        return NULL;
+    }
+    return c;
+}
+
+static bool vk_frame(struct mp_image *mpi, mb_vkframe *vf, AVHWFramesContext **fc, AVVkFrame **vkf)
+{
+    *fc = (AVHWFramesContext *)mpi->hwctx->data;
+    *vkf = (AVVkFrame *)mpi->planes[0];
+    AVVulkanFramesContext *vkfc = (*fc)->hwctx;
+    vkfc->lock_frame(*fc, *vkf);
+    *vf = (mb_vkframe){0};
+    while (vf->nimg < 2 && (*vkf)->img[vf->nimg]) {
+        int i = vf->nimg++;
+        vf->img[i] = (*vkf)->img[i];
+        vf->layout[i] = (*vkf)->layout[i];
+        vf->sem[i] = (*vkf)->sem[i];
+        vf->sem_value[i] = (*vkf)->sem_value[i];
+        vf->qfam[i] = (*vkf)->queue_family[i];
+    }
+    return vf->nimg > 0;
+}
+
+static void vk_frame_done(const mb_vkframe *vf, AVHWFramesContext *fc, AVVkFrame *vkf, bool used, VkAccessFlags access)
+{
+    for (int i = 0; used && i < vf->nimg; i++) {
+        vkf->layout[i] = vf->layout[i];
+        vkf->sem_value[i] = vf->sem_value[i];
+        vkf->access[i] = access;
+    }
+    AVVulkanFramesContext *vkfc = fc->hwctx;
+    vkfc->unlock_frame(fc, vkf);
+}
+
+static bool push_vk(struct priv *p, struct mp_image *mpi)
+{
+    mb_vkframe vf;
+    AVHWFramesContext *fc;
+    AVVkFrame *vkf;
+    bool ok = vk_frame(mpi, &vf, &fc, &vkf) && mb_push_vk(p->ctx, &vf) == 0;
+    vk_frame_done(&vf, fc, vkf, ok, VK_ACCESS_TRANSFER_READ_BIT);
+    return ok;
+}
+
+static struct mp_image *submit_vk(struct priv *p, struct mp_image *ref, double t)
+{
+    AVFrame *fr = av_frame_alloc();
+    struct mp_image *out = NULL;
+    if (fr && av_hwframe_get_buffer(p->vkframes, fr, 0) >= 0)
+        out = mp_image_from_av_frame(fr);
+    av_frame_free(&fr);
+    if (!out)
+        return NULL;
+    mb_vkframe vf;
+    AVHWFramesContext *fc;
+    AVVkFrame *vkf;
+    bool ok = vk_frame(out, &vf, &fc, &vkf) && mb_submit_vk(p->ctx, t, &vf) == 0;
+    vk_frame_done(&vf, fc, vkf, ok, VK_ACCESS_TRANSFER_WRITE_BIT);
+    if (!ok) {
+        talloc_free(out);
+        return NULL;
+    }
+    mp_image_copy_attributes(out, ref);
+    return out;
+}
+#endif
+
+static bool is_hw(struct mp_image *mpi)
+{
+    return mpi->imgfmt == IMGFMT_VAAPI || mpi->imgfmt == IMGFMT_VULKAN;
+}
+
 static struct mp_image *download(struct priv *p, struct mp_image *mpi)
 {
-    if (mpi->imgfmt != IMGFMT_VAAPI)
+    if (!is_hw(mpi))
         return mpi;
     struct mp_image *sw = mp_image_hw_download(mpi, p->pool);
     talloc_free(mpi);
     return sw;
+}
+
+static bool push_gpu(struct priv *p, struct mp_image *mpi)
+{
+    if (mpi->imgfmt == IMGFMT_VAAPI)
+        return push_hw(p, mpi);
+#if HAVE_VULKAN
+    if (p->vkframes && push_vk(p, mpi))
+        return true;
+#endif
+    p->hw_failed = true;
+    return false;
 }
 
 static struct mp_image *to_drm(struct priv *p, struct mp_image *mpi)
@@ -270,7 +423,7 @@ static struct mp_image *to_drm(struct priv *p, struct mp_image *mpi)
 static bool setup(struct mp_filter *f, struct mp_image *mpi)
 {
     struct priv *p = f->priv;
-    int swfmt = mpi->imgfmt == IMGFMT_VAAPI ? mpi->params.hw_subfmt : mpi->imgfmt;
+    int swfmt = is_hw(mpi) ? mpi->params.hw_subfmt : mpi->imgfmt;
     if (p->imgfmt == swfmt && p->w == mpi->w && p->h == mpi->h)
         return !p->disabled;
     flush_pending(f);
@@ -281,6 +434,8 @@ static bool setup(struct mp_filter *f, struct mp_image *mpi)
     mb_destroy(p->ctx);
     p->ctx = NULL;
     av_buffer_unref(&p->xframes);
+    av_buffer_unref(&p->vkframes);
+    av_buffer_unref(&p->vkdev);
     p->disabled = true;
     p->imgfmt = swfmt;
     p->w = mpi->w;
@@ -307,15 +462,21 @@ static bool setup(struct mp_filter *f, struct mp_image *mpi)
         MP_WARN(f, "unsupported plane layout %s, passing through\n", mp_imgfmt_to_name(mpi->imgfmt));
         return false;
     }
-    p->ctx = mb_create(&fmt);
+#if HAVE_VULKAN
+    if (mpi->imgfmt == IMGFMT_VULKAN && !p->nozc)
+        p->ctx = create_vk(f, mpi, &fmt);
+#endif
+    if (!p->ctx)
+        p->ctx = mb_create(&fmt);
     if (!p->ctx) {
         MP_ERR(f, "could not initialize Vulkan interpolator, passing through\n");
         return false;
     }
     p->disabled = false;
-    setup_export(f, mpi, swfmt);
+    if (!p->vkframes)
+        setup_export(f, mpi, swfmt);
     MP_VERBOSE(f, "interpolating %dx%d %s%s\n", mpi->w, mpi->h, mp_imgfmt_to_name(swfmt),
-               p->xframes ? ", frames stay on the GPU" : "");
+               p->xframes || p->vkframes ? ", frames stay on the GPU" : "");
     return true;
 }
 
@@ -326,19 +487,24 @@ static void enqueue(struct priv *p, struct mp_frame frame, bool gpu)
         p->ngpu++;
 }
 
+static bool gpu_synced(const struct qent *e)
+{
+    return ((struct mp_image *)e->frame.data)->imgfmt == IMGFMT_VULKAN;
+}
+
 static void finish_oldest_gpu(struct priv *p)
 {
     for (int i = 0; i < p->nout; i++) {
         struct qent *e = &p->outq[i];
         if (!e->gpu)
             continue;
-        if (p->xframes) {
+        if (p->xframes && !gpu_synced(e)) {
             mb_dmabuf x;
             struct mp_image *ref = e->frame.data;
             struct mp_image *img = mb_retrieve_dmabuf(p->ctx, &x) >= 0 ? drm_image(p, &x, ref) : NULL;
             talloc_free(ref);
             e->frame = img ? MAKE_FRAME(MP_FRAME_VIDEO, img) : MP_NO_FRAME;
-        } else {
+        } else if (!gpu_synced(e)) {
             mb_image dst = to_mb(e->frame.data);
             mb_retrieve(p->ctx, &dst);
         }
@@ -364,8 +530,17 @@ static double display_fps(struct mp_filter *f)
     return p->dfps;
 }
 
+static bool vk_out(struct priv *p)
+{
+    return p->vkframes && !p->hw_failed;
+}
+
 static void enqueue_real(struct priv *p, struct mp_image *r)
 {
+    if (r->imgfmt == IMGFMT_VULKAN && vk_out(p)) {
+        enqueue(p, MAKE_FRAME(MP_FRAME_VIDEO, r), false);
+        return;
+    }
     struct mp_image *m = map_drm(p, r);
     if (m) {
         talloc_free(r);
@@ -387,22 +562,33 @@ static void enqueue_ref(struct priv *p, struct mp_image *img, double pts, double
     enqueue_real(p, r);
 }
 
+static struct mp_image *submit_out(struct priv *p, struct mp_image *ref, double t)
+{
+#if HAVE_VULKAN
+    if (vk_out(p))
+        return submit_vk(p, ref, t);
+#endif
+    struct mp_image *out = p->xframes ? mp_image_new_dummy_ref(ref) : mp_image_pool_get(p->pool, ref->imgfmt, ref->w, ref->h);
+    if (out && mb_submit(p->ctx, t) == 0) {
+        mp_image_copy_attributes(out, ref);
+        return out;
+    }
+    talloc_free(out);
+    return NULL;
+}
+
 static void submit_interp(struct priv *p, struct mp_image *ref, double t, double pts, double dur)
 {
-    struct mp_image *out = p->xframes ? mp_image_new_dummy_ref(ref) : mp_image_pool_get(p->pool, ref->imgfmt, ref->w, ref->h);
-    if (out) {
-        mp_image_copy_attributes(out, ref);
-        while (mb_pending(p->ctx) >= MB_MAX_PENDING && p->ngpu)
-            finish_oldest_gpu(p);
-        if (mb_submit(p->ctx, t) == 0) {
-            out->pts = pts;
-            out->pkt_duration = dur;
-            enqueue(p, MAKE_FRAME(MP_FRAME_VIDEO, out), true);
-            return;
-        }
-        talloc_free(out);
+    while (mb_pending(p->ctx) >= MB_MAX_PENDING && p->ngpu)
+        finish_oldest_gpu(p);
+    struct mp_image *out = submit_out(p, ref, t);
+    if (!out) {
+        enqueue_ref(p, ref, pts, dur);
+        return;
     }
-    enqueue_ref(p, ref, pts, dur);
+    out->pts = pts;
+    out->pkt_duration = dur;
+    enqueue(p, MAKE_FRAME(MP_FRAME_VIDEO, out), true);
 }
 
 static bool short_gap(double gap, double dfps)
@@ -478,7 +664,7 @@ static void flush_pending(struct mp_filter *f)
 static void handle_frame(struct mp_filter *f, struct mp_image *mpi)
 {
     struct priv *p = f->priv;
-    if (mpi->imgfmt == IMGFMT_VAAPI && p->hw_failed) {
+    if (is_hw(mpi) && p->hw_failed) {
         mpi = download(p, mpi);
         if (!mpi)
             return;
@@ -512,7 +698,7 @@ static void handle_frame(struct mp_filter *f, struct mp_image *mpi)
             finish_oldest_gpu(p);
         mb_reset(p->ctx);
     }
-    if (mpi->imgfmt == IMGFMT_VAAPI && !push_hw(p, mpi)) {
+    if (is_hw(mpi) && !push_gpu(p, mpi)) {
         MP_VERBOSE(f, "cannot import decoder frames, copying them instead\n");
         mpi = download(p, mpi);
         if (!mpi) {
@@ -520,7 +706,7 @@ static void handle_frame(struct mp_filter *f, struct mp_image *mpi)
             return;
         }
     }
-    if (mpi->imgfmt != IMGFMT_VAAPI) {
+    if (!is_hw(mpi)) {
         mb_image src = to_mb(mpi);
         mb_push(p->ctx, &src);
     }
@@ -541,7 +727,7 @@ static bool emit_head(struct mp_filter *f, bool block)
         return false;
     struct qent *h = &p->outq[0];
     if (h->gpu) {
-        if (!block && !mb_ready(p->ctx))
+        if (!block && !gpu_synced(h) && !mb_ready(p->ctx))
             return false;
         finish_oldest_gpu(p);
     }
@@ -629,6 +815,12 @@ static struct mp_filter *f_create(struct mp_filter *parent, void *options)
         mp_autoconvert_add_imgfmt(conv, IMGFMT_VAAPI, IMGFMT_P010);
     }
 #endif
+#if HAVE_VULKAN
+    if (!p->nozc) {
+        mp_autoconvert_add_imgfmt(conv, IMGFMT_VULKAN, IMGFMT_NV12);
+        mp_autoconvert_add_imgfmt(conv, IMGFMT_VULKAN, IMGFMT_P010);
+    }
+#endif
     mp_pin_connect(conv->f->pins[0], f->ppins[0]);
     p->in = conv->f->pins[1];
     return f;
@@ -648,7 +840,7 @@ const struct mp_user_filter_entry vf_motionblade = {
         .name = "motionblade",
         .priv_size = sizeof(OPT_BASE_STRUCT),
         .priv_defaults = &(const struct opts){
-            .factor = 0,
+            .factor = 2,
             .max_fps = 0,
             .max_gap = 0.25,
         },

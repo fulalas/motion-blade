@@ -7,18 +7,21 @@ Real-time motion interpolation for `mpv` on any GPU with Vulkan support. Increas
 
 The current options available for PC have at least one drawback:
 
-- SVP: paid and its engine has lower quality (below).
 - RIFE: a heavy neural network, and slightly lower quality.
-- NVIDIA Optical Flow: good quality, but closed source and needs at least an NVIDIA Turing (GTX 1630 or MX450).
 - AMD Fluid Motion Frames: closed source and officially only Windows is supported.
 - AMD FSR 3 frame generation: made for games; with video frames alone its quality is much lower.
+- NVIDIA Optical Flow: good quality, but closed source and needs at least an NVIDIA Turing (GTX 1630 or MX450).
 - Lossless Scaling: paid, closed source, officially only Windows is supported, and lower quality.
+- SVP: paid and its engine has lower quality (below).
 
 Motion Blade is free and open source, and runs in real time on any vendor, even integrated GPUs like AMD 780M.
 
 ## Quality
 
-Every other frame of 16 test clips dropped, rebuilt and compared with the real one (mean, higher is better):
+Generated frames compared with the real ones (higher is better):
+
+- PSNR (dB): how close the pixels are.
+- SSIM (0 to 1): how alike edges, textures and detail look. Blur and double images lower it.
 
 | | PSNR | SSIM |
 |---|---|---|
@@ -33,25 +36,24 @@ Every other frame of 16 test clips dropped, rebuilt and compared with the real o
 
 Block motion search in both directions, vectors projected to the in-between time, then each
 pixel blends the best nearby vectors. It handles hidden and revealed areas, scene cuts (falls
-back to the nearest frame), light changes (flashes, sirens) and LED walls switching colours.
-Above 1080p the motion analysis runs at half resolution; the final image is always full resolution.
+back to the nearest frame), light changes (flashes, sirens). Above 1080p the motion analysis
+runs at half resolution; the final image is always full resolution.
 
 ## Build
 
-Needs the mpv build dependencies (meson, ninja, ffmpeg, libplacebo, etc), Vulkan 1.1 headers
-and driver, and `glslc` (from shaderc).
+Motion Blade builds on top of mpv, which is a git submodule, patched at build time
+(`patches/mpv.patch`). Arguments to the first `./build.sh` go to `meson setup`.
+
+It requires mpv build dependencies (meson, ninja, ffmpeg, libplacebo, etc), Vulkan headers
+and `glslc` (from shaderc).
 
 ```sh
 ./build.sh
 ```
 
-The player is `build/mpv/mpv`. mpv 0.41.0 is a git submodule, patched at build time
-(`patches/mpv.patch`). Arguments to the first `./build.sh` go to `meson setup`.
-
 Windows (static, cross-built from Linux): extract
 [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (UCRT, x86_64) into `winbuild/`, then run
-`./build-windows.sh`. It writes `winbuild/motionblade-windows-x86_64.zip`, which only needs the GPU
-driver.
+`./build-windows.sh`. It writes `winbuild/motionblade-windows-x86_64.zip`.
 
 ## Use
 
@@ -59,18 +61,19 @@ driver.
 mpv --vf=motionblade --hwdec=auto video.mp4
 ```
 
-Options: `--vf=motionblade=factor=auto:max-fps=0:max-gap=0.25`
+Options: `--vf=motionblade=factor=2:max-fps=0:max-gap=0.25`
 
-- `factor`: `auto` (default) matches the display refresh rate; a number (2-8) multiplies the
-  frame rate instead.
-- `max-fps`: skip sources faster than this (0 = never skip).
-- `max-gap`: skip timestamp gaps longer than this (seconds).
+- `factor`: a number from 2 to 8 to multiply the frame rate; `auto` matches the display
+  refresh rate instead (default 2).
+- `max-fps`: skip sources faster than this (default 0 = never skip).
+- `max-gap`: skip timestamp gaps longer than this, in seconds (default 0.25).
 
-`Ctrl+m` cycles the factor: 2, 3, 4, off, auto.
+`Ctrl+m` cycles the factor: 2, 4, 8 and auto. Other factors are set with the `factor` option.
 
-Any `--hwdec` mode works. On Linux with VA-API, frames stay on the GPU from decoder to display
-(`MOTIONBLADE_NO_ZEROCOPY=1` turns this off). Black bars are skipped. Formats: 8/10/16-bit 4:2:0,
-4:2:2, 4:4:4, planar or NV12/P010.
+Any `--hwdec` mode works. With VA-API (`--hwdec=vaapi`) or Vulkan (`--gpu-api=vulkan --hwdec=vulkan`,
+frames stay on the GPU so less CPU use. If a driver shows wrong colours or glitches
+with this, `MOTIONBLADE_NO_ZEROCOPY=1` goes back to copying.
+Formats: 8/10/16-bit 4:2:0, 4:2:2, 4:4:4, planar or NV12/P010.
 
 ## Tests
 

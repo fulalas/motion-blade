@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <vulkan/vulkan.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,7 +50,30 @@ typedef struct mb_dmabuf_in {
     void *opaque;
 } mb_dmabuf_in;
 
+typedef struct mb_vkdev {
+    VkInstance inst;
+    VkPhysicalDevice pd;
+    VkDevice dev;
+    uint32_t qf;
+    const VkPhysicalDeviceFeatures2 *features;
+    void (*lock)(void *opaque, uint32_t qf, uint32_t qi);
+    void (*unlock)(void *opaque, uint32_t qf, uint32_t qi);
+    void *opaque;
+} mb_vkdev;
+
+typedef struct mb_vkframe {
+    VkImage img[2];
+    int nimg;
+    VkImageLayout layout[2];
+    VkSemaphore sem[2];
+    uint64_t sem_value[2];
+    uint32_t qfam[2];
+} mb_vkframe;
+
 mb_ctx *mb_create(const mb_format *fmt);
+mb_ctx *mb_create_vk(const mb_format *fmt, const mb_vkdev *d);
+int mb_push_vk(mb_ctx *c, mb_vkframe *in);
+int mb_submit_vk(mb_ctx *c, double t, mb_vkframe *out);
 void mb_destroy(mb_ctx *c);
 void mb_reset(mb_ctx *c);
 void mb_push(mb_ctx *c, const mb_image *src);

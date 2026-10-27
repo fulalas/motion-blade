@@ -92,6 +92,8 @@ typedef struct {
     VkDeviceMemory mem;
     VkImageView view;
     int w, h;
+    VkImageAspectFlags aspect;
+    VkImageLayout layout;
 } vimg;
 
 typedef struct {
@@ -223,6 +225,11 @@ struct mb_ctx {
     int hist_clear;
     int ok;
     uint32_t sg_size;
+    mb_vkdev vd;
+    vimg vy, vc;
+    VkSemaphore wsem[4], ssem[4];
+    uint64_t wval[4], sval[4];
+    int nwait, nsig;
 };
 
 #define S(c) (&(c)->sl[(c)->cur])
@@ -501,6 +508,16 @@ static int cmd_begin(mb_ctx *c)
     return 0;
 }
 
+static VkResult qsubmit(mb_ctx *c, const VkSubmitInfo *si, VkFence f)
+{
+    if (c->vd.lock)
+        c->vd.lock(c->vd.opaque, c->qf, 0);
+    VkResult r = vkQueueSubmit(c->q, 1, si, f);
+    if (c->vd.unlock)
+        c->vd.unlock(c->vd.opaque, c->qf, 0);
+    return r;
+}
+
 static int cmd_end(mb_ctx *c, int has_out)
 {
     if (!c->recording)
@@ -511,7 +528,21 @@ static int cmd_end(mb_ctx *c, int has_out)
     VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &sl->cb;
-    if (vkEndCommandBuffer(sl->cb) != VK_SUCCESS || vkQueueSubmit(c->q, 1, &si, sl->fence) != VK_SUCCESS) {
+    VkPipelineStageFlags ws[4];
+    for (int i = 0; i < c->nwait; i++)
+        ws[i] = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkTimelineSemaphoreSubmitInfo ts = {VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO, NULL, (uint32_t)c->nwait, c->wval,
+                                        (uint32_t)c->nsig, c->sval};
+    if (c->nwait || c->nsig) {
+        si.pNext = &ts;
+        si.waitSemaphoreCount = (uint32_t)c->nwait;
+        si.pWaitSemaphores = c->wsem;
+        si.pWaitDstStageMask = ws;
+        si.signalSemaphoreCount = (uint32_t)c->nsig;
+        si.pSignalSemaphores = c->ssem;
+    }
+    c->nwait = c->nsig = 0;
+    if (vkEndCommandBuffer(sl->cb) != VK_SUCCESS || qsubmit(c, &si, sl->fence) != VK_SUCCESS) {
         fprintf(stderr, "motionblade: could not submit command buffer\n");
         c->ok = 0;
         return -1;
@@ -521,6 +552,12 @@ static int cmd_end(mb_ctx *c, int has_out)
     if (has_out)
         c->fifo[c->fifo_n++] = c->cur;
     return 0;
+}
+
+static void idle(mb_ctx *c)
+{
+    for (int i = 0; i < NSLOT; i++)
+        slot_wait(c, i);
 }
 
 static double cmd_submit(mb_ctx *c)
@@ -558,7 +595,7 @@ static void copy_i2b(mb_ctx *c, const vimg *im, const vbuf *b, size_t off)
     vkCmdCopyImageToBuffer(S(c)->cb, im->img, VK_IMAGE_LAYOUT_GENERAL, b->buf, 1, &r);
 }
 
-static int vk_init(mb_ctx *c)
+static int pick_device(mb_ctx *c)
 {
     VkApplicationInfo ai = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "motionblade", 1, "motionblade", 1, VK_API_VERSION_1_2};
     VkInstanceCreateInfo ii = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, NULL, 0, &ai};
@@ -586,6 +623,38 @@ static int vk_init(mb_ctx *c)
     if (best < 0)
         return -1;
     c->pd = pds[best];
+    return 0;
+}
+
+static int sg_enabled(const mb_vkdev *d)
+{
+    for (const VkBaseInStructure *b = d->features ? d->features->pNext : NULL; b; b = b->pNext) {
+        if (b->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES &&
+            ((const VkPhysicalDeviceVulkan13Features *)b)->subgroupSizeControl)
+            return 1;
+        if (b->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES &&
+            ((const VkPhysicalDeviceSubgroupSizeControlFeatures *)b)->subgroupSizeControl)
+            return 1;
+    }
+    return 0;
+}
+
+static int vk_setup(mb_ctx *c);
+
+static int vk_init(mb_ctx *c, const mb_vkdev *d)
+{
+    if (d) {
+        c->vd = *d;
+        c->inst = d->inst;
+        c->pd = d->pd;
+        c->dev = d->dev;
+        if (!d->features || !d->features->features.shaderStorageImageExtendedFormats) {
+            fprintf(stderr, "motionblade: the player's Vulkan device lacks shaderStorageImageExtendedFormats\n");
+            return -1;
+        }
+    } else if (pick_device(c) < 0) {
+        return -1;
+    }
     VkPhysicalDeviceProperties pp;
     vkGetPhysicalDeviceProperties(c->pd, &pp);
     c->ts_period = pp.limits.timestampPeriod;
@@ -598,7 +667,9 @@ static int vk_init(mb_ctx *c)
     VkQueueFamilyProperties qfp[16];
     vkGetPhysicalDeviceQueueFamilyProperties(c->pd, &nq, qfp);
     c->qf = UINT32_MAX;
-    for (int pass = 0; pass < 2 && c->qf == UINT32_MAX; pass++)
+    if (d && d->qf < nq && (qfp[d->qf].queueFlags & VK_QUEUE_COMPUTE_BIT) && qfp[d->qf].timestampValidBits)
+        c->qf = d->qf;
+    for (int pass = 0; pass < 2 && c->qf == UINT32_MAX && !d; pass++)
         for (uint32_t i = 0; i < nq; i++) {
             VkQueueFlags f = qfp[i].queueFlags;
             if ((f & VK_QUEUE_COMPUTE_BIT) && qfp[i].timestampValidBits && (pass || !(f & VK_QUEUE_GRAPHICS_BIT))) {
@@ -606,8 +677,11 @@ static int vk_init(mb_ctx *c)
                 break;
             }
         }
-    if (c->qf == UINT32_MAX)
+    if (c->qf == UINT32_MAX) {
+        if (d)
+            fprintf(stderr, "motionblade: queue family %u cannot run compute with timestamps\n", d->qf);
         return -1;
+    }
     uint32_t next = 0;
     vkEnumerateDeviceExtensionProperties(c->pd, NULL, &next, NULL);
     VkExtensionProperties *exts = calloc(next ? next : 1, sizeof(*exts));
@@ -647,7 +721,7 @@ static int vk_init(mb_ctx *c)
         return -1;
     }
     uint32_t sg_min = has_sgctl ? sgc.minSubgroupSize : sgp.subgroupSize;
-    int can_req = has_sgctl && (sgc.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT);
+    int can_req = has_sgctl && (!d || sg_enabled(d)) && (sgc.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT);
     if (sg_min >= 16 && can_req && sgc.minSubgroupSize <= 32 && sgc.maxSubgroupSize >= 32 &&
         sgc.maxComputeWorkgroupSubgroups >= 2) {
         c->sg_size = 32;
@@ -659,6 +733,11 @@ static int vk_init(mb_ctx *c)
         c->sg_size = 16;
     }
 
+    if (d) {
+        if (verbose)
+            fprintf(stderr, "motionblade: sharing the player's Vulkan device, queue family %u\n", c->qf);
+        return vk_setup(c);
+    }
     float pri = 1;
     VkDeviceQueueGlobalPriorityCreateInfoKHR gp = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR, NULL,
                                                    VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR};
@@ -708,16 +787,25 @@ static int vk_init(mb_ctx *c)
     }
     if (verbose)
         fprintf(stderr, "motionblade: queue family %u%s\n", c->qf, res == VK_SUCCESS ? ", low priority" : "");
-    vkGetDeviceQueue(c->dev, c->qf, 0, &c->q);
-    c->pushdesc = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->dev, "vkCmdPushDescriptorSetKHR");
     if (c->has_dmabuf) {
         c->getfd = (PFN_vkGetMemoryFdKHR)vkGetDeviceProcAddr(c->dev, "vkGetMemoryFdKHR");
         c->getfdprops = (PFN_vkGetMemoryFdPropertiesKHR)vkGetDeviceProcAddr(c->dev, "vkGetMemoryFdPropertiesKHR");
         if (!c->getfdprops)
             c->has_mod = 0;
     }
+    return vk_setup(c);
+}
+
+static int vk_setup(mb_ctx *c)
+{
+    vkGetDeviceQueue(c->dev, c->qf, 0, &c->q);
+    c->pushdesc = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->dev, "vkCmdPushDescriptorSetKHR");
     if (!c->pushdesc)
+        c->pushdesc = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->dev, "vkCmdPushDescriptorSet");
+    if (!c->pushdesc) {
+        fprintf(stderr, "motionblade: the Vulkan device lacks push descriptors\n");
         return -1;
+    }
     VkCommandPoolCreateInfo cpi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, NULL,
                                    VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, c->qf};
     VK(vkCreateCommandPool(c->dev, &cpi, NULL, &c->cp));
@@ -1080,22 +1168,47 @@ static void build_levels(mb_ctx *c, int k)
     }
 }
 
-static void copy_overlap(mb_ctx *c, const vimg *from, int fx, int fy, vimg *to, int tx, int ty)
+static VkImageSubresourceLayers sub(const vimg *im)
+{
+    return (VkImageSubresourceLayers){im->aspect ? im->aspect : VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+}
+
+static VkImageLayout lay(const vimg *im)
+{
+    return im->layout ? im->layout : VK_IMAGE_LAYOUT_GENERAL;
+}
+
+static void copy_rect(mb_ctx *c, const vimg *from, int fx, int fy, const vimg *to, int tx, int ty, int w, int h)
+{
+    VkImageCopy r = {sub(from), {fx, fy, 0}, sub(to), {tx, ty, 0}, {(uint32_t)w, (uint32_t)h, 1}};
+    vkCmdCopyImage(S(c)->cb, from->img, lay(from), to->img, lay(to), 1, &r);
+}
+
+static void copy_overlap(mb_ctx *c, const vimg *from, int fx, int fy, const vimg *to, int tx, int ty)
 {
     int x0 = fx > tx ? fx : tx, y0 = fy > ty ? fy : ty;
     int x1 = fx + from->w < tx + to->w ? fx + from->w : tx + to->w;
     int y1 = fy + from->h < ty + to->h ? fy + from->h : ty + to->h;
-    if (x1 <= x0 || y1 <= y0)
-        return;
-    VkImageCopy r = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {x0 - fx, y0 - fy, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-                     {x0 - tx, y0 - ty, 0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0), 1}};
-    vkCmdCopyImage(S(c)->cb, from->img, VK_IMAGE_LAYOUT_GENERAL, to->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
+    if (x1 > x0 && y1 > y0)
+        copy_rect(c, from, x0 - fx, y0 - fy, to, x0 - tx, y0 - ty, x1 - x0, y1 - y0);
+}
+
+static int bar_rects(const mb_ctx *c, int i, int W, int H, int rect[4][4])
+{
+    int sx = i ? c->fmt.cshift_x : 0, sy = i ? c->fmt.cshift_y : 0;
+    int ax = c->x0 >> sx, ay = c->y0 >> sy, aw = i ? c->cw : c->fmt.w, ah = i ? c->ch : c->fmt.h;
+    int all[4][4] = {{0, 0, W, ay}, {0, ay + ah, W, H - ay - ah}, {0, ay, ax, ah}, {ax + aw, ay, W - ax - aw, ah}};
+    int n = 0;
+    for (int k = 0; k < 4; k++)
+        if (all[k][2] > 0 && all[k][3] > 0)
+            memcpy(rect[n++], all[k], sizeof(all[k]));
+    return n;
 }
 
 static int set_crop(mb_ctx *c, int x0, int y0, int w, int h)
 {
     cmd_end(c, 0);
-    vkQueueWaitIdle(c->q);
+    idle(c);
     gframe old[NFR];
     memcpy(old, c->fr, sizeof(old));
     memset(c->fr, 0, sizeof(c->fr));
@@ -1312,14 +1425,9 @@ static void xfill_bars_gpu(mb_ctx *c, xbuf *x)
         return;
     const vimg *im[2] = {&c->bgy, &c->bgc};
     for (int i = 0; i < 2; i++) {
-        int sx = i ? c->fmt.cshift_x : 0, sy = i ? c->fmt.cshift_y : 0;
-        int W = im[i]->w, H = im[i]->h, ax = c->x0 >> sx, ay = c->y0 >> sy;
-        int aw = i ? c->cw : c->fmt.w, ah = i ? c->ch : c->fmt.h;
         uint32_t px = (uint32_t)((i ? 2 : 1) * c->bps);
-        int rect[4][4] = {{0, 0, W, ay}, {0, ay + ah, W, H - ay - ah}, {0, ay, ax, ah}, {ax + aw, ay, W - ax - aw, ah}};
-        for (int k = 0; k < 4; k++) {
-            if (rect[k][2] <= 0 || rect[k][3] <= 0)
-                continue;
+        int rect[4][4], n = bar_rects(c, i, im[i]->w, im[i]->h, rect);
+        for (int k = 0; k < n; k++) {
             VkBufferImageCopy r = {c->xoff[i] + (size_t)rect[k][1] * c->xpitch[i] + (size_t)rect[k][0] * px,
                                    (uint32_t)(c->xpitch[i] / px), 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                                    {rect[k][0], rect[k][1], 0}, {(uint32_t)rect[k][2], (uint32_t)rect[k][3], 1}};
@@ -1444,17 +1552,26 @@ static void reset_flags(mb_ctx *c)
         f[i] = 1;
 }
 
+static int plane_pair_init(mb_ctx *c, vimg *y, vimg *uv)
+{
+    if (y->img)
+        return 0;
+    if (img_create(c, y, c->full.w, c->full.h, plane_fmt(c, 1)) < 0 ||
+        img_create(c, uv, cdim(c->full.w, c->full.cshift_x), cdim(c->full.h, c->full.cshift_y), plane_fmt(c, 2)) < 0)
+        return -1;
+    to_general(c, y);
+    to_general(c, uv);
+    return 0;
+}
+
 static int bg_init(mb_ctx *c)
 {
-    if (c->bgy.img)
+    if (c->bflags.buf)
         return 0;
-    if (img_create(c, &c->bgy, c->full.w, c->full.h, plane_fmt(c, 1)) < 0 ||
-        img_create(c, &c->bgc, cdim(c->full.w, c->full.cshift_x), cdim(c->full.h, c->full.cshift_y), plane_fmt(c, 2)) < 0 ||
+    if (plane_pair_init(c, &c->bgy, &c->bgc) < 0 ||
         buf_create(c, &c->bflags, (VkDeviceSize)(c->full.w + c->full.h) * 4, 1) < 0)
         return -1;
     reset_flags(c);
-    to_general(c, &c->bgy);
-    to_general(c, &c->bgc);
     return 0;
 }
 
@@ -1470,6 +1587,8 @@ static void gpu_bars(mb_ctx *c)
     track_bars(c, &b);
     reset_flags(c);
 }
+
+static void push_planes(mb_ctx *c, const vimg *py, const vimg *pu);
 
 int mb_push_dmabuf(mb_ctx *c, const mb_dmabuf_in *in)
 {
@@ -1493,9 +1612,19 @@ int mb_push_dmabuf(mb_ctx *c, const mb_dmabuf_in *in)
         c->ok = 0;
         return -1;
     }
+    ext_own(c, py, pu, 1);
+    push_planes(c, py, pu);
+    ext_own(c, py, pu, 0);
+    host_barrier(c);
+    add_release(c, in);
+    push_end(c);
+    return 0;
+}
+
+static void push_planes(mb_ctx *c, const vimg *py, const vimg *pu)
+{
     gframe *f = &c->fr[c->ib];
     int sx = c->fmt.cshift_x, sy = c->fmt.cshift_y;
-    ext_own(c, py, pu, 1);
     copy_overlap(c, py, -c->x0, -c->y0, &f->y, 0, 0);
     copy_overlap(c, pu, -(c->x0 >> sx), -(c->y0 >> sy), &f->c1, 0, 0);
     if (cropped(c) && (c->bg_ver != c->bars_ver || (c->bf_tick & 15) == 0)) {
@@ -1504,6 +1633,15 @@ int mb_push_dmabuf(mb_ctx *c, const mb_dmabuf_in *in)
         c->bg_ver = c->bars_ver;
     }
     if (c->p.bars && !c->bf_pending && (c->bf_tick++ & 3) == 0) {
+        if (!py->view) {
+            if (plane_pair_init(c, &c->vy, &c->vc) < 0)
+                return;
+            copy_overlap(c, py, 0, 0, &c->vy, 0, 0);
+            copy_overlap(c, pu, 0, 0, &c->vc, 0, 0);
+            barrier(c);
+            py = &c->vy;
+            pu = &c->vc;
+        }
         pcs pc = {{c->full.w, c->full.h, sx, sy}, {24.0f / 255.0f, 10.0f / 255.0f}};
         vres r[3] = {{py, NULL}, {pu, NULL}, {NULL, &c->bflags}};
         dispatch(c, &c->p_bars, r, &pc, (uint32_t)(pu->w + 15) / 16, (uint32_t)(pu->h + 15) / 16);
@@ -1511,11 +1649,94 @@ int mb_push_dmabuf(mb_ctx *c, const mb_dmabuf_in *in)
         c->bf_slot = c->cur;
         c->bf_serial = c->serial + 1;
     }
-    ext_own(c, py, pu, 0);
-    host_barrier(c);
-    add_release(c, in);
+}
+
+static vimg frame_plane(const mb_ctx *c, const mb_vkframe *f, int p, VkImageLayout layout)
+{
+    vimg im = {.img = f->img[f->nimg == 2 ? p : 0], .layout = layout};
+    im.w = p ? cdim(c->full.w, c->full.cshift_x) : c->full.w;
+    im.h = p ? cdim(c->full.h, c->full.cshift_y) : c->full.h;
+    im.aspect = f->nimg == 2 ? VK_IMAGE_ASPECT_COLOR_BIT : p ? VK_IMAGE_ASPECT_PLANE_1_BIT : VK_IMAGE_ASPECT_PLANE_0_BIT;
+    return im;
+}
+
+static int frame_ok(const mb_ctx *c, const mb_vkframe *f)
+{
+    if (!c->vd.dev || !c->fmt.nv || f->nimg < 1 || f->nimg > 2 || c->nwait + f->nimg > 4 || c->nsig + f->nimg > 4)
+        return 0;
+    for (int i = 0; i < f->nimg; i++)
+        if (f->qfam[i] != VK_QUEUE_FAMILY_IGNORED && f->qfam[i] != c->qf)
+            return 0;
+    return 1;
+}
+
+static void frame_begin(mb_ctx *c, mb_vkframe *f, VkImageLayout layout, VkAccessFlags access)
+{
+    VkImageMemoryBarrier ib[2];
+    for (int i = 0; i < f->nimg; i++) {
+        ib[i] = (VkImageMemoryBarrier){VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        ib[i].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        ib[i].dstAccessMask = access;
+        ib[i].oldLayout = f->layout[i];
+        ib[i].newLayout = layout;
+        ib[i].srcQueueFamilyIndex = ib[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        ib[i].image = f->img[i];
+        ib[i].subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        c->wsem[c->nwait] = f->sem[i];
+        c->wval[c->nwait++] = f->sem_value[i];
+    }
+    vkCmdPipelineBarrier(S(c)->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0,
+                         NULL, (uint32_t)f->nimg, ib);
+}
+
+static void frame_end(mb_ctx *c, mb_vkframe *f, VkImageLayout layout)
+{
+    for (int i = 0; i < f->nimg; i++) {
+        f->layout[i] = layout;
+        c->ssem[c->nsig] = f->sem[i];
+        c->sval[c->nsig++] = ++f->sem_value[i];
+    }
+    VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+                          VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
+    vkCmdPipelineBarrier(S(c)->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL,
+                         0, NULL);
+}
+
+int mb_push_vk(mb_ctx *c, mb_vkframe *in)
+{
+    if (!c->ok || !frame_ok(c, in))
+        return -1;
+    poll_slots(c);
+    c->gpu_in = 1;
+    gpu_bars(c);
+    if (!c->ok || push_begin(c) < 0)
+        return -1;
+    if (bg_init(c) < 0) {
+        c->ok = 0;
+        return -1;
+    }
+    frame_begin(c, in, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT);
+    vimg py = frame_plane(c, in, 0, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    vimg pu = frame_plane(c, in, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    push_planes(c, &py, &pu);
+    frame_end(c, in, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     push_end(c);
-    return 0;
+    return cmd_end(c, 0);
+}
+
+static void vk_copy_out(mb_ctx *c, mb_vkframe *out)
+{
+    frame_begin(c, out, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT);
+    const vimg *bg[2] = {&c->bgy, &c->bgc}, *im[2] = {&c->oy, &c->oc1};
+    for (int i = 0; i < 2; i++) {
+        vimg dst = frame_plane(c, out, i, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        int rect[4][4], n = cropped(c) ? bar_rects(c, i, dst.w, dst.h, rect) : 0;
+        for (int k = 0; k < n; k++)
+            copy_rect(c, bg[i], rect[k][0], rect[k][1], &dst, rect[k][0], rect[k][1], rect[k][2], rect[k][3]);
+        int sx = i ? c->fmt.cshift_x : 0, sy = i ? c->fmt.cshift_y : 0;
+        copy_rect(c, im[i], 0, 0, &dst, c->x0 >> sx, c->y0 >> sy, im[i]->w, im[i]->h);
+    }
+    frame_end(c, out, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 }
 
 void mb_flush(mb_ctx *c)
@@ -1818,12 +2039,12 @@ int mb_export_image(mb_ctx *c, const mb_image *src, mb_dmabuf *out)
     return 0;
 }
 
-int mb_submit(mb_ctx *c, double t)
+int mb_submit_vk(mb_ctx *c, double t, mb_vkframe *out)
 {
     int la = c->p.la && !c->eos && c->have_prev && c->me_valid;
-    if (!c->ok || c->nfr < 2 || c->fifo_n >= MB_MAX_PENDING || (c->p.la && !c->eos && !la))
+    if (!c->ok || c->nfr < 2 || c->fifo_n >= MB_MAX_PENDING || (c->p.la && !c->eos && !la) || (out && !frame_ok(c, out)))
         return -1;
-    int xi = c->xp ? xacquire(c) : -1;
+    int xi = c->xp && !out ? xacquire(c) : -1;
     if ((c->xp && xi < 0) || cmd_begin(c) < 0) {
         if (xi >= 0)
             atomic_store(&c->xp->busy[xi], 0);
@@ -1932,7 +2153,9 @@ int mb_submit(mb_ctx *c, double t)
         dispatch(c, &c->p_interp, r, &pc, (uint32_t)((c->fmt.w + 1) / 2 + 7) / 8, (uint32_t)((c->fmt.h + 1) / 2 + 7) / 8);
     }
     S(c)->xidx = xi;
-    if (xi >= 0) {
+    if (out) {
+        vk_copy_out(c, out);
+    } else if (xi >= 0) {
         if (cropped(c) && c->gpu_in)
             xfill_bars_gpu(c, &c->xb[S(c)->xidx]);
         else if (cropped(c))
@@ -1951,7 +2174,12 @@ int mb_submit(mb_ctx *c, double t)
     S(c)->w = c->fmt.w;
     S(c)->h = c->fmt.h;
     host_barrier(c);
-    return cmd_end(c, 1);
+    return cmd_end(c, !out);
+}
+
+int mb_submit(mb_ctx *c, double t)
+{
+    return mb_submit_vk(c, t, NULL);
 }
 
 int mb_debug_field(mb_ctx *c, int which, float *out, int *w, int *h)
@@ -2185,12 +2413,18 @@ void mb_destroy(mb_ctx *c)
         for (int k = 0; k < c->prof_n; k++)
             fprintf(stderr, "motionblade profile: %-10s %8.1f ms total\n", c->prof_name[k], c->prof_ms[k]);
     if (c->dev) {
-        vkDeviceWaitIdle(c->dev);
+        cmd_end(c, 0);
+        if (c->vd.dev)
+            idle(c);
+        else
+            vkDeviceWaitIdle(c->dev);
         res_geom_free(c);
         for (int i = 0; i < NSLOT; i++)
             slot_release(c, &c->sl[i]);
         img_free(c, &c->bgy);
         img_free(c, &c->bgc);
+        img_free(c, &c->vy);
+        img_free(c, &c->vc);
         buf_free(c, &c->bflags);
         pipe_free(c, &c->p_bars);
         pipe_free(c, &c->p_agree);
@@ -2231,15 +2465,16 @@ void mb_destroy(mb_ctx *c)
             vkDestroySampler(c->dev, c->smp, NULL);
         if (c->cp)
             vkDestroyCommandPool(c->dev, c->cp, NULL);
-        vkDestroyDevice(c->dev, NULL);
+        if (!c->vd.dev)
+            vkDestroyDevice(c->dev, NULL);
     }
-    if (c->inst)
+    if (c->inst && !c->vd.dev)
         vkDestroyInstance(c->inst, NULL);
     free(c->tmpl);
     free(c);
 }
 
-mb_ctx *mb_create(const mb_format *fmt)
+mb_ctx *mb_create_vk(const mb_format *fmt, const mb_vkdev *d)
 {
     if (fmt->w < 64 || fmt->h < 64 || fmt->depth < 8 || fmt->depth > 16 || fmt->cshift_x < 0 || fmt->cshift_x > 1 ||
         fmt->cshift_y < 0 || fmt->cshift_y > 1 || fmt->lsb_pad < 0 || fmt->lsb_pad > 8 ||
@@ -2255,7 +2490,7 @@ mb_ctx *mb_create(const mb_format *fmt)
     default_params(&c->p);
     c->hist_clear = 1;
     set_geom(c);
-    if (vk_init(c) < 0) {
+    if (vk_init(c, d) < 0) {
         fprintf(stderr, "motionblade: Vulkan init failed\n");
         mb_destroy(c);
         return NULL;
@@ -2272,4 +2507,9 @@ mb_ctx *mb_create(const mb_format *fmt)
     }
     c->ok = 1;
     return c;
+}
+
+mb_ctx *mb_create(const mb_format *fmt)
+{
+    return mb_create_vk(fmt, NULL);
 }

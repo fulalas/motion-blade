@@ -39,7 +39,7 @@
  #Ctrl+v loadfile ${clipboard/text} append-play; show-text '+ ${clipboard/text}' # append the copied path
  #DEL script-binding osc/visibility      # cycle OSC visibility between never, auto (mouse-move) and always
  #ctrl+h cycle-values hwdec "no" "auto"  # toggle hardware decoding
-+#Ctrl+m cycle-values vf "motionblade=factor=2" "motionblade=factor=3" "motionblade=factor=4" "" "motionblade=factor=auto"; show-text "Interpolation: ${?vf==(empty):off}${!vf==(empty):${=vf}}" # cycle motion interpolation
++#Ctrl+m cycle-values vf "motionblade=factor=4" "motionblade=factor=8" "motionblade=factor=auto" "motionblade=factor=2"; show-text "Interpolation: ${?vf==(empty):off}${!vf==(empty):${=vf}}" # cycle motion interpolation
  #F8 show-text ${playlist}               # show the playlist
  #F9 show-text ${track-list}             # show the list of video, audio and sub tracks
  #g ignore
@@ -67,10 +67,10 @@
 +    Sub-options:
 +
 +    ``factor=<auto|2-8>``
-+        ``auto`` (default) outputs one frame per display refresh, using the
-+        display refresh rate or ``--display-fps-override``. Videos with a frame
-+        rate at or above the refresh rate pass through. A number multiplies the
-+        frame rate by that factor.
++        A number multiplies the frame rate by that factor (default: 2).
++        ``auto`` outputs one frame per display refresh, using the display
++        refresh rate or ``--display-fps-override``. Videos with a frame rate at
++        or above the refresh rate pass through.
 +
 +    ``max-fps=<0-1000>``
 +        Do not interpolate videos above this frame rate (default: 0, no limit).
@@ -80,3 +80,32 @@
 +        apart (default: 0.25).
 +
 +    Example: ``--vf=motionblade --hwdec=auto``
+diff --git a/video/out/vulkan/context.c b/video/out/vulkan/context.c
+--- a/video/out/vulkan/context.c
++++ b/video/out/vulkan/context.c
+@@ -347,9 +347,16 @@
+         .uniformBufferStandardLayout = true,
+     };
+ 
++    VkPhysicalDeviceVulkan13Features recommended_vk13 = {
++        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
++        .pNext = &recommended_vk12,
++        .subgroupSizeControl = true,
++        .computeFullSubgroups = true,
++    };
++
+     VkPhysicalDeviceVulkan11Features recommended_vk11 = {
+         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+-        .pNext = &recommended_vk12,
++        .pNext = &recommended_vk13,
+         .storageBuffer16BitAccess = true,
+         .uniformAndStorageBuffer16BitAccess = true,
+     };
+@@ -360,6 +367,7 @@
+         .features = {
+             .shaderInt16 = true,
+             .shaderFloat64 = true,
++            .shaderStorageImageExtendedFormats = true,
+         },
+     };
+ 
