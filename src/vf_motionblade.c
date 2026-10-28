@@ -602,10 +602,12 @@ static bool setup(struct mp_filter *f, struct mp_image *mpi)
     }
     if (!p->vkframes)
         setup_export(f, mpi, swfmt);
+    bool gpu_in = is_hw(mpi), gpu_out = p->vkframes || p->xframes;
     MP_INFO(f, "interpolating %dx%d %s, %s\n", mpi->w, mpi->h, mp_imgfmt_to_name(swfmt),
-            p->vkframes  ? "frames stay on the GPU (Vulkan)"
-            : p->xframes ? "frames stay on the GPU (dma-buf)"
-                         : "frames go through system memory");
+            gpu_in && gpu_out ? "frames stay on the GPU"
+            : gpu_in          ? "output goes through system memory"
+            : gpu_out         ? "decoded frames are copied to the GPU"
+                              : "frames go through system memory");
     return true;
 }
 
