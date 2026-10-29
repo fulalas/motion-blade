@@ -29,6 +29,10 @@ int main(int argc, char **argv)
     size_t ys = (size_t)w * h, fs = ys * 3 / 2;
     unsigned char *b = malloc(fs);
     float *a = malloc(sizeof(float) * ys);
+    if (!b || !a) {
+        fprintf(stderr, "flick: out of memory\n");
+        return 1;
+    }
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
             double dx = (x - 0.15 * w) / (0.55 * w), dy = (y - 0.1 * h) / (0.55 * w);

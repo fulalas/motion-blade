@@ -355,7 +355,11 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-n") && i + 1 < argc) maxn = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-skip") && i + 1 < argc) skip = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-step") && i + 1 < argc) step = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-step") && i + 1 < argc) {
+            step = atoi(argv[++i]);
+            if (step < 1)
+                usage();
+        }
         else if (!strcmp(argv[i], "-mode") && i + 1 < argc) mode = argv[++i];
         else if (!strcmp(argv[i], "-cmp") && i + 1 < argc) cmp = argv[++i];
         else if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
