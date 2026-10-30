@@ -12,6 +12,7 @@ layout(std430, binding = 5) readonly buffer Stat { uint stat[]; };
 
 shared uint cnt;
 shared int lid[64];
+const int RMAX = 4;
 
 void main()
 {
@@ -42,27 +43,66 @@ void main()
         best_m = g_ml;
         best_c = s0 + pc.f1.y * l1(cur.xy);
         best_v = cur.xy;
+        int k1 = lane + 16;
+        vec2 n0 = f[bidx(ivec2(bx + lane % 5 - 2, by + lane / 5 - 2), ivec2(bw, bh))].xy;
+        vec2 n1 = f[bidx(ivec2(bx + k1 % 5 - 2, by + k1 / 5 - 2), ivec2(bw, bh))].xy;
         for (int k = 0; k < 25; k++) {
             if (k == 12)
                 continue;
             vec2 u = f[bidx(ivec2(bx + k % 5 - 2, by + k / 5 - 2), ivec2(bw, bh))].xy;
             if (u == cur.xy || u == best_v || any(lessThan(w + u, vec2(0.0))) || any(greaterThan(w + u, lim)))
                 continue;
+            if (subgroupClusteredOr((lane < k && n0 == u) || (k1 < k && n1 == u), 16))
+                continue;
             try_v(Y, u, 0.0);
         }
         float R = pc.f3.x, S = pc.f3.y;
         vec2 seed = best_v;
-        for (float dy = -R; dy <= R; dy += S)
-            for (float dx = -R; dx <= R; dx += S) {
-                vec2 u = seed + vec2(dx, dy);
-                if (u == best_v || any(lessThan(w + u, vec2(0.0))) || any(greaterThan(w + u, lim)))
-                    continue;
-                try_v(Y, u, 0.0);
+        if (S == 2.0 && R == floor(R) && R <= float(RMAX)) {
+            for (float dy = -R; dy <= R; dy += S) {
+                float win[16 + 2 * RMAX];
+                row24(Y, g_row0 + (seed + vec2(-R, dy)), win);
+                for (int i = 0; i <= RMAX; i++) {
+                    float dx = -R + float(2 * i);
+                    vec2 u = seed + vec2(dx, dy);
+                    if (dx > R || u == best_v || any(lessThan(w + u, vec2(0.0))) || any(greaterThan(w + u, lim)))
+                        continue;
+                    float yr[16];
+                    for (int x = 0; x < 16; x++)
+                        yr[x] = win[x + 2 * i];
+                    float s = zsad(xr, yr);
+                    consider(u, s, s + pc.f1.y * l1(u));
+                }
             }
+        } else {
+            for (float dy = -R; dy <= R; dy += S)
+                for (float dx = -R; dx <= R; dx += S) {
+                    vec2 u = seed + vec2(dx, dy);
+                    if (u == best_v || any(lessThan(w + u, vec2(0.0))) || any(greaterThan(w + u, lim)))
+                        continue;
+                    try_v(Y, u, 0.0);
+                }
+        }
         seed = best_v;
+        float rs[9], rm[9];
+        for (int r = 0; r < 3; r++) {
+            float win[18];
+            row18(Y, g_row0 + (seed + vec2(-1.0, float(r - 1))), win);
+            for (int i = 0; i < 3; i++) {
+                if (r == 1 && i == 1)
+                    continue;
+                float yr[16];
+                for (int x = 0; x < 16; x++)
+                    yr[x] = win[x + i];
+                rs[r * 3 + i] = zsad(xr, yr);
+                rm[r * 3 + i] = g_ml;
+            }
+        }
         for (int k = 0; k < 8; k++) {
+            int j = (DIR8[k].y + 1) * 3 + DIR8[k].x + 1;
             vec2 u = seed + vec2(DIR8[k]);
-            try_v(Y, u, 0.0);
+            g_ml = rm[j];
+            consider(u, rs[j], rs[j] + pc.f1.y * l1(u));
         }
         bool ok = best_s < pc.f2.x * s0 && s0 - best_s > pc.f2.y;
         if (ok && pc.i1.x != 0) {

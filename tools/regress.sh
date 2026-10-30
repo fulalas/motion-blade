@@ -80,11 +80,11 @@ fi
 
 rule() {
     case $1 in
+        pass_*) echo lower "$(echo "$2" | awk '{print $1 * 0.10 + 0.05}')" ;;
         *_local) echo higher 0.1 ;;
         *_psnr|*_cpsnr) echo higher 0.05 ;;
         *_ssim) echo higher 0.002 ;;
         speed_ms_1080p|half_ms) echo lower "$(echo "$2" | awk '{print $1 * 0.05}')" ;;
-        pass_*) echo lower "$(echo "$2" | awk '{print $1 * 0.10 + 0.05}')" ;;
         interp_vgprs) echo max 168 ;;
         gpu_level) echo warn ;;
         *) echo exact ;;

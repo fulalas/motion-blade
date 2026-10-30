@@ -9,23 +9,28 @@ float g_ml, g_sad, g_zsad;
 float best_c, best_s, best_m;
 vec2 best_v;
 
-void row16(sampler2D T, vec2 p, out float o[16])
-{
-    vec2 q = p - 0.5;
-    vec2 fl = floor(q);
-    vec2 f = q - fl;
-    vec2 base = (fl + 1.0) * g_inv;
-    float top[18], bot[18];
-    for (int k = 0; k < 9; k++) {
-        vec4 g = textureGather(T, base + vec2(float(2 * k) * g_inv.x, 0.0));
-        top[2 * k] = g.w;
-        top[2 * k + 1] = g.z;
-        bot[2 * k] = g.x;
-        bot[2 * k + 1] = g.y;
+#define ROW_FN(NAME, N)                                                                        \
+    void NAME(sampler2D T, vec2 p, out float o[N])                                             \
+    {                                                                                          \
+        vec2 q = p - 0.5;                                                                      \
+        vec2 fl = floor(q);                                                                    \
+        vec2 f = q - fl;                                                                       \
+        vec2 base = (fl + 1.0) * g_inv;                                                        \
+        float top[N + 2], bot[N + 2];                                                          \
+        for (int k = 0; k < (N + 2) / 2; k++) {                                                \
+            vec4 g = textureGather(T, base + vec2(float(2 * k) * g_inv.x, 0.0));               \
+            top[2 * k] = g.w;                                                                  \
+            top[2 * k + 1] = g.z;                                                              \
+            bot[2 * k] = g.x;                                                                  \
+            bot[2 * k + 1] = g.y;                                                              \
+        }                                                                                      \
+        for (int x = 0; x < N; x++)                                                            \
+            o[x] = mix(mix(top[x], top[x + 1], f.x), mix(bot[x], bot[x + 1], f.x), f.y);       \
     }
-    for (int x = 0; x < 16; x++)
-        o[x] = mix(mix(top[x], top[x + 1], f.x), mix(bot[x], bot[x + 1], f.x), f.y);
-}
+
+ROW_FN(row16, 16)
+ROW_FN(row18, 18)
+ROW_FN(row24, 24)
 
 float zsad(float a[16], float b[16])
 {
