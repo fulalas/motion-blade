@@ -28,9 +28,20 @@ vec2 best_v;
             o[x] = mix(mix(top[x], top[x + 1], f.x), mix(bot[x], bot[x + 1], f.x), f.y);       \
     }
 
+#define HW_FN(NAME, N)                                                             \
+    void NAME(sampler2D T, vec2 p, out float o[N])                                 \
+    {                                                                              \
+        for (int x = 0; x < N; x++)                                                \
+            o[x] = textureLod(T, (p + vec2(float(x), 0.0)) * g_inv, 0.0).r;        \
+    }
+
+#ifdef HW_ROW
+HW_FN(row16, 16)
+HW_FN(row18, 18)
+HW_FN(row24, 24)
+#else
 ROW_FN(row16, 16)
-ROW_FN(row18, 18)
-ROW_FN(row24, 24)
+#endif
 
 float zsad(float a[16], float b[16])
 {

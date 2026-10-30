@@ -160,7 +160,7 @@ static const struct {
     [P_AGREE] = {SPV(spv_agree), "SSSSSSBB", 0, 64, "p_agree"},
     [P_GMED] = {SPV(spv_gmed), "BB", 0, 1, "p_gmed"},
     [P_AGSPREAD] = {SPV(spv_agspread), "BBBB", 0, 64, "p_agspread"},
-    [P_INTERP] = {NULL, 0, "SSSSSSBBBIIISSBBBBB", 0, 0, "p_interp"},
+    [P_INTERP] = {NULL, 0, "SSSSSSBBBIIISSBBBBB", 1, 0, "p_interp"},
 };
 
 static const struct {

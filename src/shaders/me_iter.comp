@@ -1,6 +1,7 @@
 #version 450
 #extension GL_GOOGLE_include_directive : enable
 #include "common.glsl"
+#define HW_ROW
 #include "sad.glsl"
 layout(local_size_x = 64) in;
 layout(binding = 0) uniform sampler2D X;
