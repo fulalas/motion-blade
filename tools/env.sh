@@ -1,6 +1,8 @@
 T=$(dirname "$(readlink -f "$0")")
-D=${MOTIONBLADE_DATA:-$(cd "$T/../.." && pwd)/samples}
-E=${EVAL:-$T/../eval_vk}
+ROOT=$(cd "$T/.." && pwd)
+D=${MOTIONBLADE_DATA:-$(cd "$ROOT/.." && pwd)/samples}
+E=${EVAL:-$ROOT/build/local/tools/eval/eval}
+FLICK=$ROOT/build/local/tools/flick
 
 ffv1() { ffmpeg -nostdin -hide_banner -loglevel error "$@" -c:v ffv1 -level 3 -slices 16 -y; }
 
@@ -14,7 +16,7 @@ need_clip() {
     case $1 in
         */suite/*|*/film/bbb_*) echo "run tools/fetch-data.sh" >&2 ;;
         */film/*) echo "copyrighted sample, must be provided by hand" >&2 ;;
-        */light/*) m=${1##*/light/}; echo "run LIGHT=${m%%_*} tools/flicker.sh" >&2 ;;
+        */light/*) m=${1##*/light/}; echo "run LIGHT=${m%%_*} tools/light.sh" >&2 ;;
     esac
     exit 1
 }

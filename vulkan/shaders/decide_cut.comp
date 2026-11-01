@@ -1,0 +1,88 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "motionblade/layout.h"
+#include "push_constants.h"
+layout(local_size_x = 1) in;
+
+layout(push_constant) uniform Push { cut_push push; };
+
+layout(std430, binding = 0) buffer Stats { uint stats[]; };
+layout(std430, binding = 1) buffer History { float history[]; };
+
+#define MIN_ERROR_FLOOR 10.0
+#define ERROR_OFFSET 4.0
+#define MIN_RECORDED_ERROR 0.1
+
+float series_median(int values, int count)
+{
+    float v[MB_HISTORY_LENGTH];
+    for (int i = 0; i < count; i++) {
+        v[i] = history[values + i];
+    }
+    for (int i = 1; i < count; i++) {
+        for (int j = i; j > 0 && v[j - 1] > v[j]; j--) {
+            float swap = v[j];
+            v[j] = v[j - 1];
+            v[j - 1] = swap;
+        }
+    }
+    return v[count / 2];
+}
+
+void series_push(int count_slot, int values, float value)
+{
+    int count = int(history[count_slot]);
+    int next = int(history[count_slot + 1]);
+    history[values + next] = value;
+    history[count_slot + 1] = float((next + 1) % MB_HISTORY_LENGTH);
+    history[count_slot] = float(min(count + 1, MB_HISTORY_LENGTH));
+}
+
+float brightness_spread(int direction)
+{
+    float blocks = float(push.block_count);
+    float mean = float(stats[MB_STAT_MEANS + direction * 2]) / blocks;
+    return sqrt(max(float(stats[MB_STAT_SQUARES + direction * 2]) * MB_STAT_SCALE / blocks - mean * mean, 0.0));
+}
+
+float contrast_factor()
+{
+    float spread = max(brightness_spread(0), brightness_spread(1));
+    return push.spread_norm > 0.0 ? clamp(spread / push.spread_norm, push.spread_min, 1.0) : 1.0;
+}
+
+float error_threshold(float k)
+{
+    int count = int(history[MB_HIST_ERROR_COUNT]);
+    if (count <= 0) {
+        return push.max_threshold * k;
+    }
+    float relative = push.error_ratio * series_median(MB_HIST_ERRORS, count) + ERROR_OFFSET * k;
+    return min(push.max_threshold * k, max(MIN_ERROR_FLOOR * k, relative));
+}
+
+float zero_threshold(float k)
+{
+    int count = int(history[MB_HIST_ZERO_COUNT]);
+    if (count <= 0) {
+        return 0.0;
+    }
+    return max(push.zero_mean_ratio * series_median(MB_HIST_ZEROS, count), push.zero_mean_min * k);
+}
+
+void main()
+{
+    float error = float(stats[MB_STAT_ERROR]) * push.error_scale;
+    float zero_mean = float(stats[MB_STAT_ZERO_ERROR]) * push.error_scale;
+    float k = contrast_factor();
+    bool error_jump = error > error_threshold(k);
+    bool cut = error_jump && zero_mean > zero_threshold(k);
+    if (error > MIN_RECORDED_ERROR && !error_jump) {
+        series_push(MB_HIST_ERROR_COUNT, MB_HIST_ERRORS, error);
+    }
+    if (error > MIN_RECORDED_ERROR && !cut) {
+        series_push(MB_HIST_ZERO_COUNT, MB_HIST_ZEROS, zero_mean);
+    }
+    stats[MB_STAT_CUT] = cut ? 1u : 0u;
+    history[MB_HIST_LAST_CUT] = cut ? 1.0 : 0.0;
+}

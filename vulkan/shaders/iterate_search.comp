@@ -1,0 +1,163 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { iterate_push push; };
+#include "blocks.glsl"
+#define HARDWARE_ROWS
+#include "window.glsl"
+layout(local_size_x = 64) in;
+
+layout(binding = 0) uniform sampler2D origin;
+layout(binding = 1) uniform sampler2D target;
+layout(std430, binding = 2) readonly buffer Previous { vec4 previous[]; };
+layout(std430, binding = 3) writeonly buffer Field { vec4 field[]; };
+layout(std430, binding = 4) readonly buffer Parent { vec4 parent[]; };
+layout(std430, binding = 5) readonly buffer Temporal { vec4 temporal[]; };
+layout(std430, binding = 6) readonly buffer Reverse { vec4 reverse_field[]; };
+layout(std430, binding = 7) readonly buffer History { float history[]; };
+
+#define MAX_CANDIDATES 20
+#define EARLY_EXIT_FLOOR 32.0
+
+vec2 candidates[MAX_CANDIDATES];
+float penalties[MAX_CANDIDATES];
+int candidate_count;
+
+ivec2 parent_blocks()
+{
+    return ivec2(push.parent_blocks_x, push.parent_blocks_y);
+}
+
+vec2 parent_vector(ivec2 parent_block)
+{
+    return parent[block_index(parent_block, parent_blocks())].xy * 2.0;
+}
+
+vec2 previous_vector(ivec2 block)
+{
+    block = clamp(block, ivec2(0), blocks() - 1);
+    if (push.has_previous != 0) {
+        return previous[block.y * push.blocks_x + block.x].xy;
+    }
+    return parent_vector(block >> 1);
+}
+
+void add(vec2 v, float penalty)
+{
+    for (int k = 0; k < candidate_count; k++) {
+        if (candidates[k] == v) {
+            return;
+        }
+    }
+    candidates[candidate_count] = v;
+    penalties[candidate_count] = penalty;
+    candidate_count++;
+}
+
+float lane_dc(int lane, ivec2 block)
+{
+    if (lane >= 9) {
+        return 1e30;
+    }
+    if (push.has_previous != 0) {
+        return abs(previous[neighbour3_index(lane, block, blocks())].w);
+    }
+    if (push.has_parent != 0) {
+        return abs(parent[neighbour3_index(lane, block >> 1, parent_blocks())].w);
+    }
+    return 0.0;
+}
+
+void add_parent_neighbours(ivec2 block)
+{
+    ivec2 p = block >> 1;
+    ivec2 q = ivec2((block.x & 1) != 0 ? p.x + 1 : p.x - 1, (block.y & 1) != 0 ? p.y + 1 : p.y - 1);
+    add(parent_vector(ivec2(q.x, p.y)), push.penalty_parent);
+    add(parent_vector(ivec2(p.x, q.y)), push.penalty_parent);
+    add(parent_vector(q), push.penalty_parent);
+}
+
+void gather_candidates(int id, ivec2 block)
+{
+    candidate_count = 0;
+    add(previous_vector(block), 0.0);
+    add(previous_vector(block + ivec2(-1, 0)), 0.0);
+    add(previous_vector(block + ivec2(1, 0)), 0.0);
+    add(previous_vector(block + ivec2(0, -1)), 0.0);
+    add(previous_vector(block + ivec2(0, 1)), 0.0);
+    add(previous_vector(block + ivec2(-1, -1)), 0.0);
+    add(previous_vector(block + ivec2(1, -1)), 0.0);
+    add(previous_vector(block + ivec2(-1, 1)), 0.0);
+    add(previous_vector(block + ivec2(1, 1)), 0.0);
+    if (push.has_parent != 0 && push.has_previous == 0) {
+        add_parent_neighbours(block);
+    }
+    if (push.has_temporal != 0 && history[MB_HIST_LAST_CUT] == 0.0) {
+        add(temporal[id].xy, push.penalty_temporal);
+    }
+    if (push.has_reverse != 0) {
+        add(-reverse_field[id].xy, push.penalty_reverse);
+    }
+    add(vec2(0.0), push.penalty_zero);
+}
+
+float early_exit_limit()
+{
+    if (push.early_exit <= 0.0) {
+        return -1.0;
+    }
+    float mean = origin_sum() / 256.0;
+    float spread = 0.0;
+    for (int x = 0; x < LANES; x++) {
+        spread += abs(origin_row[x] - mean);
+    }
+    return max(cluster_sum(spread) * 255.0 * push.early_exit, EARLY_EXIT_FLOOR);
+}
+
+uint mix_bits(uint x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+void try_random_steps(int id, float limit)
+{
+    uint h = mix_bits(uint(id) * 7919u + push.seed * 104729u);
+    vec2 fine = vec2(float(int(h & 7u)) - 3.5, float(int((h >> 3) & 7u)) - 3.5) * 0.25;
+    vec2 coarse = vec2(float(int((h >> 6) & 3u)) - 1.5, float(int((h >> 8) & 3u)) - 1.5);
+    vec2 base = best.vector;
+    for (int k = 0; k < 2 && best.sad >= limit; k++) {
+        try_vector(target, base + (k == 0 ? fine : coarse), push.penalty_random, push.penalty_length);
+    }
+}
+
+void main()
+{
+    int lane = int(gl_LocalInvocationID.x) & 15;
+    int id = int(gl_WorkGroupID.x) * 4 + (int(gl_LocalInvocationID.x) >> 4);
+    if (id >= push.blocks_x * push.blocks_y) {
+        return;
+    }
+    ivec2 block = block_of(id, push.blocks_x);
+    texel_size = 1.0 / vec2(push.width, push.height);
+    load_origin(origin, window_origin(block), lane);
+    set_mean_weight(push.mean_lo, push.mean_hi, lane_dc(lane, block));
+    gather_candidates(id, block);
+    reset_best();
+    float limit = early_exit_limit();
+    for (int i = 0; i < candidate_count; i++) {
+        try_vector(target, candidates[i], penalties[i], push.penalty_length);
+        if (best.sad < limit) {
+            break;
+        }
+    }
+    try_random_steps(id, limit);
+    float dc = block_dc(best.diff);
+    if (lane == 0) {
+        field[id] = vec4(best.vector, best.sad, dc);
+    }
+}

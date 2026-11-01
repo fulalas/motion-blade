@@ -1,0 +1,39 @@
+#ifndef MOTIONBLADE_LAYOUT_H
+#define MOTIONBLADE_LAYOUT_H
+
+#define MB_BLOCK_SIZE 8
+#define MB_WINDOW_SIZE 16
+#define MB_WINDOW_MARGIN 4
+#define MB_CELL_SIZE 4
+#define MB_MAX_LEVELS 6
+#define MB_MIN_LEVEL_SIZE 48
+#define MB_MIN_FRAME_SIZE 64
+#define MB_PENDING_LIMIT 7
+
+#define MB_KEYS_PER_BLOCK 4
+#define MB_KEY_NONE 0xffffffffu
+
+#define MB_MODE_TWO_SIDED 0
+#define MB_MODE_FUTURE 1
+#define MB_MODE_PAST 2
+#define MB_MODE_UNCOVER 3
+
+#define MB_STAT_ERROR 0
+#define MB_STAT_ZERO_ERROR 1
+#define MB_STAT_CUT 2
+#define MB_STAT_MEANS 3
+#define MB_STAT_SQUARES 4
+#define MB_STAT_COUNT 16
+#define MB_STAT_SCALE 16.0
+
+#define MB_HISTORY_LENGTH 9
+#define MB_HIST_ERROR_COUNT 0
+#define MB_HIST_ERROR_NEXT 1
+#define MB_HIST_ZERO_COUNT 2
+#define MB_HIST_ZERO_NEXT 3
+#define MB_HIST_ERRORS 4
+#define MB_HIST_ZEROS 13
+#define MB_HIST_LAST_CUT 22
+#define MB_HIST_COUNT 32
+
+#endif

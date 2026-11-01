@@ -1,0 +1,130 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_KHR_shader_subgroup_clustered : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { split_push push; };
+#include "blocks.glsl"
+layout(local_size_x = 64) in;
+
+layout(binding = 0) uniform sampler2D frame_a;
+layout(binding = 1) uniform sampler2D frame_b;
+layout(std430, binding = 2) readonly buffer Selection { vec4 selection[]; };
+layout(std430, binding = 3) writeonly buffer Cells { vec4 cells[]; };
+layout(std430, binding = 4) readonly buffer Offsets { vec4 offsets[]; };
+
+#define GROUP 64
+#define LANES 16
+#define CLUSTERS (GROUP / LANES)
+#define NEIGHBOURS 9
+
+shared int queued_cells[GROUP];
+shared int queued_counts[GROUP];
+shared vec2 queued_vectors[GROUP][NEIGHBOURS];
+shared uint queued;
+
+vec2 candidates[NEIGHBOURS];
+int candidate_count;
+
+bool gather_candidates(ivec2 block, vec2 own)
+{
+    candidate_count = 0;
+    bool at_edge = false;
+    for (int k = 0; k < NEIGHBOURS; k++) {
+        vec4 q = selection[neighbour3_index(k, block, blocks())];
+        if (int(q.z) != MB_MODE_TWO_SIDED) {
+            continue;
+        }
+        at_edge = at_edge || l1(q.xy - own) > push.threshold;
+        bool duplicate = false;
+        for (int i = 0; i < candidate_count; i++) {
+            duplicate = duplicate || candidates[i] == q.xy;
+        }
+        if (!duplicate) {
+            candidates[candidate_count++] = q.xy;
+        }
+    }
+    return at_edge;
+}
+
+float cell_cost(vec2 p, vec2 u, float dc)
+{
+    vec2 texel = 1.0 / vec2(push.width, push.height);
+    float a = textureLod(frame_a, (p - push.t * u) * texel, 0.0).r;
+    float b = textureLod(frame_b, (p + (1.0 - push.t) * u) * texel, 0.0).r;
+    return subgroupClusteredAdd(abs(a - b - dc), LANES) * 255.0;
+}
+
+void queue_cell(int id, int cells_x)
+{
+    ivec2 cell = ivec2(id % cells_x, id / cells_x), block = cell >> 1;
+    vec4 own = selection[block_index(block, blocks())];
+    if (int(own.z) == MB_MODE_TWO_SIDED && push.threshold > 0.0 && gather_candidates(block, own.xy)) {
+        uint slot = atomicAdd(queued, 1u);
+        queued_cells[slot] = id;
+        queued_counts[slot] = candidate_count;
+        for (int i = 0; i < candidate_count; i++) {
+            queued_vectors[slot][i] = candidates[i];
+        }
+    } else {
+        cells[id] = own;
+    }
+}
+
+float lowest;
+vec2 chosen;
+
+void consider(float cost, vec2 u)
+{
+    if (cost < lowest) {
+        lowest = cost;
+        chosen = u;
+    }
+}
+
+void refine_around_choice(vec2 p, float dc)
+{
+    for (int r = push.refine_radius; r > 0; r--) {
+        vec2 center = chosen;
+        for (int k = 0; k < 8; k++) {
+            vec2 u = center + vec2(RING8[k]) * float(r);
+            consider(cell_cost(p, u, dc) + push.refine_penalty * l1(u - center), u);
+        }
+    }
+}
+
+void refine_cell(int slot, int lane, int cells_x)
+{
+    int id = queued_cells[slot];
+    ivec2 cell = ivec2(id % cells_x, id / cells_x), block = cell >> 1;
+    int index = block_index(block, blocks());
+    vec4 own = selection[index];
+    float dc = offsets[index].x * push.luma_scale;
+    vec2 p = vec2(cell * MB_CELL_SIZE + ivec2(lane & 3, lane >> 2)) + 0.5;
+    lowest = 1e30;
+    chosen = own.xy;
+    for (int i = 0; i < queued_counts[slot]; i++) {
+        consider(cell_cost(p, queued_vectors[slot][i], dc), queued_vectors[slot][i]);
+    }
+    refine_around_choice(p, dc);
+    if (lane == 0) {
+        cells[id] = vec4(chosen, 0.0, own.w);
+    }
+}
+
+void main()
+{
+    int cells_x = push.blocks_x * 2;
+    int t = int(gl_LocalInvocationID.x);
+    if (t == 0) {
+        queued = 0u;
+    }
+    barrier();
+    int id = int(gl_WorkGroupID.x) * GROUP + t;
+    if (id < cells_x * push.blocks_y * 2) {
+        queue_cell(id, cells_x);
+    }
+    barrier();
+    for (int slot = t >> 4; slot < int(queued); slot += CLUSTERS) {
+        refine_cell(slot, t & 15, cells_x);
+    }
+}

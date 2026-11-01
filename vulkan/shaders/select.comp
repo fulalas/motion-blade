@@ -1,0 +1,485 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { select_push push; };
+#include "blocks.glsl"
+#include "window.glsl"
+layout(local_size_x = 64) in;
+
+layout(binding = 0) uniform sampler2D frame_a;
+layout(binding = 1) uniform sampler2D frame_b;
+layout(binding = 2) uniform sampler2D frame_c;
+layout(binding = 3) uniform sampler2D frame_z;
+layout(std430, binding = 4) readonly buffer Forward { vec4 forward[]; };
+layout(std430, binding = 5) readonly buffer Backward { vec4 backward[]; };
+layout(std430, binding = 6) readonly buffer Keys { uint keys[]; };
+layout(std430, binding = 7) writeonly buffer Selection { vec4 selection[]; };
+layout(std430, binding = 8) readonly buffer NextForward { vec4 next_forward[]; };
+layout(std430, binding = 9) readonly buffer PreviousBackward { vec4 previous_backward[]; };
+layout(std430, binding = 10) readonly buffer NextStats { uint next_stats[]; };
+layout(std430, binding = 11) readonly buffer PreviousStats { uint previous_stats[]; };
+layout(std430, binding = 12) readonly buffer ExtraKeys { uint extra_keys[]; };
+
+#define MAX_CANDIDATES 19
+#define FIELD_FORWARD 0
+#define FIELD_BACKWARD 1
+#define FIELD_NEXT 2
+#define FIELD_PREVIOUS 3
+#define FRAME_MARGIN 8.0
+
+vec2 candidates[MAX_CANDIDATES];
+int candidate_count;
+vec2 center;
+float t;
+bool has_next;
+bool has_previous;
+
+vec2 field_at(int which, vec2 p)
+{
+    int i = block_index(block_at(p), blocks());
+    return which == FIELD_FORWARD ? forward[i].xy
+           : which == FIELD_BACKWARD ? backward[i].xy
+           : which == FIELD_NEXT ? next_forward[i].xy
+                                 : previous_backward[i].xy;
+}
+
+void add(vec2 v)
+{
+    for (int k = 0; k < candidate_count; k++) {
+        if (candidates[k] == v) {
+            return;
+        }
+    }
+    candidates[candidate_count++] = v;
+}
+
+float future_sad(vec2 p, vec2 u)
+{
+    float rb[16], rc[16];
+    load_row(frame_b, p + (1.0 - t) * u, rb);
+    load_row(frame_c, p + (2.0 - t) * u, rc);
+    return window_sad(rb, rc);
+}
+
+float pair_sad(vec2 p, vec2 u)
+{
+    float ra[16], rb[16];
+    load_row(frame_a, p - t * u, ra);
+    load_row(frame_b, p + (1.0 - t) * u, rb);
+    return window_sad(ra, rb);
+}
+
+vec2 consistency_errors(vec2 u)
+{
+    float a = l1(field_at(FIELD_FORWARD, center - t * u) - u);
+    float b = l1(field_at(FIELD_BACKWARD, center + (1.0 - t) * u) + u);
+    return vec2(a, b);
+}
+
+bvec2 consistent(vec2 u)
+{
+    return lessThanEqual(consistency_errors(u), vec2(consistency_limit(push.consistency, u)));
+}
+
+float tolerance(vec2 u)
+{
+    return push.support_rel * l1(u) + push.support_abs;
+}
+
+bool supported_previous(vec2 u)
+{
+    return l1(field_at(FIELD_PREVIOUS, center - t * u) + u) <= tolerance(u);
+}
+
+bool supported_next(vec2 u)
+{
+    return l1(field_at(FIELD_NEXT, center + (1.0 - t) * u) - u) <= tolerance(u);
+}
+
+bool supported_both(vec2 u)
+{
+    return supported_previous(u) && supported_next(u);
+}
+
+float row_texture(float r[16], sampler2D frame, vec2 p)
+{
+    float below[16];
+    load_row(frame, p + vec2(0.0, 1.0), below);
+    float g = 0.0;
+    for (int x = 0; x < 15; x++) {
+        g += abs(r[x + 1] - r[x]) + abs(below[x] - r[x]);
+    }
+    return cluster_sum(g) * 255.0;
+}
+
+float foreground(vec2 u)
+{
+    return push.foreground_bonus * clamp(l1(u) * 0.5, 0.0, 1.0);
+}
+
+float inconsistent_sides(bvec2 ok)
+{
+    return float(int(!ok.x) + int(!ok.y));
+}
+
+void add_projected(int id)
+{
+    for (int i = 0; i < MB_KEYS_PER_BLOCK; i++) {
+        uint key = keys[id * MB_KEYS_PER_BLOCK + i];
+        if (key == MB_KEY_NONE) {
+            break;
+        }
+        int source = int(key >> 1);
+        add((key & 1u) != 0u ? -backward[source].xy : forward[source].xy);
+    }
+}
+
+void add_extra(int id)
+{
+    if (extra_keys[id * MB_KEYS_PER_BLOCK] == MB_KEY_NONE) {
+        return;
+    }
+    bool known = false;
+    for (int i = 0; i < candidate_count; i++) {
+        vec2 u = candidates[i];
+        known = known || (has_previous && has_next && all(consistent(u)) && supported_both(u));
+    }
+    for (int i = 0; i < 2 && !known; i++) {
+        uint key = extra_keys[id * MB_KEYS_PER_BLOCK + i];
+        if (key == MB_KEY_NONE) {
+            break;
+        }
+        int source = int(key >> 1);
+        bool from_next = (key & 1u) != 0u;
+        vec2 u = from_next ? next_forward[source].xy : -previous_backward[source].xy;
+        float limit = consistency_limit(push.consistency, u);
+        bool own = from_next ? l1(field_at(FIELD_BACKWARD, center + (1.0 - t) * u) + u) <= limit
+                             : l1(field_at(FIELD_FORWARD, center - t * u) - u) <= limit;
+        if (has_previous && has_next && (own || supported_both(u))) {
+            add(u);
+        }
+    }
+}
+
+bool agreed;
+vec2 agreed_vector;
+
+void find_agreed(int id)
+{
+    agreed = false;
+    agreed_vector = vec2(0.0);
+    if (push.penalty_disagree <= 0.0 || !has_previous || !has_next) {
+        return;
+    }
+    vec2 choices[3] = vec2[3](vec2(0.0), next_forward[id].xy, -previous_backward[id].xy);
+    for (int k = 0; k < 3 && !agreed; k++) {
+        agreed = supported_both(choices[k]);
+        agreed_vector = choices[k];
+    }
+}
+
+void add_ring(ivec2 block)
+{
+    for (int k = 0; k < 4; k++) {
+        int q = block_index(block + RING8[k], blocks());
+        add(forward[q].xy);
+        add(-backward[q].xy);
+    }
+}
+
+float lane_dc(int lane, ivec2 block)
+{
+    if (lane >= 9) {
+        return 1e30;
+    }
+    int q = neighbour3_index(lane, block, blocks());
+    return max(abs(forward[q].w), abs(backward[q].w));
+}
+
+bool any_long_supported(int two_sided)
+{
+    bool found = false;
+    if (push.support_enabled != 0 && has_previous && has_next) {
+        for (int i = 0; i < two_sided && !found; i++) {
+            found = l1(candidates[i]) >= push.support_min_length && supported_both(candidates[i]);
+        }
+    }
+    return found;
+}
+
+float best_cost;
+vec2 best_vector;
+float best_diff;
+int best_mode;
+bool best_supported;
+bool best_consistent;
+float uncover_costs[MAX_CANDIDATES];
+float supported_cost;
+vec2 supported_vector;
+
+void take(float cost, vec2 u, float diff, bvec2 ok)
+{
+    best_cost = cost;
+    best_vector = u;
+    best_diff = diff;
+    best_consistent = ok.x && ok.y;
+}
+
+struct Scored {
+    float cost;
+    bool supported;
+};
+
+Scored score_candidate(vec2 u, float sad, bvec2 ok, bool any_supported)
+{
+    bool supported = true;
+    float penalty = inconsistent_sides(ok);
+    bool checked = any_supported && l1(u) >= push.support_min_length;
+    if (checked) {
+        bool previous = supported_previous(u);
+        bool next = supported_next(u);
+        supported = previous || next;
+        if (previous && next && push.waive != 0) {
+            penalty = 0.0;
+        }
+    }
+    float cost = sad + push.penalty_inconsistent * penalty;
+    if (agreed && l1(u - agreed_vector) >= push.support_min_length && !supported_both(u)) {
+        cost += push.penalty_disagree;
+    }
+    if (checked) {
+        if (!supported) {
+            cost += push.penalty_unsupported;
+        } else if (cost < supported_cost) {
+            supported_cost = cost;
+            supported_vector = u;
+        }
+    }
+    return Scored(cost, supported);
+}
+
+void score_two_sided(vec2 row0, int two_sided, bool any_supported)
+{
+    for (int i = 0; i < two_sided; i++) {
+        vec2 u = candidates[i];
+        float sad = pair_sad(row0, u);
+        float diff = lane_diff;
+        bvec2 ok = consistent(u);
+        Scored scored = score_candidate(u, sad, ok, any_supported);
+        if (ok.x && ok.y && scored.supported) {
+            scored.cost -= foreground(u);
+        }
+        uncover_costs[i] = ok.y && !ok.x ? scored.cost : -1.0;
+        if (scored.cost < best_cost) {
+            take(scored.cost, u, diff, ok);
+            best_supported = scored.supported;
+        }
+    }
+}
+
+void check_agreed(vec2 row0)
+{
+    if (!agreed || l1(best_vector - agreed_vector) < push.support_min_length) {
+        return;
+    }
+    float sad = pair_sad(row0, agreed_vector);
+    bvec2 ok = consistent(agreed_vector);
+    float cost = sad + push.penalty_inconsistent * inconsistent_sides(ok);
+    if (cost < best_cost) {
+        take(cost, agreed_vector, lane_diff, ok);
+        best_supported = true;
+    }
+}
+
+void try_refined(vec2 row0, vec2 u, bool coarse)
+{
+    float sad = pair_sad(row0, u);
+    float diff = lane_diff;
+    bvec2 ok = consistent(u);
+    if (coarse && !ok.x && !ok.y) {
+        return;
+    }
+    bool waived = supported_both(u) && push.waive != 0;
+    float cost = sad + push.penalty_inconsistent * (waived ? 0.0 : inconsistent_sides(ok));
+    if (ok.x && ok.y) {
+        cost -= foreground(u);
+    }
+    if (cost < best_cost) {
+        take(cost, u, diff, ok);
+    }
+}
+
+void refine_supported(vec2 row0, bool any_supported)
+{
+    if (!any_supported || best_supported || supported_cost >= 1e29 || push.refine_radius <= 0) {
+        return;
+    }
+    float radius = float(push.refine_radius);
+    for (int pass = 0; pass < 2; pass++) {
+        vec2 base = pass == 0 ? supported_vector : best_vector;
+        float step = pass == 0 ? 2.0 : 1.0;
+        float reach = pass == 0 ? radius : 1.0;
+        for (float dy = -reach; dy <= reach; dy += step) {
+            for (float dx = -reach; dx <= reach; dx += step) {
+                try_refined(row0, base + vec2(dx, dy), pass == 0);
+            }
+        }
+    }
+}
+
+void try_uncover(vec2 row0, int two_sided)
+{
+    if (push.uncover == 0 || !has_previous || !has_next || best_cost <= push.uncover_min_cost) {
+        return;
+    }
+    float pick_sad = 1e30, pick_cost;
+    vec2 pick;
+    for (int i = 0; i < two_sided; i++) {
+        if (uncover_costs[i] < 0.0) {
+            continue;
+        }
+        float sad = future_sad(row0, candidates[i]);
+        if (sad < pick_sad && sad < best_cost) {
+            pick_sad = sad;
+            pick = candidates[i];
+            pick_cost = uncover_costs[i];
+        }
+    }
+    if (pick_sad < 1e30 && pick_sad <= push.uncover_continuity * future_sad(row0, best_vector)) {
+        best_vector = pick;
+        best_cost = pick_cost;
+        best_mode = MB_MODE_UNCOVER;
+        best_consistent = false;
+    }
+}
+
+bool near_edge(vec2 p)
+{
+    vec2 end = vec2(push.blocks_x - 1, push.blocks_y - 1) * float(MB_BLOCK_SIZE);
+    return any(lessThan(p, vec2(FRAME_MARGIN))) || any(greaterThanEqual(p, end));
+}
+
+float one_sided_limit;
+float best_ratio;
+
+void consider_ratio(float ratio, vec2 u, int mode)
+{
+    if (ratio < push.one_sided_texture && ratio < best_ratio) {
+        best_ratio = ratio;
+        best_vector = u;
+        best_mode = mode;
+    }
+}
+
+void try_future(vec2 row0, vec2 u)
+{
+    float rb[16], rc[16];
+    load_row(frame_b, row0 + (1.0 - t) * u, rb);
+    load_row(frame_c, row0 + (2.0 - t) * u, rc);
+    float sad = window_sad(rb, rc);
+    if (sad + push.one_sided_margin < one_sided_limit) {
+        consider_ratio(sad / max(row_texture(rb, frame_b, row0 + (1.0 - t) * u), 1.0), u, MB_MODE_FUTURE);
+    }
+}
+
+void try_past(vec2 row0, vec2 u)
+{
+    float ra[16], rz[16];
+    load_row(frame_a, row0 - t * u, ra);
+    load_row(frame_z, row0 - (1.0 + t) * u, rz);
+    float sad = window_sad(ra, rz);
+    if (sad + push.one_sided_margin < one_sided_limit) {
+        consider_ratio(sad / max(row_texture(ra, frame_a, row0 - t * u), 1.0), u, MB_MODE_PAST);
+    }
+}
+
+void try_one_sided_vector(vec2 row0, vec2 u)
+{
+    float threshold = consistency_limit(push.consistency, u);
+    vec2 pa = center - t * u, pb = center + (1.0 - t) * u;
+    vec2 errors = consistency_errors(u);
+    if (errors.x <= threshold && errors.y <= threshold) {
+        return;
+    }
+    bool future_ok = t >= 0.5 || near_edge(pa) || t * errors.x >= push.occlusion_strip;
+    bool past_ok = t <= 0.5 || near_edge(pb) || (1.0 - t) * errors.y >= push.occlusion_strip;
+    if (has_next && future_ok && l1(field_at(FIELD_NEXT, pb) - u) <= threshold) {
+        try_future(row0, u);
+    }
+    if (has_previous && past_ok && l1(field_at(FIELD_PREVIOUS, pa) + u) <= threshold) {
+        try_past(row0, u);
+    }
+}
+
+void try_one_sided(vec2 row0, int id)
+{
+    one_sided_limit = push.one_sided_ratio * best_cost;
+    best_ratio = 1e30;
+    bool worth = one_sided_limit > push.one_sided_margin && best_cost > push.one_sided_min_cost;
+    if (!(has_next || has_previous) || !worth || best_consistent) {
+        return;
+    }
+    if (has_next) {
+        add(next_forward[id].xy);
+    }
+    if (has_previous) {
+        add(-previous_backward[id].xy);
+    }
+    for (int i = 0; i < candidate_count; i++) {
+        try_one_sided_vector(row0, candidates[i]);
+    }
+}
+
+void begin_block(ivec2 block)
+{
+    texel_size = 1.0 / vec2(push.width, push.height);
+    t = push.t;
+    center = block_center(block);
+    has_next = push.has_next != 0 && next_stats[MB_STAT_CUT] == 0u;
+    has_previous = push.has_previous != 0 && previous_stats[MB_STAT_CUT] == 0u;
+    best_cost = 1e30;
+    best_vector = vec2(0.0);
+    best_diff = 0.0;
+    best_mode = MB_MODE_TWO_SIDED;
+    best_supported = true;
+    best_consistent = false;
+    supported_cost = 1e30;
+    supported_vector = vec2(0.0);
+}
+
+int gather_candidates(int id, ivec2 block)
+{
+    candidate_count = 0;
+    add_projected(id);
+    add(forward[id].xy);
+    add(-backward[id].xy);
+    add_extra(id);
+    find_agreed(id);
+    int two_sided = candidate_count;
+    add_ring(block);
+    return two_sided;
+}
+
+void main()
+{
+    int lane = int(gl_LocalInvocationID.x) & 15;
+    int id = int(gl_WorkGroupID.x) * 4 + (int(gl_LocalInvocationID.x) >> 4);
+    if (id >= push.blocks_x * push.blocks_y) {
+        return;
+    }
+    ivec2 block = block_of(id, push.blocks_x);
+    begin_block(block);
+    int two_sided = gather_candidates(id, block);
+    vec2 row0 = vec2(window_origin(block) + ivec2(0, lane)) + 0.5;
+    set_mean_weight(push.mean_lo, push.mean_hi, lane_dc(lane, block));
+    bool any_supported = any_long_supported(two_sided);
+    score_two_sided(row0, two_sided, any_supported);
+    check_agreed(row0);
+    refine_supported(row0, any_supported);
+    try_uncover(row0, two_sided);
+    try_one_sided(row0, id);
+    float dc = block_dc(best_diff);
+    if (lane == 0) {
+        selection[id] = vec4(best_vector, float(best_mode), dc);
+    }
+}

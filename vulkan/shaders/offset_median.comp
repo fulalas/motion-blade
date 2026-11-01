@@ -1,0 +1,35 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { blocks_push push; };
+#include "blocks.glsl"
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Offsets { vec4 offsets[]; };
+layout(std430, binding = 1) writeonly buffer Filtered { vec4 filtered[]; };
+
+void main()
+{
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= push.blocks_x * push.blocks_y) {
+        return;
+    }
+    ivec2 block = block_of(id, push.blocks_x);
+    vec3 values[9];
+    for (int k = 0; k < 9; k++) {
+        values[k] = offsets[neighbour3_index(k, block, blocks())].xyz;
+    }
+    vec3 median = vec3(0.0);
+    for (int c = 0; c < 3; c++) {
+        for (int i = 0; i < 9; i++) {
+            int below = 0;
+            for (int j = 0; j < 9; j++) {
+                below += int(values[j][c] < values[i][c] || (values[j][c] == values[i][c] && j < i));
+            }
+            if (below == 4) {
+                median[c] = values[i][c];
+            }
+        }
+    }
+    filtered[id] = vec4(median, 0.0);
+}

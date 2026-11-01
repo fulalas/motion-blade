@@ -1,0 +1,564 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { interpolate_push push; };
+#include "blocks.glsl"
+#include "chroma.glsl"
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D a_luma;
+layout(binding = 1) uniform sampler2D b_luma;
+layout(binding = 2) uniform sampler2D a_chroma1;
+layout(binding = 3) uniform sampler2D b_chroma1;
+layout(binding = 4) uniform sampler2D a_chroma2;
+layout(binding = 5) uniform sampler2D b_chroma2;
+layout(std430, binding = 6) readonly buffer Cells { vec4 cells[]; };
+layout(std430, binding = 7) readonly buffer Forward { vec4 forward[]; };
+layout(std430, binding = 8) readonly buffer Backward { vec4 backward[]; };
+layout(binding = 12) uniform sampler2D a_level;
+layout(binding = 13) uniform sampler2D b_level;
+layout(std430, binding = 14) readonly buffer Stats { uint stats[]; };
+layout(std430, binding = 15) readonly buffer Fallback { float fallback_weights[]; };
+layout(std430, binding = 16) readonly buffer Offsets { vec4 offsets[]; };
+layout(std430, binding = 17) readonly buffer Panels { float panel_weights[]; };
+layout(std430, binding = 18) readonly buffer Global { vec4 global_motion[]; };
+#ifdef DEPTH16
+layout(binding = 9, r16) uniform writeonly image2D out_luma;
+#ifdef NV
+layout(binding = 10, rg16) uniform writeonly image2D out_chroma1;
+#else
+layout(binding = 10, r16) uniform writeonly image2D out_chroma1;
+layout(binding = 11, r16) uniform writeonly image2D out_chroma2;
+#endif
+#else
+layout(binding = 9, r8) uniform writeonly image2D out_luma;
+#ifdef NV
+layout(binding = 10, rg8) uniform writeonly image2D out_chroma1;
+#else
+layout(binding = 10, r8) uniform writeonly image2D out_chroma1;
+layout(binding = 11, r8) uniform writeonly image2D out_chroma2;
+#endif
+#endif
+
+#define MAX_CANDIDATES 5
+#define SIDE_LEVELS 7.0
+#define WEIGHT_CUTOFF 4.9e-4
+#ifdef NV
+const bool interleaved = true;
+#else
+const bool interleaved = false;
+#endif
+
+float level_scale;
+
+vec2 at_level(vec2 p)
+{
+    return (p + 0.5) / level_scale - 0.5;
+}
+
+vec4 catmull_rom(float f)
+{
+    return vec4(f * (-0.5 + f * (1.0 - 0.5 * f)), 1.0 + f * f * (-2.5 + 1.5 * f), f * (0.5 + f * (2.0 - 1.5 * f)),
+                f * f * (-0.5 + 0.5 * f));
+}
+
+float cubic_patch(vec4 a, vec4 b, vec4 c, vec4 d, vec4 wx, vec4 wy)
+{
+    float v = dot(wy, vec4(dot(wx, vec4(a.w, a.z, b.w, b.z)), dot(wx, vec4(a.x, a.y, b.x, b.y)),
+                           dot(wx, vec4(c.w, c.z, d.w, d.z)), dot(wx, vec4(c.x, c.y, d.x, d.y))));
+    return clamp(v, min(min(a.y, b.x), min(c.z, d.w)), max(max(a.y, b.x), max(c.z, d.w)));
+}
+
+vec2 cubic(sampler2D T, vec2 pos, vec2 texel, bool two)
+{
+    vec2 k = floor(pos - 0.5), f = pos - 0.5 - k;
+    if (f == vec2(0.0)) {
+        return texelFetch(T, clamp(ivec2(k), ivec2(0), textureSize(T, 0) - 1), 0).rg;
+    }
+    vec4 wx = catmull_rom(f.x), wy = catmull_rom(f.y);
+    vec2 t0 = k * texel, t2 = (k + 2.0) * texel;
+    vec2 r = vec2(cubic_patch(textureGather(T, t0, 0), textureGather(T, vec2(t2.x, t0.y), 0),
+                              textureGather(T, vec2(t0.x, t2.y), 0), textureGather(T, t2, 0), wx, wy),
+                  0.0);
+    if (two) {
+        r.y = cubic_patch(textureGather(T, t0, 1), textureGather(T, vec2(t2.x, t0.y), 1),
+                          textureGather(T, vec2(t0.x, t2.y), 1), textureGather(T, t2, 1), wx, wy);
+    }
+    return r;
+}
+
+void gather_row_pair(sampler2D T, vec2 corner, vec2 texel, vec4 wx, int gy, inout float rows[5][2],
+                     inout float inner[3][3])
+{
+    vec4 g0 = textureGather(T, corner * texel, 0);
+    vec4 g1 = textureGather(T, (corner + vec2(2.0, 0.0)) * texel, 0);
+    vec4 g2 = textureGather(T, (corner + vec2(4.0, 0.0)) * texel, 0);
+    float r[2][6] = float[2][6](float[6](g0.w, g0.z, g1.w, g1.z, g2.w, g2.z),
+                                float[6](g0.x, g0.y, g1.x, g1.y, g2.x, g2.y));
+    for (int rr = 0; rr < 2; rr++) {
+        int row = 2 * gy + rr;
+        if (row > 4) {
+            continue;
+        }
+        for (int jx = 0; jx < 2; jx++) {
+            rows[row][jx] = dot(wx, vec4(r[rr][jx], r[rr][jx + 1], r[rr][jx + 2], r[rr][jx + 3]));
+        }
+        if (row >= 1 && row <= 3) {
+            for (int c = 0; c < 3; c++) {
+                inner[row - 1][c] = r[rr][c + 1];
+            }
+        }
+    }
+}
+
+void quad_cubic(sampler2D T, vec2 pos, vec2 texel, out float o[4])
+{
+    vec2 k = floor(pos - 0.5), f = pos - 0.5 - k;
+    if (f == vec2(0.0)) {
+        ivec2 last = textureSize(T, 0) - 1;
+        for (int j = 0; j < 4; j++) {
+            o[j] = texelFetch(T, clamp(ivec2(k) + ivec2(j & 1, j >> 1), ivec2(0), last), 0).r;
+        }
+        return;
+    }
+    vec4 wx = catmull_rom(f.x), wy = catmull_rom(f.y);
+    float rows[5][2], inner[3][3];
+    for (int gy = 0; gy < 3; gy++) {
+        gather_row_pair(T, k + vec2(0.0, float(2 * gy)), texel, wx, gy, rows, inner);
+    }
+    for (int j = 0; j < 4; j++) {
+        int jx = j & 1, jy = j >> 1;
+        float v = dot(wy, vec4(rows[jy][jx], rows[jy + 1][jx], rows[jy + 2][jx], rows[jy + 3][jx]));
+        float lo = min(min(inner[jy][jx], inner[jy][jx + 1]), min(inner[jy + 1][jx], inner[jy + 1][jx + 1]));
+        float hi = max(max(inner[jy][jx], inner[jy][jx + 1]), max(inner[jy + 1][jx], inner[jy + 1][jx + 1]));
+        o[j] = clamp(v, lo, hi);
+    }
+}
+
+float output_value(float v)
+{
+#ifdef DEPTH16
+    v = min(v, push.max_value);
+    if (push.quant_step > 0.0) {
+        v = round(v / push.quant_step) * push.quant_step;
+    }
+#endif
+    return v;
+}
+
+float consistent_share(bool use_forward, vec2 p, vec2 u, float limit)
+{
+    vec2 q = (p / level_scale - 3.5) / 8.0;
+    u /= level_scale;
+    ivec2 b0 = ivec2(floor(q));
+    vec2 fr = q - vec2(b0);
+    float share = 0.0;
+    for (int k = 0; k < 4; k++) {
+        int i = block_index(b0 + ivec2(k & 1, k >> 1), blocks());
+        vec2 v = use_forward ? forward[i].xy - u : backward[i].xy + u;
+        float w = ((k & 1) != 0 ? fr.x : 1.0 - fr.x) * ((k >> 1) != 0 ? fr.y : 1.0 - fr.y);
+        share += l1(v) <= limit ? w : 0.0;
+    }
+    return share;
+}
+
+void copy_nearest(ivec2 q0)
+{
+    bool use_a = push.t < 0.5;
+    for (int j = 0; j < 4; j++) {
+        ivec2 p = q0 + ivec2(j & 1, j >> 1);
+        if (p.x < push.width && p.y < push.height) {
+            imageStore(out_luma, p, vec4(use_a ? texelFetch(a_luma, p, 0).r : texelFetch(b_luma, p, 0).r));
+        }
+    }
+    for (int cy = 0; cy < (2 >> push.shift_y); cy++) {
+        for (int cx = 0; cx < (2 >> push.shift_x); cx++) {
+            ivec2 cp = (q0 >> ivec2(push.shift_x, push.shift_y)) + ivec2(cx, cy);
+            if (cp.x >= push.chroma_width || cp.y >= push.chroma_height) {
+                continue;
+            }
+            imageStore(out_chroma1, cp, use_a ? texelFetch(a_chroma1, cp, 0) : texelFetch(b_chroma1, cp, 0));
+#ifndef NV
+            imageStore(out_chroma2, cp, use_a ? texelFetch(a_chroma2, cp, 0) : texelFetch(b_chroma2, cp, 0));
+#endif
+        }
+    }
+}
+
+vec2 candidate_vectors[MAX_CANDIDATES];
+int candidate_modes[MAX_CANDIDATES];
+float coverage[MAX_CANDIDATES][4];
+float fallback_sum[4] = float[4](0.0, 0.0, 0.0, 0.0);
+float coverage_sum[4] = float[4](0.0, 0.0, 0.0, 0.0);
+float panel_sum[4] = float[4](0.0, 0.0, 0.0, 0.0);
+int candidate_count = 0;
+bool has_uncover = false;
+vec4 light = vec4(0.0);
+
+int candidate_slot(vec2 u, int mode)
+{
+    int ci = -1;
+    for (int i = 0; i < candidate_count; i++) {
+        if (candidate_vectors[i] == u) {
+            ci = i;
+        }
+    }
+    if (ci >= 0) {
+        return ci;
+    }
+    ci = candidate_count++;
+    candidate_vectors[ci] = u;
+    candidate_modes[ci] = mode;
+    has_uncover = has_uncover || mode == MB_MODE_UNCOVER;
+    for (int j = 0; j < 4; j++) {
+        coverage[ci][j] = 0.0;
+    }
+    return ci;
+}
+
+void add_coverage(int ci, ivec2 b, int bi, ivec2 q0)
+{
+    vec2 cb = vec2(b * 8) + 3.5;
+    for (int j = 0; j < 4; j++) {
+        vec2 p = at_level(vec2(q0 + ivec2(j & 1, j >> 1)));
+        vec2 w2 = max(vec2(0.0), 1.0 - abs(p - cb) / 8.0);
+        coverage[ci][j] += w2.x * w2.y;
+        fallback_sum[j] += w2.x * w2.y * fallback_weights[bi];
+        panel_sum[j] += w2.x * w2.y * panel_weights[bi];
+        coverage_sum[j] += w2.x * w2.y;
+        light += w2.x * w2.y * vec4(offsets[bi].xyz, 1.0);
+    }
+}
+
+void gather_blocks(ivec2 q0)
+{
+    ivec2 qm = q0 >> push.base_level;
+    int qx = qm.x >> 2, qy = qm.y >> 2;
+    int bx = (qx & 1) != 0 ? qx / 2 : qx / 2 - 1;
+    int by = (qy & 1) != 0 ? qy / 2 : qy / 2 - 1;
+    for (int k = 0; k < 4; k++) {
+        ivec2 b = ivec2(bx + (k & 1), by + (k >> 1));
+        int bi = block_index(b, blocks());
+        ivec2 cell = clamp(b * 2 + clamp((qm - b * 8) >> 2, ivec2(0), ivec2(1)), ivec2(0), blocks() * 2 - 1);
+        vec4 tv = cells[cell.y * push.blocks_x * 2 + cell.x];
+        int ci = candidate_slot(tv.xy * level_scale, int(tv.z));
+        add_coverage(ci, b, bi, q0);
+    }
+    light /= max(light.w, 1e-6);
+}
+
+float t;
+vec2 texel_size;
+int fallback_index;
+float cost[MAX_CANDIDATES][4];
+uint sides[4] = uint[4](0u, 0u, 0u, 0u);
+float weight_a[MAX_CANDIDATES][4], weight_b[MAX_CANDIDATES][4];
+float panel[4];
+float panel_share = 0.0;
+float switch_weight = 0.0;
+float global_a_luma[4] = float[4](0.0, 0.0, 0.0, 0.0), global_b_luma[4] = float[4](0.0, 0.0, 0.0, 0.0);
+vec2 global_a_chroma = vec2(0.0), global_b_chroma = vec2(0.0);
+vec2 global_a, global_b;
+
+void add_fallback()
+{
+    fallback_index = candidate_count++;
+    candidate_vectors[fallback_index] = vec2(0.0);
+    candidate_modes[fallback_index] = MB_MODE_TWO_SIDED;
+    for (int j = 0; j < 4; j++) {
+        coverage[fallback_index][j] = 1.0 - push.candidate_prior;
+    }
+}
+
+vec2 trust_sides(int i, ivec2 q0)
+{
+    vec2 u = candidate_vectors[i];
+    if (candidate_modes[i] != MB_MODE_TWO_SIDED) {
+        return vec2(float(candidate_modes[i] == MB_MODE_PAST),
+                    float(candidate_modes[i] == MB_MODE_FUTURE || candidate_modes[i] == MB_MODE_UNCOVER));
+    }
+    float limit = consistency_limit(push.consistency, u / level_scale);
+    vec2 center = vec2(q0) + 0.5;
+    float a = consistent_share(true, center + -t * u, u, limit);
+    float b = consistent_share(false, center + (1.0 - t) * u, u, limit);
+    return vec2(a, b);
+}
+
+float differences[16];
+
+void measure_differences(vec2 u, ivec2 q0, float luma_offset)
+{
+    vec2 oa = -t * u, ob = (1.0 - t) * u;
+    for (int y = 0; y < 4; y++) {
+        for (int x = 0; x < 4; x++) {
+            vec2 p = vec2(q0 + ivec2(x - 1, y - 1)) + 0.5;
+            float a = textureLod(a_level, (p + oa) * texel_size, 0.0).r;
+            float b = textureLod(b_level, (p + ob) * texel_size, 0.0).r;
+            differences[y * 4 + x] = abs((a - b) * 255.0 - luma_offset);
+        }
+    }
+}
+
+vec2 window_error(int jx, int jy)
+{
+    float sum = 0.0, lowest = 1e30;
+    for (int dy = 0; dy < 3; dy++) {
+        for (int dx = 0; dx < 3; dx++) {
+            float d = differences[(jy + dy) * 4 + jx + dx];
+            sum += d;
+            lowest = min(lowest, d);
+        }
+    }
+    return vec2(sum, lowest);
+}
+
+void score_pixel(int i, int j, vec2 trust)
+{
+    vec2 u = candidate_vectors[i];
+    vec2 error = window_error(j & 1, j >> 1);
+    float e = error.x;
+    float qa = round(trust.x * (1.0 - trust.y) * SIDE_LEVELS), qb = round((1.0 - trust.x) * trust.y * SIDE_LEVELS);
+    float pixel_cost = trust.x * trust.y * max(0.0, e - push.foreground_bonus * clamp(l1(u) * 0.5, 0.0, 1.0)) +
+                       (qa + qb) / SIDE_LEVELS * push.penalty_one_sided +
+                       (1.0 - trust.x) * (1.0 - trust.y) * (e + push.penalty_unconfirmed);
+    if (push.nearest_hi > 0.0) {
+        float nearest = round(smoothstep(push.nearest_lo, push.nearest_hi, error.y) *
+                              smoothstep(0.0, 0.25, trust.x * trust.y) * SIDE_LEVELS);
+        float before = qa + qb;
+        if (t < 0.5) {
+            qa = max(qa, nearest);
+            qb = min(qb, SIDE_LEVELS - qa);
+        } else {
+            qb = max(qb, nearest);
+            qa = min(qa, SIDE_LEVELS - qb);
+        }
+        pixel_cost += max(0.0, qa + qb - before) / SIDE_LEVELS * push.penalty_one_sided;
+    }
+    cost[i][j] = pixel_cost;
+    sides[j] |= (uint(qa) | (uint(qb) << 3)) << (6 * i);
+}
+
+void score_candidates(ivec2 q0, float luma_offset)
+{
+    for (int i = 0; i < candidate_count; i++) {
+        if (i == fallback_index) {
+            for (int j = 0; j < 4; j++) {
+                cost[i][j] = has_uncover ? push.penalty_fallback_uncover : push.penalty_fallback;
+            }
+            continue;
+        }
+        vec2 trust = trust_sides(i, q0);
+        measure_differences(candidate_vectors[i], q0, luma_offset);
+        for (int j = 0; j < 4; j++) {
+            score_pixel(i, j, trust);
+        }
+    }
+}
+
+void weigh_pixel(int j)
+{
+    float lowest = 1e30;
+    for (int i = 0; i < candidate_count; i++) {
+        lowest = min(lowest, cost[i][j]);
+    }
+    float total = 0.0, raw[MAX_CANDIDATES];
+    for (int i = 0; i < candidate_count; i++) {
+        float e = exp(-(cost[i][j] - lowest) / push.softness);
+        raw[i] = e < WEIGHT_CUTOFF ? 0.0 : (push.candidate_prior + coverage[i][j]) * e;
+        total += raw[i];
+    }
+    float fallback = coverage_sum[j] > 0.0 ? fallback_sum[j] / coverage_sum[j] : 0.0;
+    for (int i = 0; i < candidate_count; i++) {
+        float w = (1.0 - fallback) * raw[i] / total + (i == fallback_index ? fallback : 0.0);
+        uint code = (sides[j] >> (6 * i)) & 63u;
+        float qa = float(code & 7u) / SIDE_LEVELS, qb = float(code >> 3) / SIDE_LEVELS;
+        float toward_b = t * (1.0 - qa - qb) + qb;
+        weight_a[i][j] = w * (1.0 - toward_b);
+        weight_b[i][j] = w * toward_b;
+    }
+}
+
+bool contributes(int i)
+{
+    return weight_a[i][0] + weight_b[i][0] + weight_a[i][1] + weight_b[i][1] + weight_a[i][2] + weight_b[i][2] +
+               weight_a[i][3] + weight_b[i][3] > 0.0;
+}
+
+void blend_luma(ivec2 q0, float dy, out float luma[4])
+{
+    luma = float[4](0.0, 0.0, 0.0, 0.0);
+    for (int i = 0; i < candidate_count; i++) {
+        if (!contributes(i)) {
+            continue;
+        }
+        float sa[4], sb[4];
+        quad_cubic(a_luma, vec2(q0) + 0.5 - t * candidate_vectors[i], texel_size, sa);
+        quad_cubic(b_luma, vec2(q0) + 0.5 + (1.0 - t) * candidate_vectors[i], texel_size, sb);
+        for (int j = 0; j < 4; j++) {
+            luma[j] += weight_a[i][j] * (sa[j] - t * dy) + weight_b[i][j] * (sb[j] + (1.0 - t) * dy);
+        }
+    }
+}
+
+vec2 chroma_shift()
+{
+    return vec2(1 << push.shift_x, 1 << push.shift_y);
+}
+
+vec2 chroma_texel_size()
+{
+    return 1.0 / vec2(push.chroma_width, push.chroma_height);
+}
+
+vec2 sample_a_chroma(vec2 position)
+{
+    return chroma_sample(a_chroma1, a_chroma2, position * chroma_texel_size(), interleaved);
+}
+
+vec2 sample_b_chroma(vec2 position)
+{
+    return chroma_sample(b_chroma1, b_chroma2, position * chroma_texel_size(), interleaved);
+}
+
+void measure_panels(ivec2 q0)
+{
+    for (int j = 0; j < 4; j++) {
+        panel[j] = coverage_sum[j] > 0.0 ? panel_sum[j] / coverage_sum[j] : 0.0;
+        panel_share += panel[j] * 0.25;
+    }
+    vec2 global = global_motion[0].xy * level_scale;
+    global_a = -t * global;
+    global_b = (1.0 - t) * global;
+    if (panel_share <= 0.0) {
+        return;
+    }
+    vec2 qc = (vec2(q0) + 1.0) / chroma_shift();
+    global_a_chroma = sample_a_chroma(qc + global_a / chroma_shift());
+    global_b_chroma = sample_b_chroma(qc + global_b / chroma_shift());
+    vec2 chroma_change = abs(global_a_chroma - global_b_chroma);
+    float luma_change = 0.0;
+    for (int j = 0; j < 4; j++) {
+        vec2 pp = vec2(q0 + ivec2(j & 1, j >> 1)) + 0.5;
+        global_a_luma[j] = textureLod(a_luma, (pp + global_a) * texel_size, 0.0).r;
+        global_b_luma[j] = textureLod(b_luma, (pp + global_b) * texel_size, 0.0).r;
+        luma_change = max(luma_change, abs(global_a_luma[j] - global_b_luma[j]));
+    }
+    float change = max(max(chroma_change.x, chroma_change.y), luma_change) * 255.0 * push.luma_scale;
+    switch_weight = smoothstep(push.panel_switch, push.panel_switch * 2.5, change);
+}
+
+float unmoved(float a, float b)
+{
+    return mix((1.0 - t) * a + t * b, t < 0.5 ? a : b, switch_weight);
+}
+
+void store_luma(ivec2 q0, float luma[4])
+{
+    for (int j = 0; j < 4; j++) {
+        ivec2 p = q0 + ivec2(j & 1, j >> 1);
+        if (panel[j] > 0.0) {
+            luma[j] = mix(luma[j], unmoved(global_a_luma[j], global_b_luma[j]), panel[j]);
+        }
+        if (p.x < push.width && p.y < push.height) {
+            imageStore(out_luma, p, vec4(output_value(luma[j])));
+        }
+    }
+}
+
+vec2 covered_weights(int i, ivec2 index)
+{
+    float ca = 0.0, cb = 0.0;
+    for (int yy = 0; yy < (1 << push.shift_y); yy++) {
+        for (int xx = 0; xx < (1 << push.shift_x); xx++) {
+            int j = ((index.y << push.shift_y) + yy) * 2 + (index.x << push.shift_x) + xx;
+            ca += weight_a[i][j];
+            cb += weight_b[i][j];
+        }
+    }
+    float norm = 1.0 / float((1 << push.shift_x) * (1 << push.shift_y));
+    return vec2(ca * norm, cb * norm);
+}
+
+vec2 warped_chroma(vec2 pc, vec2 offset_a, vec2 offset_b, vec2 weights, vec2 chroma_offset)
+{
+    vec2 pa = pc - offset_a, pb = pc + offset_b;
+#ifdef NV
+    vec2 a = cubic(a_chroma1, pa, chroma_texel_size(), true), b = cubic(b_chroma1, pb, chroma_texel_size(), true);
+#else
+    vec2 texel = chroma_texel_size();
+    vec2 a = vec2(cubic(a_chroma1, pa, texel, false).x, cubic(a_chroma2, pa, texel, false).x);
+    vec2 b = vec2(cubic(b_chroma1, pb, texel, false).x, cubic(b_chroma2, pb, texel, false).x);
+#endif
+    return weights.x * (a - t * chroma_offset) + weights.y * (b + (1.0 - t) * chroma_offset);
+}
+
+vec2 blend_chroma(ivec2 index, ivec2 cp)
+{
+    vec2 pc = vec2(cp) + 0.5;
+    vec2 acc = vec2(0.0);
+    for (int i = 0; i < candidate_count; i++) {
+        vec2 weights = covered_weights(i, index);
+        if (weights.x + weights.y <= 0.0) {
+            continue;
+        }
+        acc += warped_chroma(pc, t * candidate_vectors[i] / chroma_shift(),
+                             (1.0 - t) * candidate_vectors[i] / chroma_shift(), weights, light.yz);
+    }
+    if (panel_share > 0.0) {
+        vec2 sa = global_a_chroma, sb = global_b_chroma;
+        if (push.shift_x != 1 || push.shift_y != 1) {
+            sa = sample_a_chroma(pc + global_a / chroma_shift());
+            sb = sample_b_chroma(pc + global_b / chroma_shift());
+        }
+        acc = mix(acc, vec2(unmoved(sa.x, sb.x), unmoved(sa.y, sb.y)), panel_share);
+    }
+    return acc;
+}
+
+void store_chroma(ivec2 cp, vec2 value)
+{
+#ifdef NV
+    imageStore(out_chroma1, cp, vec4(output_value(value.x), output_value(value.y), 0.0, 0.0));
+#else
+    imageStore(out_chroma1, cp, vec4(output_value(value.x)));
+    imageStore(out_chroma2, cp, vec4(output_value(value.y)));
+#endif
+}
+
+void blend_quad_chroma(ivec2 q0)
+{
+    for (int cy = 0; cy < (2 >> push.shift_y); cy++) {
+        for (int cx = 0; cx < (2 >> push.shift_x); cx++) {
+            ivec2 cp = (q0 >> ivec2(push.shift_x, push.shift_y)) + ivec2(cx, cy);
+            if (cp.x < push.chroma_width && cp.y < push.chroma_height) {
+                store_chroma(cp, blend_chroma(ivec2(cx, cy), cp));
+            }
+        }
+    }
+}
+
+void main()
+{
+    level_scale = float(1 << push.base_level);
+    ivec2 q0 = ivec2(gl_GlobalInvocationID.xy) * 2;
+    if (q0.x >= push.width || q0.y >= push.height) {
+        return;
+    }
+    if (stats[MB_STAT_CUT] != 0u) {
+        copy_nearest(q0);
+        return;
+    }
+    t = push.t;
+    texel_size = 1.0 / vec2(push.width, push.height);
+    gather_blocks(q0);
+    add_fallback();
+    score_candidates(q0, light.x * 255.0 * push.luma_scale);
+    for (int j = 0; j < 4; j++) {
+        weigh_pixel(j);
+    }
+    float luma[4];
+    blend_luma(q0, light.x, luma);
+    measure_panels(q0);
+    store_luma(q0, luma);
+    blend_quad_chroma(q0);
+}

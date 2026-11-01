@@ -41,11 +41,8 @@ back to the nearest frame), light changes (flashes, sirens). Above 2.5 megapixel
 
 ## Build
 
-Motion Blade builds on top of mpv, which is a git submodule, patched at build time
-(`patches/mpv.patch`). Arguments to the first `./build.sh` go to `meson setup`.
-
 It requires mpv build dependencies (meson, ninja, ffmpeg, libplacebo, etc), Vulkan headers
-and `glslc` (from shaderc).
+and `glslc` (from shaderc). Arguments to the first `./build.sh` go to `meson setup`.
 
 ```sh
 ./build.sh
@@ -53,7 +50,7 @@ and `glslc` (from shaderc).
 
 Windows (static, cross-built from Linux): extract
 [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (UCRT, x86_64) into `winbuild/`, then run
-`./build-windows.sh`. It writes `winbuild/motionblade-windows-x86_64.zip`.
+`./build-windows.sh`. It writes `build/motionblade-windows-x86_64.zip`.
 
 ## Use
 
@@ -77,12 +74,24 @@ at 60 fps, and a 60 fps video plays as it is.
 
 `Ctrl+M` switches between interpolation 2x, 4x, 8x, auto and off.
 
+## Stutter and high GPU usage
+
+If playback stutters, set the GPU power mode to maximum performance: power saving can keep its clocks
+too low.
+
+| | Windows | Linux (as root) |
+|---|---|---|
+| NVIDIA | Control Panel → Manage 3D settings → Power management mode → Prefer maximum performance | `nvidia-settings -a '[gpu:0]/GpuPowerMizerMode=1'` |
+| AMD | Windows power mode → Best performance | `echo high > /sys/class/drm/cardN/device/power_dpm_force_performance_level` |
+| Intel | Graphics Command Center → System → Power → Maximum Performance | `cat gt_max_freq_mhz > gt_min_freq_mhz` in `/sys/class/drm/cardN/` |
+
 ## Tests
 
-`make` builds `eval_vk`, which drops every other frame of a video, rebuilds it and scores it
-against the real one. `tools/regress.sh` checks quality, scene cuts and speed against
-`tools/baseline.txt`; `tools/fetch-data.sh` downloads the test clips. `MOTIONBLADE_PROFILE=1` prints
-the GPU time of each step.
+`make` builds `eval` and the tests, `make test` runs them. `build/local/tools/eval/eval clip.mkv` drops
+every other frame of a video, rebuilds it and scores it against the real one (`-backend cpu` uses the C
+reference instead of the GPU). `tools/regress.sh` checks quality, scene cuts and speed against
+`tools/baseline.txt`; `tools/fetch-data.sh` downloads the test clips. `MOTIONBLADE_PROFILE=1` prints the
+GPU time of each step.
 
 ## License
 

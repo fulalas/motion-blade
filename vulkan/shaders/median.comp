@@ -1,0 +1,65 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { median_push push; };
+#include "blocks.glsl"
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Selection { vec4 selection[]; };
+layout(std430, binding = 1) writeonly buffer Filtered { vec4 filtered[]; };
+
+vec4 neighbours[9];
+int neighbour_count;
+
+bool inside(ivec2 q)
+{
+    return all(greaterThanEqual(q, ivec2(0))) && all(lessThan(q, blocks()));
+}
+
+void gather_two_sided(ivec2 block)
+{
+    neighbour_count = 0;
+    for (int k = 0; k < 9; k++) {
+        ivec2 q = block + neighbour3(k);
+        if (!inside(q)) {
+            continue;
+        }
+        vec4 v = selection[q.y * push.blocks_x + q.x];
+        if (int(v.z) == MB_MODE_TWO_SIDED) {
+            neighbours[neighbour_count++] = v;
+        }
+    }
+}
+
+vec4 vector_median(vec4 fallback)
+{
+    vec4 median = fallback;
+    float lowest = 1e30;
+    for (int i = 0; i < neighbour_count; i++) {
+        float distance = 0.0;
+        for (int j = 0; j < neighbour_count; j++) {
+            distance += l1(neighbours[i].xy - neighbours[j].xy);
+        }
+        if (distance < lowest) {
+            lowest = distance;
+            median = neighbours[i];
+        }
+    }
+    return median;
+}
+
+void main()
+{
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= push.blocks_x * push.blocks_y) {
+        return;
+    }
+    vec4 own = selection[id];
+    if (int(own.z) != MB_MODE_TWO_SIDED) {
+        filtered[id] = own;
+        return;
+    }
+    gather_two_sided(block_of(id, push.blocks_x));
+    vec4 median = vector_median(own);
+    filtered[id] = l1(median.xy - own.xy) > push.threshold ? median : own;
+}

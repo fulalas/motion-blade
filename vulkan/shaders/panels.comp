@@ -1,0 +1,74 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { panels_push push; };
+#include "blocks.glsl"
+#include "chroma.glsl"
+layout(local_size_x = 64) in;
+
+layout(binding = 0) uniform sampler2D a_luma;
+layout(binding = 1) uniform sampler2D b_luma;
+layout(binding = 2) uniform sampler2D a_chroma1;
+layout(binding = 3) uniform sampler2D b_chroma1;
+layout(binding = 4) uniform sampler2D a_chroma2;
+layout(binding = 5) uniform sampler2D b_chroma2;
+layout(std430, binding = 6) writeonly buffer Flags { vec2 flags[]; };
+layout(std430, binding = 7) readonly buffer Global { vec4 global_motion[]; };
+
+float max_component(vec2 v)
+{
+    return max(v.x, v.y);
+}
+
+struct Probes {
+    float change;
+    float saturation_a;
+    float saturation_b;
+    vec2 lo;
+    vec2 hi;
+};
+
+void probe(inout Probes acc, vec2 p, vec2 u)
+{
+    float t = push.t;
+    bool interleaved = push.interleaved != 0;
+    vec2 texel = 1.0 / vec2(push.width, push.height);
+    vec2 chroma_texel = 1.0 / vec2(push.chroma_width, push.chroma_height);
+    vec2 shift = vec2(1 << push.shift_x, 1 << push.shift_y);
+    vec2 pa = p - t * u, pb = p + (1.0 - t) * u;
+    vec2 ca = chroma_sample(a_chroma1, a_chroma2, pa / shift * chroma_texel, interleaved);
+    vec2 cb = chroma_sample(b_chroma1, b_chroma2, pb / shift * chroma_texel, interleaved);
+    acc.change += max_component(abs(ca - cb));
+    acc.saturation_a += max_component(abs(ca - push.chroma_mid));
+    acc.saturation_b += max_component(abs(cb - push.chroma_mid));
+    float a = textureLod(a_luma, pa * texel, 0.0).r, b = textureLod(b_luma, pb * texel, 0.0).r;
+    acc.lo = min(acc.lo, vec2(a, b));
+    acc.hi = max(acc.hi, vec2(a, b));
+}
+
+vec2 panel_flag(int id)
+{
+    float m = float(1 << push.base_level);
+    vec2 u = global_motion[0].xy * m;
+    vec2 corner = vec2(block_of(id, push.blocks_x)) * 8.0 * m;
+    Probes acc = Probes(0.0, 0.0, 0.0, vec2(1e30), vec2(-1e30));
+    for (int k = 0; k < 9; k++) {
+        probe(acc, corner + (vec2(k % 3, k / 3) * 3.0 + 1.0) * m, u);
+    }
+    float scale = push.level_scale;
+    float d = acc.change / 9.0 * scale;
+    float range = max(acc.hi.x - acc.lo.x, acc.hi.y - acc.lo.y) * scale;
+    float flatness = 1.0 - smoothstep(push.flat_range * 0.5, push.flat_range, range);
+    float saturation = min(acc.saturation_a, acc.saturation_b) / 9.0 * scale;
+    float saturated = smoothstep(push.saturation * 0.5, push.saturation, saturation);
+    return vec2(smoothstep(push.change_lo, push.change_hi, d) * flatness * saturated, flatness);
+}
+
+void main()
+{
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= push.blocks_x * push.blocks_y) {
+        return;
+    }
+    flags[id] = push.change_hi > 0.0 ? panel_flag(id) : vec2(0.0);
+}

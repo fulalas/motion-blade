@@ -1,0 +1,52 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { panel_spread_push push; };
+#include "blocks.glsl"
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Flags { vec2 flags[]; };
+layout(std430, binding = 1) writeonly buffer Spread { float spread[]; };
+layout(std430, binding = 2) readonly buffer Selection { vec4 selection[]; };
+layout(std430, binding = 3) readonly buffer Global { vec4 global_motion[]; };
+
+float nearby_flag(ivec2 block)
+{
+    float strongest = 0.0;
+    for (int y = -push.radius; y <= push.radius; y++) {
+        for (int x = -push.radius; x <= push.radius; x++) {
+            strongest = max(strongest, flags[block_index(block + ivec2(x, y), blocks())].x);
+        }
+    }
+    return strongest;
+}
+
+float flagged_sources(ivec2 block)
+{
+    float strongest = 0.0;
+    vec2 c = vec2(block * 8) + 4.0, t = vec2(push.t);
+    for (int e = 0; e < 9 && push.source_distance > 0.0; e++) {
+        vec2 u = selection[neighbour3_index(e, block, blocks())].xy;
+        if (l1(u - global_motion[0].xy) <= push.source_distance) {
+            continue;
+        }
+        for (int k = 0; k < 2; k++) {
+            ivec2 q = block_at(c + (k == 0 ? -t : 1.0 - t) * u);
+            for (int d = 0; d < 9; d++) {
+                strongest = max(strongest, flags[neighbour3_index(d, q, blocks())].x);
+            }
+        }
+    }
+    return strongest;
+}
+
+void main()
+{
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= push.blocks_x * push.blocks_y) {
+        return;
+    }
+    ivec2 block = block_of(id, push.blocks_x);
+    float own = max(flags[id].x, nearby_flag(block) * flags[id].y);
+    spread[id] = max(own, flagged_sources(block));
+}

@@ -1,0 +1,19 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform Push { downsample_push push; };
+
+layout(binding = 0) uniform sampler2D source;
+layout(binding = 1, r16f) uniform writeonly image2D target;
+
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= push.width || p.y >= push.height) {
+        return;
+    }
+    vec2 center = (vec2(p) * 2.0 + 1.0) / vec2(push.source_width, push.source_height);
+    imageStore(target, p, vec4(textureLod(source, center, 0.0).r));
+}

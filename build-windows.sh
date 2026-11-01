@@ -229,7 +229,7 @@ done
 
 echo "=== building mpv"
 cd "$src_dir"
-build="$work/mpv-build"
+build="$root/build/mpv-windows"
 [ -f "$build/build.ninja" ] || meson setup "$build" --cross-file "$prefix/crossfile" \
     -D{c,cpp}_args="-I$prefix/include" -D{c,cpp}_link_args="-L$prefix/lib -static -liconv" \
     -Dlibmpv=false -Dtests=false -Dlua=luajit -Djavascript=disabled \
@@ -237,7 +237,7 @@ build="$work/mpv-build"
     -D{uchardet,libarchive,rubberband,zimg,cplugins}=disabled
 meson compile -C "$build"
 
-out="$work/motionblade-windows-x86_64"
+out="$root/build/motionblade-windows-x86_64"
 rm -rf "$out" "$out.zip"
 mkdir -p "$out/portable_config"
 cp "$build/mpv.exe" "$build/mpv.com" "$out/"
@@ -249,5 +249,5 @@ hwdec=vulkan,auto
 EOF
 cp "$root/README.md" "$root/VERSION" "$root/LICENSE" "$out/"
 printf '@echo off\r\nstart "" "%%~dp0mpv.exe" %%*\r\n' >"$out/run.bat"
-(cd "$work" && zip -qr9 "$out.zip" "$(basename "$out")")
+(cd "$root/build" && zip -qr9 "$out.zip" "$(basename "$out")")
 echo "=== done: $out.zip"
