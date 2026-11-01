@@ -1,0 +1,102 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { cross_check_push push; };
+#include "blocks.glsl"
+#include "window.glsl"
+layout(local_size_x = 64) in;
+
+layout(binding = 0) uniform sampler2D origin;
+layout(binding = 1) uniform sampler2D target;
+layout(std430, binding = 2) readonly buffer Field { vec4 field[]; };
+layout(std430, binding = 3) writeonly buffer Repaired { vec4 repaired[]; };
+layout(std430, binding = 4) readonly buffer Other { vec4 other[]; };
+layout(std430, binding = 5) readonly buffer Keys { uint keys[]; };
+
+#define GROUP 64
+#define CLUSTERS (GROUP / LANES)
+
+shared uint queued;
+shared int queued_blocks[GROUP];
+shared int queued_counts[GROUP];
+shared vec2 queued_vectors[GROUP][MB_KEYS_PER_BLOCK];
+
+bool window_fits(vec2 corner, vec2 u)
+{
+    return all(greaterThanEqual(corner + u, vec2(0.0))) &&
+           all(lessThanEqual(corner + u + float(MB_WINDOW_SIZE), vec2(push.width, push.height)));
+}
+
+void queue_block(int id)
+{
+    vec4 current = field[id];
+    vec2 corner = vec2(window_origin(block_of(id, push.blocks_x)));
+    vec2 found[MB_KEYS_PER_BLOCK];
+    int count = 0;
+    for (int k = 0; k < MB_KEYS_PER_BLOCK; k++) {
+        uint key = keys[id * MB_KEYS_PER_BLOCK + k];
+        if (key == MB_KEY_NONE) {
+            break;
+        }
+        vec2 u = -other[key >> 1].xy;
+        if (l1(u - current.xy) >= push.min_change && window_fits(corner, u)) {
+            found[count++] = u;
+        }
+    }
+    if (count == 0) {
+        repaired[id] = current;
+        return;
+    }
+    uint slot = atomicAdd(queued, 1u);
+    queued_blocks[slot] = id;
+    queued_counts[slot] = count;
+    for (int k = 0; k < MB_KEYS_PER_BLOCK; k++) {
+        queued_vectors[slot][k] = found[k];
+    }
+}
+
+bool accepted(float sad, float original)
+{
+    return sad < push.max_ratio * original && original - sad > push.min_gain;
+}
+
+void repair(int slot, int lane)
+{
+    int id = queued_blocks[slot];
+    vec4 current = field[id];
+    load_origin(origin, window_origin(block_of(id, push.blocks_x)), lane);
+    float original = target_sad(target, current.xy);
+    best = Best(original + push.length_penalty * l1(current.xy), original, 0.0, current.xy);
+    bool moved = false;
+    for (int k = 0; k < queued_counts[slot]; k++) {
+        vec2 u = queued_vectors[slot][k];
+        float sad = target_sad(target, u);
+        float cost = sad + push.penalty + push.length_penalty * l1(u);
+        if (cost < best.cost && accepted(sad, original)) {
+            best = Best(cost, sad, lane_diff, u);
+            moved = true;
+        }
+    }
+    float dc = block_dc(best.diff);
+    if (lane == 0) {
+        repaired[id] = moved ? vec4(best.vector, best.sad, dc) : current;
+    }
+}
+
+void main()
+{
+    int t = int(gl_LocalInvocationID.x);
+    if (t == 0) {
+        queued = 0u;
+    }
+    barrier();
+    int id = int(gl_WorkGroupID.x) * GROUP + t;
+    if (id < push.blocks_x * push.blocks_y) {
+        queue_block(id);
+    }
+    barrier();
+    texel_size = 1.0 / vec2(push.width, push.height);
+    for (int slot = t >> 4; slot < int(queued); slot += CLUSTERS) {
+        repair(slot, t & 15);
+    }
+}

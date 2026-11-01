@@ -1,0 +1,49 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Push { blocks_push push; };
+
+layout(std430, binding = 0) readonly buffer Selection { vec4 selection[]; };
+layout(std430, binding = 1) writeonly buffer Global { vec4 global_motion[]; };
+
+#define SAMPLES 256u
+
+shared float xs[SAMPLES], ys[SAMPLES];
+
+void sort_step(uint t, uint i, bool up)
+{
+    if ((xs[t] > xs[i]) == up) {
+        float swap = xs[t];
+        xs[t] = xs[i];
+        xs[i] = swap;
+    }
+    if ((ys[t] > ys[i]) == up) {
+        float swap = ys[t];
+        ys[t] = ys[i];
+        ys[i] = swap;
+    }
+}
+
+void main()
+{
+    uint t = gl_LocalInvocationID.x;
+    ivec2 b = ivec2((int(t & 15u) * 2 + 1) * push.blocks_x / 32, (int(t >> 4) * 2 + 1) * push.blocks_y / 32);
+    vec2 v = selection[b.y * push.blocks_x + b.x].xy;
+    xs[t] = v.x;
+    ys[t] = v.y;
+    barrier();
+    for (uint k = 2u; k <= SAMPLES; k <<= 1) {
+        for (uint j = k >> 1; j > 0u; j >>= 1) {
+            uint i = t ^ j;
+            if (i > t) {
+                sort_step(t, i, (t & k) == 0u);
+            }
+            barrier();
+        }
+    }
+    if (t == 0u) {
+        global_motion[0] = vec4(0.5 * (xs[127] + xs[128]), 0.5 * (ys[127] + ys[128]), 0.0, 0.0);
+    }
+}

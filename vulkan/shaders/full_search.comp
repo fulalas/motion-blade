@@ -1,0 +1,109 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { full_search_push push; };
+#include "blocks.glsl"
+layout(local_size_x = 256) in;
+
+layout(binding = 0) uniform sampler2D origin;
+layout(binding = 1) uniform sampler2D target;
+layout(std430, binding = 2) writeonly buffer Field { vec4 field[]; };
+
+#define MAX_RADIUS 16
+#define MAX_SPAN (MB_WINDOW_SIZE + 2 * MAX_RADIUS)
+#define THREADS 256
+
+shared float origin_pixels[THREADS];
+shared float target_pixels[MAX_SPAN * MAX_SPAN];
+shared float costs[THREADS];
+shared int indices[THREADS];
+
+float candidate_sad(int vx, int vy, int span)
+{
+    float sum = 0.0;
+    for (int y = 0; y < MB_WINDOW_SIZE; y++) {
+        for (int x = 0; x < MB_WINDOW_SIZE; x++) {
+            sum += abs(origin_pixels[y * MB_WINDOW_SIZE + x] - target_pixels[(y + vy) * span + x + vx]);
+        }
+    }
+    return sum;
+}
+
+void load_area(ivec2 corner, int radius, int span, int tid)
+{
+    ivec2 last = ivec2(push.width - 1, push.height - 1);
+    ivec2 own = clamp(corner + ivec2(tid % MB_WINDOW_SIZE, tid / MB_WINDOW_SIZE), ivec2(0), last);
+    origin_pixels[tid] = texelFetch(origin, own, 0).r * 255.0;
+    for (int i = tid; i < span * span; i += THREADS) {
+        ivec2 p = clamp(corner - radius + ivec2(i % span, i / span), ivec2(0), last);
+        target_pixels[i] = texelFetch(target, p, 0).r * 255.0;
+    }
+    barrier();
+}
+
+bool beats(int a, int b)
+{
+    return costs[a] < costs[b] || (costs[a] == costs[b] && indices[a] < indices[b]);
+}
+
+void keep_lowest_cost(int tid)
+{
+    for (int stride = THREADS / 2; stride > 0; stride >>= 1) {
+        if (tid < stride && beats(tid + stride, tid)) {
+            costs[tid] = costs[tid + stride];
+            indices[tid] = indices[tid + stride];
+        }
+        barrier();
+    }
+}
+
+float mean_difference(int vx, int vy, int span, int tid)
+{
+    costs[tid] = origin_pixels[tid] - target_pixels[(tid / MB_WINDOW_SIZE + vy) * span + tid % MB_WINDOW_SIZE + vx];
+    barrier();
+    for (int stride = THREADS / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            costs[tid] += costs[tid + stride];
+        }
+        barrier();
+    }
+    return costs[0] / 256.0;
+}
+
+void scan_candidates(int radius, int span, int tid)
+{
+    int diameter = 2 * radius + 1;
+    float lowest = 1e30;
+    int lowest_index = 0;
+    for (int c = tid; c < diameter * diameter; c += THREADS) {
+        float cost = candidate_sad(c % diameter, c / diameter, span);
+        cost += push.length_penalty * float(abs(c % diameter - radius) + abs(c / diameter - radius));
+        if (cost < lowest) {
+            lowest = cost;
+            lowest_index = c;
+        }
+    }
+    costs[tid] = lowest;
+    indices[tid] = lowest_index;
+    barrier();
+}
+
+void main()
+{
+    int radius = min(push.radius, MAX_RADIUS);
+    int span = MB_WINDOW_SIZE + 2 * radius;
+    int diameter = 2 * radius + 1;
+    int tid = int(gl_LocalInvocationIndex);
+    int id = int(gl_WorkGroupID.x);
+    load_area(window_origin(block_of(id, push.blocks_x)), radius, span, tid);
+    scan_candidates(radius, span, tid);
+    keep_lowest_cost(tid);
+    int vx = indices[0] % diameter;
+    int vy = indices[0] / diameter;
+    float cost = costs[0];
+    barrier();
+    float mean = mean_difference(vx, vy, span, tid);
+    if (tid == 0) {
+        field[id] = vec4(float(vx - radius), float(vy - radius), cost, mean);
+    }
+}

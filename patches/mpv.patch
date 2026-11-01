@@ -1,16 +1,13 @@
 --- a/meson.build
 +++ b/meson.build
-@@ -1311,7 +1311,12 @@
+@@ -1311,7 +1311,9 @@
      sources += files('video/out/hwdec/hwdec_vulkan.c',
                       'video/out/vulkan/context.c',
                       'video/out/vulkan/utils.c',
 -                     'video/filter/vf_gpu_vulkan.c')
 +                     'video/filter/vf_gpu_vulkan.c',
-+                     'video/filter/vf_motionblade.c',
-+                     'video/filter/motionblade/motionblade_vk.c')
-+    subdir('video/filter/motionblade/shaders')
-+    sources += mb_shaders
-+    dependencies += declare_dependency(include_directories: include_directories('video/filter/motionblade'))
++                     'video/filter/vf_motionblade.c')
++    dependencies += subproject('motionblade').get_variable('motionblade_dep')
  endif
  
  if features['vulkan'] and features['android']

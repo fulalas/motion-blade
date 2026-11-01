@@ -1,0 +1,27 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { project_push push; };
+#include "blocks.glsl"
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Field { vec4 field[]; };
+layout(std430, binding = 1) buffer Keys { uint keys[]; };
+
+void main()
+{
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= push.blocks_x * push.blocks_y) {
+        return;
+    }
+    vec2 landing = block_center(block_of(id, push.blocks_x)) + push.time_scale * field[id].xy;
+    ivec2 target = block_at(landing);
+    if (any(lessThan(target, ivec2(0))) || target.x >= push.blocks_x || target.y >= push.blocks_y) {
+        return;
+    }
+    int slot = (target.y * push.blocks_x + target.x) * MB_KEYS_PER_BLOCK;
+    uint key = uint(id) * 2u + push.tag;
+    for (int k = 0; k < MB_KEYS_PER_BLOCK && key != MB_KEY_NONE; k++) {
+        key = max(key, atomicMin(keys[slot + k], key));
+    }
+}

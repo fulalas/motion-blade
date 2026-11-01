@@ -1,0 +1,55 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform Push { bar_flags_push push; };
+
+layout(binding = 0) uniform sampler2D luma;
+layout(binding = 1) uniform sampler2D chroma;
+layout(std430, binding = 2) buffer Flags { uint flags[]; };
+
+#define SPAN 32
+
+shared uint row_black[SPAN], column_black[SPAN];
+
+void mark_lit(ivec2 cp, bool chroma_neutral)
+{
+    for (int dy = 0; dy < (1 << push.shift_y); dy++) {
+        for (int dx = 0; dx < (1 << push.shift_x); dx++) {
+            ivec2 p = (cp << ivec2(push.shift_x, push.shift_y)) + ivec2(dx, dy);
+            bool lit = !chroma_neutral || texelFetch(luma, p, 0).r > push.luma_max;
+            if (p.x < push.width && p.y < push.height && lit) {
+                row_black[(int(gl_LocalInvocationID.y) << push.shift_y) + dy] = 0u;
+                column_black[(int(gl_LocalInvocationID.x) << push.shift_x) + dx] = 0u;
+            }
+        }
+    }
+}
+
+void main()
+{
+    uint t = gl_LocalInvocationIndex;
+    if (t < SPAN) {
+        row_black[t] = 1u;
+        column_black[t] = 1u;
+    }
+    barrier();
+    ivec2 cp = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = textureSize(chroma, 0);
+    if (cp.x < size.x && cp.y < size.y) {
+        vec2 c = texelFetch(chroma, cp, 0).rg;
+        mark_lit(cp, all(lessThanEqual(abs(c - 0.5), vec2(push.chroma_tolerance))));
+    }
+    barrier();
+    if (t < SPAN) {
+        int y = (int(gl_WorkGroupID.y) * 16 << push.shift_y) + int(t);
+        int x = (int(gl_WorkGroupID.x) * 16 << push.shift_x) + int(t);
+        if (row_black[t] == 0u && int(t) < (16 << push.shift_y) && y < push.height) {
+            flags[y] = 0u;
+        }
+        if (column_black[t] == 0u && int(t) < (16 << push.shift_x) && x < push.width) {
+            flags[push.height + x] = 0u;
+        }
+    }
+}

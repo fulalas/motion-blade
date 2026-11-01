@@ -1,0 +1,40 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { chroma_offsets_push push; };
+#include "blocks.glsl"
+#include "chroma.glsl"
+layout(local_size_x = 64) in;
+
+layout(binding = 0) uniform sampler2D a_chroma1;
+layout(binding = 1) uniform sampler2D b_chroma1;
+layout(binding = 2) uniform sampler2D a_chroma2;
+layout(binding = 3) uniform sampler2D b_chroma2;
+layout(std430, binding = 4) readonly buffer Selection { vec4 selection[]; };
+layout(std430, binding = 5) writeonly buffer Offsets { vec4 offsets[]; };
+
+void main()
+{
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= push.blocks_x * push.blocks_y) {
+        return;
+    }
+    float m = float(1 << push.base_level);
+    vec2 corner = vec2(block_of(id, push.blocks_x)) * 8.0 * m;
+    vec2 u = selection[id].xy * m;
+    vec2 shift = vec2(1 << push.shift_x, 1 << push.shift_y);
+    vec2 texel = 1.0 / vec2(push.chroma_width, push.chroma_height);
+    vec2 c0 = corner / shift, to_a = -push.t * u / shift, to_b = (1.0 - push.t) * u / shift;
+    bool interleaved = push.interleaved != 0;
+    int nx = 4 >> push.shift_x, ny = 4 >> push.shift_y;
+    vec2 sum = vec2(0.0);
+    for (int y = 0; y < ny; y++) {
+        for (int x = 0; x < nx; x++) {
+            vec2 p = c0 + vec2(2 * x + 1, 2 * y + 1) * m;
+            vec2 a = chroma_sample(a_chroma1, a_chroma2, (p + to_a) * texel, interleaved);
+            vec2 b = chroma_sample(b_chroma1, b_chroma2, (p + to_b) * texel, interleaved);
+            sum += a - b;
+        }
+    }
+    offsets[id] = vec4(selection[id].w / (255.0 * push.luma_scale), sum / float(nx * ny), 0.0);
+}

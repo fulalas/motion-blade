@@ -1,0 +1,188 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { local_search_push push; };
+#include "blocks.glsl"
+#define HARDWARE_ROWS
+#include "window.glsl"
+layout(local_size_x = 64) in;
+
+layout(binding = 0) uniform sampler2D origin;
+layout(binding = 1) uniform sampler2D target;
+layout(std430, binding = 2) readonly buffer Field { vec4 field[]; };
+layout(std430, binding = 3) writeonly buffer Repaired { vec4 repaired[]; };
+layout(std430, binding = 4) readonly buffer Reference { vec4 reference[]; };
+layout(std430, binding = 5) readonly buffer Stats { uint stats[]; };
+
+#define GROUP 64
+#define CLUSTERS (GROUP / LANES)
+#define NEIGHBOURHOOD 5
+#define NEIGHBOURHOOD_SIZE 25
+#define CENTER 12
+#define FAST_RADIUS 4
+
+shared uint queued;
+shared int queued_blocks[GROUP];
+
+ivec2 block;
+vec2 corner;
+vec2 limit;
+
+float repair_threshold()
+{
+    float blocks = float(push.blocks_x * push.blocks_y);
+    float noise = push.noise_factor * float(stats[MB_STAT_ERROR]) * MB_STAT_SCALE / blocks;
+    return max(push.min_cost, noise);
+}
+
+bool inside_frame(vec2 u)
+{
+    return !any(lessThan(corner + u, vec2(0.0))) && !any(greaterThan(corner + u, limit));
+}
+
+vec2 neighbour_vector(int k)
+{
+    return field[block_index(block + ivec2(k % NEIGHBOURHOOD - 2, k / NEIGHBOURHOOD - 2), blocks())].xy;
+}
+
+void try_neighbours(vec2 current, int lane)
+{
+    int second = lane + LANES;
+    vec2 first_held = neighbour_vector(lane);
+    vec2 second_held = neighbour_vector(second);
+    for (int k = 0; k < NEIGHBOURHOOD_SIZE; k++) {
+        if (k == CENTER) {
+            continue;
+        }
+        vec2 u = neighbour_vector(k);
+        if (u == current || u == best.vector || !inside_frame(u)) {
+            continue;
+        }
+        if (subgroupClusteredOr((lane < k && first_held == u) || (second < k && second_held == u), LANES)) {
+            continue;
+        }
+        try_vector(target, u, 0.0, push.length_penalty);
+    }
+}
+
+void try_even_grid(float radius)
+{
+    vec2 seed = best.vector;
+    for (float dy = -radius; dy <= radius; dy += 2.0) {
+        float row[MB_WINDOW_SIZE + 2 * FAST_RADIUS];
+        load_row24(target, lane_start + (seed + vec2(-radius, dy)), row);
+        for (int i = 0; i <= FAST_RADIUS; i++) {
+            float dx = -radius + float(2 * i);
+            vec2 u = seed + vec2(dx, dy);
+            if (dx > radius || u == best.vector || !inside_frame(u)) {
+                continue;
+            }
+            float window_row[LANES];
+            for (int x = 0; x < LANES; x++) {
+                window_row[x] = row[x + 2 * i];
+            }
+            float sad = window_sad(origin_row, window_row);
+            consider(u, sad, sad + push.length_penalty * l1(u));
+        }
+    }
+}
+
+void try_any_grid(float radius, float step)
+{
+    vec2 seed = best.vector;
+    for (float dy = -radius; dy <= radius; dy += step) {
+        for (float dx = -radius; dx <= radius; dx += step) {
+            vec2 u = seed + vec2(dx, dy);
+            if (u == best.vector || !inside_frame(u)) {
+                continue;
+            }
+            try_vector(target, u, 0.0, push.length_penalty);
+        }
+    }
+}
+
+void try_ring()
+{
+    vec2 seed = best.vector;
+    float sads[9], diffs[9];
+    for (int r = 0; r < 3; r++) {
+        float row[18];
+        load_row18(target, lane_start + (seed + vec2(-1.0, float(r - 1))), row);
+        for (int i = 0; i < 3; i++) {
+            if (r == 1 && i == 1) {
+                continue;
+            }
+            float window_row[LANES];
+            for (int x = 0; x < LANES; x++) {
+                window_row[x] = row[x + i];
+            }
+            sads[r * 3 + i] = window_sad(origin_row, window_row);
+            diffs[r * 3 + i] = lane_diff;
+        }
+    }
+    for (int k = 0; k < 8; k++) {
+        int j = (RING8[k].y + 1) * 3 + RING8[k].x + 1;
+        vec2 u = seed + vec2(RING8[k]);
+        lane_diff = diffs[j];
+        consider(u, sads[j], sads[j] + push.length_penalty * l1(u));
+    }
+}
+
+bool supported_in_time(vec2 u)
+{
+    int index = block_index(block, blocks());
+    if (push.reference_at_landing != 0) {
+        index = block_index(block_at(block_center(block) + u), blocks());
+    }
+    return l1(reference[index].xy + u) <= push.support_rel * l1(u) + push.support_abs;
+}
+
+void repair(int id, int lane)
+{
+    block = block_of(id, push.blocks_x);
+    corner = vec2(window_origin(block));
+    limit = vec2(push.width, push.height) - float(MB_WINDOW_SIZE);
+    vec4 current = field[id];
+    load_origin(origin, window_origin(block), lane);
+    float original = target_sad(target, current.xy);
+    best = Best(original + push.length_penalty * l1(current.xy), original, lane_diff, current.xy);
+    try_neighbours(current.xy, lane);
+    float radius = push.radius;
+    if (push.step == 2.0 && radius == floor(radius) && radius <= float(FAST_RADIUS)) {
+        try_even_grid(radius);
+    } else {
+        try_any_grid(radius, push.step);
+    }
+    try_ring();
+    bool ok = best.sad < push.max_ratio * original && original - best.sad > push.min_gain;
+    if (ok && push.has_reference != 0) {
+        ok = supported_in_time(best.vector);
+    }
+    float dc = block_dc(best.diff);
+    if (lane == 0) {
+        repaired[id] = ok ? vec4(best.vector, best.sad, dc) : current;
+    }
+}
+
+void main()
+{
+    int t = int(gl_LocalInvocationID.x);
+    if (t == 0) {
+        queued = 0u;
+    }
+    barrier();
+    int id = int(gl_WorkGroupID.x) * GROUP + t;
+    float threshold = repair_threshold();
+    if (id < push.blocks_x * push.blocks_y) {
+        if (field[id].z > threshold) {
+            queued_blocks[atomicAdd(queued, 1u)] = id;
+        } else {
+            repaired[id] = field[id];
+        }
+    }
+    barrier();
+    texel_size = 1.0 / vec2(push.width, push.height);
+    for (int slot = t >> 4; slot < int(queued); slot += CLUSTERS) {
+        repair(queued_blocks[slot], t & 15);
+    }
+}

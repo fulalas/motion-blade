@@ -1,0 +1,72 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { fallback_push push; };
+#include "blocks.glsl"
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Selection { vec4 selection[]; };
+layout(std430, binding = 1) writeonly buffer Weights { float weights[]; };
+layout(std430, binding = 2) readonly buffer Forward { vec4 forward[]; };
+layout(std430, binding = 3) readonly buffer Backward { vec4 backward[]; };
+
+#define SPAN 7
+#define REACH 3
+
+float inconsistency(ivec2 block)
+{
+    block = clamp(block, ivec2(0), blocks() - 1);
+    int index = block.y * push.blocks_x + block.x;
+    vec2 u = selection[index].xy;
+    if (selection[index].z != 0.0) {
+        return 0.0;
+    }
+    vec2 c = block_center(block);
+    float ia = l1(forward[block_index(block_at(c - push.t * u), blocks())].xy - u);
+    float ib = l1(backward[block_index(block_at(c + (1.0 - push.t) * u), blocks())].xy + u);
+    float relative = min(ia, ib) / (1.0 + 0.1 * l1(u));
+    return smoothstep(push.lo, push.hi, relative);
+}
+
+float spread_weight(int distance)
+{
+    return distance == 0 ? 1.0 : distance == 1 ? push.spread : push.spread * push.spread;
+}
+
+float raw[SPAN][SPAN];
+
+float neighbourhood_mean(int dx, int dy)
+{
+    float sum = 0.0;
+    for (int k = 0; k < 9; k++) {
+        ivec2 o = neighbour3(k);
+        sum += raw[dy + REACH + o.y][dx + REACH + o.x];
+    }
+    return sum / 9.0;
+}
+
+float spread_inconsistency(ivec2 block)
+{
+    for (int y = 0; y < SPAN; y++) {
+        for (int x = 0; x < SPAN; x++) {
+            raw[y][x] = inconsistency(block + ivec2(x - REACH, y - REACH));
+        }
+    }
+    float weight = 0.0;
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            weight = max(weight, neighbourhood_mean(dx, dy) * spread_weight(max(abs(dx), abs(dy))));
+        }
+    }
+    return weight;
+}
+
+void main()
+{
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= push.blocks_x * push.blocks_y) {
+        return;
+    }
+    bool uncovered = int(selection[id].z) == MB_MODE_UNCOVER;
+    weights[id] = uncovered ? 0.0 : spread_inconsistency(block_of(id, push.blocks_x));
+}

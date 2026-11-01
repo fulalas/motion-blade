@@ -1,0 +1,51 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { measure_push push; };
+#include "blocks.glsl"
+#define SAD_STATISTICS
+#include "window.glsl"
+layout(local_size_x = 64) in;
+
+layout(binding = 0) uniform sampler2D origin;
+layout(binding = 1) uniform sampler2D target;
+layout(std430, binding = 2) buffer Field { vec4 field[]; };
+layout(std430, binding = 3) buffer Stats { uint stats[]; };
+
+#define STAT_UNIT (1.0 / MB_STAT_SCALE)
+
+uint rounded(float value)
+{
+    return uint(value + 0.5);
+}
+
+void accumulate(float block_mean)
+{
+    if (push.accumulate_error != 0) {
+        atomicAdd(stats[MB_STAT_ERROR], rounded(plain_sad * STAT_UNIT));
+        atomicAdd(stats[MB_STAT_ZERO_ERROR], rounded(zero_mean_sad * STAT_UNIT));
+    }
+    int slot = push.direction * 2;
+    atomicAdd(stats[MB_STAT_MEANS + slot], rounded(block_mean));
+    atomicAdd(stats[MB_STAT_SQUARES + slot], rounded(block_mean * block_mean * STAT_UNIT));
+}
+
+void main()
+{
+    int lane = int(gl_LocalInvocationID.x) & 15;
+    int id = int(gl_WorkGroupID.x) * 4 + (int(gl_LocalInvocationID.x) >> 4);
+    if (id >= push.blocks_x * push.blocks_y) {
+        return;
+    }
+    texel_size = 1.0 / vec2(push.width, push.height);
+    load_origin(origin, window_origin(block_of(id, push.blocks_x)), lane);
+    mean_weight = smoothstep(push.mean_lo, push.mean_hi, abs(field[id].w));
+    vec2 v = field[id].xy;
+    float sad = target_sad(target, v);
+    float dc = block_dc(lane_diff);
+    float block_mean = origin_sum() * (255.0 / 256.0);
+    if (lane == 0) {
+        field[id] = vec4(v, sad, dc);
+        accumulate(block_mean);
+    }
+}

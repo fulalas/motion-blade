@@ -12,10 +12,7 @@ if [ "$(cat "$out/.motionblade-stamp" 2>/dev/null)" != "$want" ]; then
     patch -s -p1 -d "$out" <patches/mpv.patch
     echo "$want" >"$out/.motionblade-stamp"
 fi
-d=$out/video/filter/motionblade
-mkdir -p "$d/shaders"
-find "$d" "$out/video/filter/vf_motionblade.c" -type l -delete 2>/dev/null || true
-ln -s "$root/src/vf_motionblade.c" "$out/video/filter/vf_motionblade.c"
-ln -s "$root/src/motionblade.h" "$root/src/motionblade_vk.c" "$d/"
-ln -s "$root"/src/shaders/*.comp "$root"/src/shaders/*.glsl "$root/src/shaders/meson.build" "$root/src/shaders/shaders.txt" "$d/shaders/"
+mkdir -p "$out/subprojects"
+ln -snf "$root" "$out/subprojects/motionblade"
+ln -snf "$root/adapters/mpv/vf_motionblade.c" "$out/video/filter/vf_motionblade.c"
 echo "$out"
