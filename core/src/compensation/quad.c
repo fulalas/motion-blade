@@ -113,17 +113,13 @@ static float consistent_share(const quad_state *q, field_probe probe, vec2 u)
 {
     const mb_interpolate_pass *pass = q->pass;
     vec2 p = probe.position;
-    vec2 g = v2((p.x / q->scale - 3.5f) / 8.0f, (p.y / q->scale - 3.5f) / 8.0f);
+    block_taps taps = block_taps_at(v2(p.x / q->scale, p.y / q->scale), pass->grid);
     vec2 v = v2_scale(u, probe.sign / q->scale);
-    ivec2 b0 = iv2_floor(g);
-    vec2 fr = v2(g.x - (float)b0.x, g.y - (float)b0.y);
     float limit = consistency_limit(pass->costs.consistency, v2_scale(u, 1.0f / q->scale));
     float share = 0.0f;
     for (int k = 0; k < 4; k++) {
-        int i = block_index(iv2(b0.x + (k & 1), b0.y + (k >> 1)), pass->grid);
-        vec2 d = v2_sub(v4_xy(vec4s(probe.field)[i]), v);
-        float w = ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y);
-        share += v2_l1(d) <= limit ? w : 0.0f;
+        vec2 d = v2_sub(v4_xy(vec4s(probe.field)[taps.index[k]]), v);
+        share += v2_l1(d) <= limit ? taps.weight[k] : 0.0f;
     }
     return share;
 }
@@ -400,29 +396,32 @@ quad_values quad_mix_panels_luma(const quad_state *q, quad_values luma)
     return luma;
 }
 
-static vec2 cubic_chroma(const mb_frame_planes *planes, const mb_chroma_layout *chroma, vec2 p)
-{
-    chroma_channels c = chroma_channels_of(planes, chroma);
-    return v2(cubic_sample(c.first, p, 0), cubic_sample(c.second, p, c.second_channel));
-}
-
 typedef struct chroma_weights {
     float a;
     float b;
 } chroma_weights;
 
-static chroma_weights covered_weights(const quad_state *q, const quad_candidate *c, ivec2 index)
+covered_pixels quad_covered_pixels(const mb_chroma_layout *chroma, ivec2 chroma_index)
 {
-    const mb_chroma_layout *chroma = &q->pass->chroma;
-    chroma_weights w = {0.0f, 0.0f};
+    covered_pixels cover = {.count = 0};
     for (int yy = 0; yy < (1 << chroma->shift_y); yy++) {
         for (int xx = 0; xx < (1 << chroma->shift_x); xx++) {
-            int j = ((index.y << chroma->shift_y) + yy) * 2 + (index.x << chroma->shift_x) + xx;
-            w.a += c->weight_a[j];
-            w.b += c->weight_b[j];
+            cover.index[cover.count++] =
+                ((chroma_index.y << chroma->shift_y) + yy) * 2 + (chroma_index.x << chroma->shift_x) + xx;
         }
     }
-    float norm = 1.0f / (float)((1 << chroma->shift_x) * (1 << chroma->shift_y));
+    return cover;
+}
+
+static chroma_weights covered_weights(const quad_state *q, const quad_candidate *c, ivec2 index)
+{
+    covered_pixels cover = quad_covered_pixels(&q->pass->chroma, index);
+    chroma_weights w = {0.0f, 0.0f};
+    for (int k = 0; k < cover.count; k++) {
+        w.a += c->weight_a[cover.index[k]];
+        w.b += c->weight_b[cover.index[k]];
+    }
+    float norm = 1.0f / (float)cover.count;
     return (chroma_weights){w.a * norm, w.b * norm};
 }
 
@@ -453,8 +452,8 @@ vec2 quad_blend_chroma(const quad_state *q, ivec2 chroma_index, ivec2 chroma_pos
         }
         vec2 pa = v2_sub(pc, chroma_from_luma(&pass->chroma, v2_scale(c->vector, q->t)));
         vec2 pb = v2_add(pc, chroma_from_luma(&pass->chroma, v2_scale(c->vector, 1.0f - q->t)));
-        vec2 a = cubic_chroma(&pass->frames.a, &pass->chroma, pa);
-        vec2 b = cubic_chroma(&pass->frames.b, &pass->chroma, pb);
+        vec2 a = chroma_cubic_sample(&pass->frames.a, &pass->chroma, pa);
+        vec2 b = chroma_cubic_sample(&pass->frames.b, &pass->chroma, pb);
         acc = v2_add(acc, v2_add(v2_scale(v2_sub(a, v2_scale(dcc, q->t)), w.a),
                                  v2_scale(v2_add(b, v2_scale(dcc, 1.0f - q->t)), w.b)));
     }

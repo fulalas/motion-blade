@@ -275,6 +275,7 @@ static void tee_interpolate(void *self, const mb_interpolate_pass *pass)
         p.offsets = BUFFER(pass->offsets);
         p.panels = BUFFER(pass->panels);
         p.global_motion = BUFFER(pass->global_motion);
+        p.extrapolation = (mb_extrapolation){BUFFER(pass->extrapolation.field), BUFFER(pass->extrapolation.stats)};
         OPS(t, side)->interpolate(SELF(t, side), &p);
     }
 }

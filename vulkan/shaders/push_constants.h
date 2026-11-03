@@ -241,6 +241,7 @@ struct interpolate_push {
     float nearest_lo;
     float nearest_hi;
     float panel_switch;
+    int32_t extrapolate;
 };
 
 struct bar_flags_push {

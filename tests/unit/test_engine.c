@@ -30,6 +30,11 @@ static bool interpolate(mb_engine *engine, double t, test_frame *out, mb_frame_r
     return mb_engine_submit(engine, t) == MB_SUCCESS && mb_engine_retrieve(engine, &out->image, report) == MB_SUCCESS;
 }
 
+static mb_rect whole_frame(void)
+{
+    return (mb_rect){0, 0, WIDTH, HEIGHT};
+}
+
 static mb_rect interior(void)
 {
     return (mb_rect){MARGIN, MARGIN, WIDTH - 2 * MARGIN, HEIGHT - 2 * MARGIN};
@@ -66,39 +71,59 @@ static bool still_scene_stays_still(void)
     }
     mb_frame_report report;
     CHECK(interpolate(engine, 0.5, &out, &report));
-    CHECK(luma_psnr(&out, &frame, (mb_rect){0, 0, WIDTH, HEIGHT}) > 50.0);
+    CHECK(luma_psnr(&out, &frame, whole_frame()) > 50.0);
     test_frame_free(&frame);
     test_frame_free(&out);
     mb_engine_destroy(engine);
     return true;
 }
 
-static bool scene_cut_shows_nearest_frame(void)
+static bool cut_output_matches(const test_motion *shots, int count, double t, test_motion expected, mb_rect area,
+                               double min_psnr)
 {
     mb_engine *engine = cpu_engine(WIDTH, HEIGHT);
-    test_frame frame, out, before;
+    test_frame frame, out, truth;
     CHECK(engine && test_frame_alloc(&frame, WIDTH, HEIGHT) && test_frame_alloc(&out, WIDTH, HEIGHT));
-    CHECK(test_frame_alloc(&before, WIDTH, HEIGHT));
-    test_motion shots[4] = {{0, 0, 3}, {2, 0, 3}, {0, 0, 9}, {2, 0, 9}};
-    for (int k = 0; k < 4; k++) {
+    CHECK(test_frame_alloc(&truth, WIDTH, HEIGHT));
+    mb_frame_report report;
+    for (int k = 0; k < count; k++) {
         CHECK(push_motion(engine, &frame, shots[k]));
-        mb_frame_report report;
-        if (k == 2) {
-            CHECK(interpolate(engine, 0.5, &out, &report));
-            CHECK(!report.scene_cut);
-        }
-        if (k == 3) {
-            CHECK(interpolate(engine, 0.25, &out, &report));
-            CHECK(report.scene_cut);
+        if (k >= 2) {
+            CHECK(interpolate(engine, k == count - 1 ? t : 0.5, &out, &report));
         }
     }
-    paint_texture(&before, shots[1]);
-    CHECK(luma_psnr(&out, &before, (mb_rect){0, 0, WIDTH, HEIGHT}) == 99.0);
+    CHECK(report.scene_cut);
+    paint_texture(&truth, expected);
+    CHECK(luma_psnr(&out, &truth, area) >= min_psnr);
     test_frame_free(&frame);
     test_frame_free(&out);
-    test_frame_free(&before);
+    test_frame_free(&truth);
     mb_engine_destroy(engine);
     return true;
+}
+
+static const test_motion PANNING_CUT[4] = {{0, 0, 3}, {4, 0, 3}, {0, 0, 9}, {4, 0, 9}};
+
+static bool scene_cut_moves_old_frame_forward(void)
+{
+    return cut_output_matches(PANNING_CUT, 4, 0.25, (test_motion){5, 0, 3}, interior(), 40.0);
+}
+
+static bool scene_cut_moves_new_frame_back(void)
+{
+    return cut_output_matches(PANNING_CUT, 4, 0.5, (test_motion){-2, 0, 9}, interior(), 40.0);
+}
+
+static bool scene_cut_before_cut_shows_new_frame(void)
+{
+    test_motion shots[4] = {{0, 0, 3}, {4, 0, 3}, {0, 0, 9}, {4, 0, 17}};
+    return cut_output_matches(shots, 4, 0.5, (test_motion){0, 0, 9}, whole_frame(), 99.0);
+}
+
+static bool scene_cut_after_cut_shows_old_frame(void)
+{
+    test_motion shots[6] = {{0, 0, 3}, {4, 0, 3}, {8, 0, 3}, {0, 0, 17}, {0, 0, 9}, {4, 0, 9}};
+    return cut_output_matches(shots, 6, 0.25, (test_motion){0, 0, 17}, whole_frame(), 99.0);
 }
 
 static bool letterbox_bars_survive(void)
@@ -149,7 +174,10 @@ int main(void)
     static const test_case tests[] = {
         {"moving texture lands halfway", moving_texture_lands_halfway},
         {"still scene stays still", still_scene_stays_still},
-        {"scene cut shows nearest frame", scene_cut_shows_nearest_frame},
+        {"scene cut moves old frame forward", scene_cut_moves_old_frame_forward},
+        {"scene cut moves new frame back", scene_cut_moves_new_frame_back},
+        {"scene cut before cut shows new frame", scene_cut_before_cut_shows_new_frame},
+        {"scene cut after cut shows old frame", scene_cut_after_cut_shows_old_frame},
         {"letterbox bars survive", letterbox_bars_survive},
         {"waits for lookahead", waits_for_lookahead},
         {"rejects tiny frames", rejects_tiny_frames},

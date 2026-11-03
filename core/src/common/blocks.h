@@ -40,6 +40,25 @@ static inline vec2 block_center(ivec2 block)
     return v2((float)(block.x * MB_BLOCK_SIZE + half), (float)(block.y * MB_BLOCK_SIZE + half));
 }
 
+typedef struct block_taps {
+    int index[4];
+    float weight[4];
+} block_taps;
+
+static inline block_taps block_taps_at(vec2 level_position, mb_grid grid)
+{
+    const float center = MB_BLOCK_SIZE * 0.5f - 0.5f;
+    vec2 g = v2((level_position.x - center) / MB_BLOCK_SIZE, (level_position.y - center) / MB_BLOCK_SIZE);
+    ivec2 b0 = iv2_floor(g);
+    vec2 fr = v2(g.x - (float)b0.x, g.y - (float)b0.y);
+    block_taps taps;
+    for (int k = 0; k < 4; k++) {
+        taps.index[k] = block_index(iv2(b0.x + (k & 1), b0.y + (k >> 1)), grid);
+        taps.weight[k] = ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y);
+    }
+    return taps;
+}
+
 static inline ivec2 window_origin(ivec2 block)
 {
     return iv2(block.x * MB_BLOCK_SIZE - MB_WINDOW_MARGIN, block.y * MB_BLOCK_SIZE - MB_WINDOW_MARGIN);

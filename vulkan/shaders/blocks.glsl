@@ -44,6 +44,24 @@ vec2 block_center(ivec2 block)
     return vec2(block * MB_BLOCK_SIZE + MB_BLOCK_SIZE / 2);
 }
 
+struct BlockTaps {
+    int index[4];
+    float weight[4];
+};
+
+BlockTaps taps_at(vec2 level_position, ivec2 blocks)
+{
+    vec2 g = (level_position - (float(MB_BLOCK_SIZE) * 0.5 - 0.5)) / float(MB_BLOCK_SIZE);
+    ivec2 b0 = ivec2(floor(g));
+    vec2 fr = g - vec2(b0);
+    BlockTaps taps;
+    for (int k = 0; k < 4; k++) {
+        taps.index[k] = block_index(b0 + ivec2(k & 1, k >> 1), blocks);
+        taps.weight[k] = ((k & 1) != 0 ? fr.x : 1.0 - fr.x) * ((k >> 1) != 0 ? fr.y : 1.0 - fr.y);
+    }
+    return taps;
+}
+
 ivec2 window_origin(ivec2 block)
 {
     return block * MB_BLOCK_SIZE - MB_WINDOW_MARGIN;

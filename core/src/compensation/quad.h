@@ -43,6 +43,12 @@ typedef struct quad_state {
     vec2 global_chroma_b;
 } quad_state;
 
+typedef struct covered_pixels {
+    int index[QUAD_PIXELS];
+    int count;
+} covered_pixels;
+
+covered_pixels quad_covered_pixels(const mb_chroma_layout *chroma, ivec2 chroma_index);
 void quad_begin(quad_state *q, const mb_interpolate_pass *pass, ivec2 q0);
 void quad_gather_blocks(quad_state *q);
 void quad_add_fallback(quad_state *q);

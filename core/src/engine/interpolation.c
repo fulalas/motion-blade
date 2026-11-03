@@ -28,6 +28,7 @@ pair_choice choose_pair(const mb_engine *engine, bool lookahead)
             .previous_backward = f->older_backward,
             .current_stats = f->previous_stats,
             .previous_stats = f->older_stats,
+            .next_stats = f->stats,
             .lookahead = true,
             .past = engine->pair.has_older,
         };
@@ -43,6 +44,7 @@ pair_choice choose_pair(const mb_engine *engine, bool lookahead)
             .previous_backward = f->previous_backward[base],
             .current_stats = f->stats,
             .previous_stats = f->previous_stats,
+            .next_stats = f->stats,
             .lookahead = false,
             .past = engine->pair.has_previous,
         };
@@ -116,7 +118,7 @@ static void select_vectors(pass_context *ctx)
         .selection = e->sel.selection[0],
         .next_forward = p->next_forward,
         .previous_backward = p->previous_backward,
-        .next_stats = e->fields.stats,
+        .next_stats = p->next_stats,
         .previous_stats = p->previous_stats,
         .extra_keys = e->sel.extra_keys,
         .grid = base_grid(ctx),
@@ -226,6 +228,15 @@ static mb_blend_costs blend_costs(const mb_engine *e)
     };
 }
 
+static mb_extrapolation extrapolation_of(const pass_context *ctx)
+{
+    const pair_choice *p = ctx->pair;
+    if (ctx->t < MB_NEAREST_SWITCH) {
+        return (mb_extrapolation){p->previous_backward, p->previous_stats};
+    }
+    return (mb_extrapolation){p->next_forward, p->next_stats};
+}
+
 static void blend(const pass_context *ctx)
 {
     mb_engine *e = ctx->engine;
@@ -243,6 +254,7 @@ static void blend(const pass_context *ctx)
         .offsets = e->sel.offsets_median,
         .panels = e->sel.panel_spread,
         .global_motion = e->sel.global_motion,
+        .extrapolation = extrapolation_of(ctx),
         .width = e->geo.format.width,
         .height = e->geo.format.height,
         .grid = base_grid(ctx),

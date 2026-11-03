@@ -280,6 +280,7 @@ static struct interpolate_push interpolate_constants(const mb_interpolate_pass *
         c->shift_y, pass->base_level, pass->t, k->softness, k->one_sided, k->unconfirmed, k->fallback,
         k->candidate_prior, k->consistency, k->fallback_uncover, pass->luma_scale, pass->range.max_value,
         pass->range.step, k->foreground_bonus, k->nearest_side_lo, k->nearest_side_hi, k->panel_switch,
+        pass->extrapolation.field != NULL,
     };
 }
 
@@ -299,7 +300,8 @@ void vk_interpolate(void *self, const mb_interpolate_pass *pass)
                    image(o->luma),            image(o->chroma[0]),       image(second_chroma(o)),
                    image(pass->a_level),      image(pass->b_level),      buffer(pass->stats),
                    buffer(pass->fallback),    buffer(pass->offsets),     buffer(pass->panels),
-                   buffer(pass->global_motion)};
+                   buffer(pass->global_motion),
+                   buffer(pass->extrapolation.field), buffer(pass->extrapolation.stats)};
     over_groups(self, (dispatch_desc){interpolate_variant(pass), b, PUSH(push)}, quad_groups(pass->width),
                 quad_groups(pass->height));
 }

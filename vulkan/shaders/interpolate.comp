@@ -22,6 +22,8 @@ layout(std430, binding = 15) readonly buffer Fallback { float fallback_weights[]
 layout(std430, binding = 16) readonly buffer Offsets { vec4 offsets[]; };
 layout(std430, binding = 17) readonly buffer Panels { float panel_weights[]; };
 layout(std430, binding = 18) readonly buffer Global { vec4 global_motion[]; };
+layout(std430, binding = 19) readonly buffer ExtrapolationField { vec4 extrapolation_field[]; };
+layout(std430, binding = 20) readonly buffer ExtrapolationStats { uint extrapolation_stats[]; };
 #ifdef DEPTH16
 layout(binding = 9, r16) uniform writeonly image2D out_luma;
 #ifdef NV
@@ -50,6 +52,7 @@ const bool interleaved = false;
 #endif
 
 float level_scale;
+bool nearest_a;
 
 vec2 at_level(vec2 p)
 {
@@ -148,27 +151,23 @@ float output_value(float v)
 
 float consistent_share(bool use_forward, vec2 p, vec2 u, float limit)
 {
-    vec2 q = (p / level_scale - 3.5) / 8.0;
+    BlockTaps taps = taps_at(p / level_scale, blocks());
     u /= level_scale;
-    ivec2 b0 = ivec2(floor(q));
-    vec2 fr = q - vec2(b0);
     float share = 0.0;
     for (int k = 0; k < 4; k++) {
-        int i = block_index(b0 + ivec2(k & 1, k >> 1), blocks());
+        int i = taps.index[k];
         vec2 v = use_forward ? forward[i].xy - u : backward[i].xy + u;
-        float w = ((k & 1) != 0 ? fr.x : 1.0 - fr.x) * ((k >> 1) != 0 ? fr.y : 1.0 - fr.y);
-        share += l1(v) <= limit ? w : 0.0;
+        share += l1(v) <= limit ? taps.weight[k] : 0.0;
     }
     return share;
 }
 
 void copy_nearest(ivec2 q0)
 {
-    bool use_a = push.t < 0.5;
     for (int j = 0; j < 4; j++) {
         ivec2 p = q0 + ivec2(j & 1, j >> 1);
         if (p.x < push.width && p.y < push.height) {
-            imageStore(out_luma, p, vec4(use_a ? texelFetch(a_luma, p, 0).r : texelFetch(b_luma, p, 0).r));
+            imageStore(out_luma, p, vec4(nearest_a ? texelFetch(a_luma, p, 0).r : texelFetch(b_luma, p, 0).r));
         }
     }
     for (int cy = 0; cy < (2 >> push.shift_y); cy++) {
@@ -177,9 +176,9 @@ void copy_nearest(ivec2 q0)
             if (cp.x >= push.chroma_width || cp.y >= push.chroma_height) {
                 continue;
             }
-            imageStore(out_chroma1, cp, use_a ? texelFetch(a_chroma1, cp, 0) : texelFetch(b_chroma1, cp, 0));
+            imageStore(out_chroma1, cp, nearest_a ? texelFetch(a_chroma1, cp, 0) : texelFetch(b_chroma1, cp, 0));
 #ifndef NV
-            imageStore(out_chroma2, cp, use_a ? texelFetch(a_chroma2, cp, 0) : texelFetch(b_chroma2, cp, 0));
+            imageStore(out_chroma2, cp, nearest_a ? texelFetch(a_chroma2, cp, 0) : texelFetch(b_chroma2, cp, 0));
 #endif
         }
     }
@@ -465,30 +464,48 @@ void store_luma(ivec2 q0, float luma[4])
     }
 }
 
-vec2 covered_weights(int i, ivec2 index)
+struct CoveredPixels {
+    int index[4];
+    int count;
+};
+
+CoveredPixels covered_pixels(ivec2 index)
 {
-    float ca = 0.0, cb = 0.0;
+    CoveredPixels cover;
+    cover.count = 0;
     for (int yy = 0; yy < (1 << push.shift_y); yy++) {
         for (int xx = 0; xx < (1 << push.shift_x); xx++) {
-            int j = ((index.y << push.shift_y) + yy) * 2 + (index.x << push.shift_x) + xx;
-            ca += weight_a[i][j];
-            cb += weight_b[i][j];
+            cover.index[cover.count++] = ((index.y << push.shift_y) + yy) * 2 + (index.x << push.shift_x) + xx;
         }
     }
-    float norm = 1.0 / float((1 << push.shift_x) * (1 << push.shift_y));
+    return cover;
+}
+
+vec2 covered_weights(int i, ivec2 index)
+{
+    CoveredPixels cover = covered_pixels(index);
+    float ca = 0.0, cb = 0.0;
+    for (int k = 0; k < cover.count; k++) {
+        ca += weight_a[i][cover.index[k]];
+        cb += weight_b[i][cover.index[k]];
+    }
+    float norm = 1.0 / float(cover.count);
     return vec2(ca * norm, cb * norm);
+}
+
+vec2 cubic_chroma(sampler2D first, sampler2D second, vec2 at)
+{
+#ifdef NV
+    return cubic(first, at, chroma_texel_size(), true);
+#else
+    vec2 texel = chroma_texel_size();
+    return vec2(cubic(first, at, texel, false).x, cubic(second, at, texel, false).x);
+#endif
 }
 
 vec2 warped_chroma(vec2 pc, vec2 offset_a, vec2 offset_b, vec2 weights, vec2 chroma_offset)
 {
-    vec2 pa = pc - offset_a, pb = pc + offset_b;
-#ifdef NV
-    vec2 a = cubic(a_chroma1, pa, chroma_texel_size(), true), b = cubic(b_chroma1, pb, chroma_texel_size(), true);
-#else
-    vec2 texel = chroma_texel_size();
-    vec2 a = vec2(cubic(a_chroma1, pa, texel, false).x, cubic(a_chroma2, pa, texel, false).x);
-    vec2 b = vec2(cubic(b_chroma1, pb, texel, false).x, cubic(b_chroma2, pb, texel, false).x);
-#endif
+    vec2 a = cubic_chroma(a_chroma1, a_chroma2, pc - offset_a), b = cubic_chroma(b_chroma1, b_chroma2, pc + offset_b);
     return weights.x * (a - t * chroma_offset) + weights.y * (b + (1.0 - t) * chroma_offset);
 }
 
@@ -537,19 +554,80 @@ void blend_quad_chroma(ivec2 q0)
     }
 }
 
+vec2 field_vector(vec2 p)
+{
+    BlockTaps taps = taps_at(p / level_scale, blocks());
+    vec2 sum = vec2(0.0);
+    for (int k = 0; k < 4; k++) {
+        sum += extrapolation_field[taps.index[k]].xy * taps.weight[k];
+    }
+    return sum * level_scale;
+}
+
+vec2 extrapolated_offset(vec2 p)
+{
+    float step = nearest_a ? push.t : 1.0 - push.t;
+    vec2 first = field_vector(p) * step;
+    return field_vector(p + first) * step;
+}
+
+void extrapolate_luma(ivec2 q0, out vec2 offsets[4])
+{
+    for (int j = 0; j < 4; j++) {
+        ivec2 p = q0 + ivec2(j & 1, j >> 1);
+        vec2 pc = vec2(p) + 0.5;
+        offsets[j] = extrapolated_offset(pc);
+        if (p.x < push.width && p.y < push.height) {
+            vec2 at = pc + offsets[j];
+            float v = nearest_a ? cubic(a_luma, at, texel_size, false).x : cubic(b_luma, at, texel_size, false).x;
+            imageStore(out_luma, p, vec4(output_value(v)));
+        }
+    }
+}
+
+vec2 covered_offset(vec2 offsets[4], ivec2 index)
+{
+    CoveredPixels cover = covered_pixels(index);
+    vec2 sum = vec2(0.0);
+    for (int k = 0; k < cover.count; k++) {
+        sum += offsets[cover.index[k]];
+    }
+    return sum * (1.0 / float(cover.count));
+}
+
+void extrapolate_chroma(ivec2 q0, vec2 offsets[4])
+{
+    for (int cy = 0; cy < (2 >> push.shift_y); cy++) {
+        for (int cx = 0; cx < (2 >> push.shift_x); cx++) {
+            ivec2 cp = (q0 >> ivec2(push.shift_x, push.shift_y)) + ivec2(cx, cy);
+            if (cp.x < push.chroma_width && cp.y < push.chroma_height) {
+                vec2 at = vec2(cp) + 0.5 + covered_offset(offsets, ivec2(cx, cy)) / chroma_shift();
+                store_chroma(cp, nearest_a ? cubic_chroma(a_chroma1, a_chroma2, at) : cubic_chroma(b_chroma1, b_chroma2, at));
+            }
+        }
+    }
+}
+
 void main()
 {
     level_scale = float(1 << push.base_level);
+    nearest_a = push.t < MB_NEAREST_SWITCH;
     ivec2 q0 = ivec2(gl_GlobalInvocationID.xy) * 2;
     if (q0.x >= push.width || q0.y >= push.height) {
         return;
     }
+    texel_size = 1.0 / vec2(push.width, push.height);
     if (stats[MB_STAT_CUT] != 0u) {
-        copy_nearest(q0);
+        if (push.extrapolate != 0 && extrapolation_stats[MB_STAT_CUT] == 0u) {
+            vec2 offsets[4];
+            extrapolate_luma(q0, offsets);
+            extrapolate_chroma(q0, offsets);
+        } else {
+            copy_nearest(q0);
+        }
         return;
     }
     t = push.t;
-    texel_size = 1.0 / vec2(push.width, push.height);
     gather_blocks(q0);
     add_fallback();
     score_candidates(q0, light.x * 255.0 * push.luma_scale);

@@ -301,6 +301,11 @@ typedef struct mb_output_range {
     float step;
 } mb_output_range;
 
+typedef struct mb_extrapolation {
+    mb_buffer *field;
+    mb_buffer *stats;
+} mb_extrapolation;
+
 typedef struct mb_interpolate_pass {
     mb_pair_planes frames;
     mb_image *a_level;
@@ -314,6 +319,7 @@ typedef struct mb_interpolate_pass {
     mb_buffer *offsets;
     mb_buffer *panels;
     mb_buffer *global_motion;
+    mb_extrapolation extrapolation;
     int width;
     int height;
     mb_grid grid;

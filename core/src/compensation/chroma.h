@@ -14,5 +14,6 @@ typedef struct chroma_channels {
 chroma_channels chroma_channels_of(const mb_frame_planes *planes, const mb_chroma_layout *chroma);
 vec2 chroma_from_luma(const mb_chroma_layout *chroma, vec2 luma);
 vec2 chroma_sample(const mb_frame_planes *planes, const mb_chroma_layout *chroma, vec2 position);
+vec2 chroma_cubic_sample(const mb_frame_planes *planes, const mb_chroma_layout *chroma, vec2 position);
 
 #endif

@@ -86,7 +86,7 @@ typedef struct pass_info {
 } pass_info;
 
 #define SPIRV(code) code, sizeof(code)
-#define INTERPOLATE_BINDINGS "SSSSSSBBBIIISSBBBBB"
+#define INTERPOLATE_BINDINGS "SSSSSSBBBIIISSBBBBBBB"
 
 static const pass_info PASSES[PASS_COUNT] = {
     [PASS_NORMALIZE] = {SPIRV(SPV_NORMALIZE), "SI", false, 0, "normalize"},

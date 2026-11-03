@@ -14,6 +14,7 @@ typedef struct pair_choice {
     mb_buffer *previous_backward;
     mb_buffer *current_stats;
     mb_buffer *previous_stats;
+    mb_buffer *next_stats;
     bool lookahead;
     bool past;
 } pair_choice;
