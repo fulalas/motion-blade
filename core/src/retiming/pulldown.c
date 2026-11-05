@@ -151,6 +151,9 @@ static cadence_score best_score(const mb_pulldown_detector *d, mb_pulldown parit
 
 static bool locks(const mb_pulldown_detector *d, mb_pulldown parity)
 {
+    if (d->pushed < RECENT) {
+        return false;
+    }
     cadence_score recent = best_score(d, parity, RECENT);
     if (recent.hits >= QUICK_LOCK_HITS && recent.misses == 0) {
         return true;
@@ -161,14 +164,16 @@ static bool locks(const mb_pulldown_detector *d, mb_pulldown parity)
 
 static bool against_film(const mb_pulldown_detector *d)
 {
+    int span = d->pushed < RECENT ? (int)d->pushed : RECENT;
     int moving = 0;
     int repeats = 0;
-    for (long long n = d->pushed - RECENT; n < d->pushed; n++) {
+    for (long long n = d->pushed - span; n < d->pushed; n++) {
         field_class c = recent_class(d, n);
         moving += c != FIELDS_STILL;
         repeats += c != FIELDS_STILL && c != FIELDS_MOVING;
     }
-    return moving >= UNLOCK_MOVING && repeats == 0;
+    int needed = span == RECENT ? UNLOCK_MOVING : span;
+    return moving >= needed && repeats == 0;
 }
 
 static mb_pulldown other_parity(mb_pulldown parity)
@@ -193,7 +198,7 @@ mb_pulldown mb_pulldown_push(mb_pulldown_detector *d, mb_field_motion motion)
 {
     d->history[d->pushed % WINDOW] = classify(motion);
     d->pushed++;
-    if (d->pushed >= RECENT) {
+    if (d->pushed >= CYCLE) {
         d->state = decide(d);
     }
     return d->state;

@@ -137,6 +137,31 @@ static bool finds_repeated_frames(void)
     return true;
 }
 
+static bool leaves_film_soon_after_a_seek_into_video(void)
+{
+    mb_pulldown_detector *d = mb_pulldown_create();
+    feed_cycles(d, TOP_FIRST_CYCLE, 5, 40);
+    mb_pulldown_forget(d);
+    CHECK(feed_cycles(d, &MOVING, 1, 4) == MB_PULLDOWN_TOP_FIRST);
+    CHECK(feed_cycles(d, &MOVING, 1, 1) == MB_PULLDOWN_NONE);
+    mb_pulldown_destroy(d);
+    return true;
+}
+
+static bool keeps_film_after_a_seek_into_film(void)
+{
+    mb_pulldown_detector *d = mb_pulldown_create();
+    feed_cycles(d, TOP_FIRST_CYCLE, 5, 40);
+    for (int phase = 0; phase < 5; phase++) {
+        mb_pulldown_forget(d);
+        for (int i = 0; i < 40; i++) {
+            CHECK(mb_pulldown_push(d, TOP_FIRST_CYCLE[(phase + i) % 5]) == MB_PULLDOWN_TOP_FIRST);
+        }
+    }
+    mb_pulldown_destroy(d);
+    return true;
+}
+
 static bool switches_field_order(void)
 {
     mb_pulldown_detector *d = mb_pulldown_create();
@@ -159,6 +184,8 @@ int main(void)
         {"keeps film through other cadences", keeps_film_through_other_cadences},
         {"keeps film when repeats are faint", keeps_film_when_repeats_are_faint},
         {"finds repeated frames", finds_repeated_frames},
+        {"leaves film soon after a seek into video", leaves_film_soon_after_a_seek_into_video},
+        {"keeps film after a seek into film", keeps_film_after_a_seek_into_film},
         {"switches field order", switches_field_order},
     };
     return RUN_ALL(tests);
