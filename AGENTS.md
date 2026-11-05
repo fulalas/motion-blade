@@ -21,6 +21,10 @@ Commits that only touch documentation do not change the version.
   way; `make test` compares them pass by pass.
 - No code comments. Small functions with clear names, `static` for everything not in a header.
 - Never edit the `mpv/` submodule; changes mpv needs go in `patches/mpv.patch`.
+- Never output a repeated frame (a plain copy of a real frame in place of an in-between frame), not even
+  as a fallback: it makes motion stutter. Every in-between frame must show motion. The only exception is a
+  cut where neither side has usable motion (two cuts in a row, end of stream, a cut right after a seek):
+  there is no motion to follow, so the nearest frame is copied.
 
 ## Tests
 

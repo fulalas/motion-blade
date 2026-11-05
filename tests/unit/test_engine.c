@@ -109,21 +109,38 @@ static bool scene_cut_moves_old_frame_forward(void)
     return cut_output_matches(PANNING_CUT, 4, 0.25, (test_motion){5, 0, 3}, interior(), 40.0);
 }
 
+static bool scene_cut_at_middle_moves_old_frame_forward(void)
+{
+    return cut_output_matches(PANNING_CUT, 4, 0.5, (test_motion){6, 0, 3}, interior(), 40.0);
+}
+
 static bool scene_cut_moves_new_frame_back(void)
 {
-    return cut_output_matches(PANNING_CUT, 4, 0.5, (test_motion){-2, 0, 9}, interior(), 40.0);
+    return cut_output_matches(PANNING_CUT, 4, 0.75, (test_motion){-1, 0, 9}, interior(), 40.0);
 }
 
-static bool scene_cut_before_cut_shows_new_frame(void)
+static bool scene_cut_without_new_motion_moves_old_frame(void)
 {
     test_motion shots[4] = {{0, 0, 3}, {4, 0, 3}, {0, 0, 9}, {4, 0, 17}};
-    return cut_output_matches(shots, 4, 0.5, (test_motion){0, 0, 9}, whole_frame(), 99.0);
+    return cut_output_matches(shots, 4, 0.75, (test_motion){7, 0, 3}, interior(), 40.0);
 }
 
-static bool scene_cut_after_cut_shows_old_frame(void)
+static bool scene_cut_without_old_motion_moves_new_frame(void)
 {
     test_motion shots[6] = {{0, 0, 3}, {4, 0, 3}, {8, 0, 3}, {0, 0, 17}, {0, 0, 9}, {4, 0, 9}};
-    return cut_output_matches(shots, 6, 0.25, (test_motion){0, 0, 17}, whole_frame(), 99.0);
+    return cut_output_matches(shots, 6, 0.25, (test_motion){-3, 0, 9}, interior(), 40.0);
+}
+
+static const test_motion CUTS_IN_A_ROW[5] = {{0, 0, 3}, {4, 0, 3}, {0, 0, 17}, {0, 0, 9}, {0, 0, 25}};
+
+static bool scene_cut_without_any_motion_copies_old_frame(void)
+{
+    return cut_output_matches(CUTS_IN_A_ROW, 5, 0.25, (test_motion){0, 0, 17}, whole_frame(), 99.0);
+}
+
+static bool scene_cut_without_any_motion_copies_new_frame(void)
+{
+    return cut_output_matches(CUTS_IN_A_ROW, 5, 0.75, (test_motion){0, 0, 9}, whole_frame(), 99.0);
 }
 
 static bool letterbox_bars_survive(void)
@@ -175,9 +192,12 @@ int main(void)
         {"moving texture lands halfway", moving_texture_lands_halfway},
         {"still scene stays still", still_scene_stays_still},
         {"scene cut moves old frame forward", scene_cut_moves_old_frame_forward},
+        {"scene cut at middle moves old frame forward", scene_cut_at_middle_moves_old_frame_forward},
         {"scene cut moves new frame back", scene_cut_moves_new_frame_back},
-        {"scene cut before cut shows new frame", scene_cut_before_cut_shows_new_frame},
-        {"scene cut after cut shows old frame", scene_cut_after_cut_shows_old_frame},
+        {"scene cut without new motion moves old frame", scene_cut_without_new_motion_moves_old_frame},
+        {"scene cut without old motion moves new frame", scene_cut_without_old_motion_moves_new_frame},
+        {"scene cut without any motion copies old frame", scene_cut_without_any_motion_copies_old_frame},
+        {"scene cut without any motion copies new frame", scene_cut_without_any_motion_copies_new_frame},
         {"letterbox bars survive", letterbox_bars_survive},
         {"waits for lookahead", waits_for_lookahead},
         {"rejects tiny frames", rejects_tiny_frames},

@@ -101,7 +101,7 @@ bool luma_rows_equal(const test_frame *a, const test_frame *b, int first_row, in
     return memcmp(a->image.planes[0] + first_row * w, b->image.planes[0] + first_row * w, (size_t)(w * rows)) == 0;
 }
 
-enum { SCENE_CUT_FRAME = 8, LIGHT_FRAME = 5, BOX_SIZE = 48 };
+enum { SCENE_CUT_FRAME = 8, LIGHT_FRAME = 5, FIRST_OF_CUTS = 6, BOX_SIZE = 48 };
 
 static void paint_box(test_frame *frame, int x0, int y0, int seed)
 {
@@ -132,6 +132,15 @@ void paint_scene(test_frame *frame, int index)
     if (index == LIGHT_FRAME) {
         brighten(frame, 20);
     }
+}
+
+void paint_cuts_in_a_row(test_frame *frame, int index)
+{
+    static const int SEEDS[] = {11, 31, 47, 59};
+    int shot = index < FIRST_OF_CUTS ? 0 : index - FIRST_OF_CUTS + 1;
+    int seed = SEEDS[shot < 3 ? shot : 3];
+    paint_texture(frame, (test_motion){3 * index, index, seed});
+    paint_box(frame, frame->format.width - 60 - 5 * index, 40 + index, seed + 1);
 }
 
 bool test_frame_alloc_nv12(test_frame *frame, int width, int height)

@@ -12,6 +12,7 @@ core_sources = files(
   'src/common/video.c',
   'src/compensation/chroma.c',
   'src/compensation/cubic.c',
+  'src/compensation/extrapolate.c',
   'src/compensation/interpolate.c',
   'src/compensation/offsets.c',
   'src/compensation/panels.c',

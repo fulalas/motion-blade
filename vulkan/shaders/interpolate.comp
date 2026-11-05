@@ -22,8 +22,12 @@ layout(std430, binding = 15) readonly buffer Fallback { float fallback_weights[]
 layout(std430, binding = 16) readonly buffer Offsets { vec4 offsets[]; };
 layout(std430, binding = 17) readonly buffer Panels { float panel_weights[]; };
 layout(std430, binding = 18) readonly buffer Global { vec4 global_motion[]; };
-layout(std430, binding = 19) readonly buffer ExtrapolationField { vec4 extrapolation_field[]; };
-layout(std430, binding = 20) readonly buffer ExtrapolationStats { uint extrapolation_stats[]; };
+layout(std430, binding = 19) readonly buffer PastField { vec4 past_field[]; };
+layout(std430, binding = 20) readonly buffer PastStats { uint past_stats[]; };
+layout(std430, binding = 21) readonly buffer NextField { vec4 next_field[]; };
+layout(std430, binding = 22) readonly buffer NextStats { uint next_stats[]; };
+layout(binding = 23) uniform sampler2D past_neighbour_level;
+layout(binding = 24) uniform sampler2D next_neighbour_level;
 #ifdef DEPTH16
 layout(binding = 9, r16) uniform writeonly image2D out_luma;
 #ifdef NV
@@ -44,7 +48,6 @@ layout(binding = 11, r8) uniform writeonly image2D out_chroma2;
 
 #define MAX_CANDIDATES 5
 #define SIDE_LEVELS 7.0
-#define WEIGHT_CUTOFF 4.9e-4
 #ifdef NV
 const bool interleaved = true;
 #else
@@ -52,7 +55,7 @@ const bool interleaved = false;
 #endif
 
 float level_scale;
-bool nearest_a;
+bool from_b;
 
 vec2 at_level(vec2 p)
 {
@@ -149,25 +152,43 @@ float output_value(float v)
     return v;
 }
 
-float consistent_share(bool use_forward, vec2 p, vec2 u, float limit)
+#define FIELD_FORWARD 0
+#define FIELD_BACKWARD 1
+#define FIELD_PAST 2
+#define FIELD_NEXT 3
+
+vec2 probed_vector(int field, int i)
+{
+    return field == FIELD_FORWARD    ? forward[i].xy
+           : field == FIELD_BACKWARD ? -backward[i].xy
+           : field == FIELD_PAST     ? past_field[i].xy
+                                     : next_field[i].xy;
+}
+
+float consistent_share(int field, vec2 p, vec2 u)
 {
     BlockTaps taps = taps_at(p / level_scale, blocks());
     u /= level_scale;
+    float limit = consistency_limit(push.consistency, u);
     float share = 0.0;
     for (int k = 0; k < 4; k++) {
-        int i = taps.index[k];
-        vec2 v = use_forward ? forward[i].xy - u : backward[i].xy + u;
-        share += l1(v) <= limit ? taps.weight[k] : 0.0;
+        share += l1(probed_vector(field, taps.index[k]) - u) <= limit ? taps.weight[k] : 0.0;
     }
     return share;
 }
 
-void copy_nearest(ivec2 q0)
+float soft_score(float cost, float lowest)
+{
+    float e = exp(-(cost - lowest) / push.softness);
+    return e < MB_WEIGHT_CUTOFF ? 0.0 : e;
+}
+
+void copy_frame(ivec2 q0)
 {
     for (int j = 0; j < 4; j++) {
         ivec2 p = q0 + ivec2(j & 1, j >> 1);
         if (p.x < push.width && p.y < push.height) {
-            imageStore(out_luma, p, vec4(nearest_a ? texelFetch(a_luma, p, 0).r : texelFetch(b_luma, p, 0).r));
+            imageStore(out_luma, p, vec4(from_b ? texelFetch(b_luma, p, 0).r : texelFetch(a_luma, p, 0).r));
         }
     }
     for (int cy = 0; cy < (2 >> push.shift_y); cy++) {
@@ -176,9 +197,9 @@ void copy_nearest(ivec2 q0)
             if (cp.x >= push.chroma_width || cp.y >= push.chroma_height) {
                 continue;
             }
-            imageStore(out_chroma1, cp, nearest_a ? texelFetch(a_chroma1, cp, 0) : texelFetch(b_chroma1, cp, 0));
+            imageStore(out_chroma1, cp, from_b ? texelFetch(b_chroma1, cp, 0) : texelFetch(a_chroma1, cp, 0));
 #ifndef NV
-            imageStore(out_chroma2, cp, nearest_a ? texelFetch(a_chroma2, cp, 0) : texelFetch(b_chroma2, cp, 0));
+            imageStore(out_chroma2, cp, from_b ? texelFetch(b_chroma2, cp, 0) : texelFetch(a_chroma2, cp, 0));
 #endif
         }
     }
@@ -276,10 +297,9 @@ vec2 trust_sides(int i, ivec2 q0)
         return vec2(float(candidate_modes[i] == MB_MODE_PAST),
                     float(candidate_modes[i] == MB_MODE_FUTURE || candidate_modes[i] == MB_MODE_UNCOVER));
     }
-    float limit = consistency_limit(push.consistency, u / level_scale);
     vec2 center = vec2(q0) + 0.5;
-    float a = consistent_share(true, center + -t * u, u, limit);
-    float b = consistent_share(false, center + (1.0 - t) * u, u, limit);
+    float a = consistent_share(FIELD_FORWARD, center + -t * u, u);
+    float b = consistent_share(FIELD_BACKWARD, center + (1.0 - t) * u, u);
     return vec2(a, b);
 }
 
@@ -324,7 +344,7 @@ void score_pixel(int i, int j, vec2 trust)
         float nearest = round(smoothstep(push.nearest_lo, push.nearest_hi, error.y) *
                               smoothstep(0.0, 0.25, trust.x * trust.y) * SIDE_LEVELS);
         float before = qa + qb;
-        if (t < 0.5) {
+        if (t < MB_NEAREST_SWITCH) {
             qa = max(qa, nearest);
             qb = min(qb, SIDE_LEVELS - qa);
         } else {
@@ -362,8 +382,7 @@ void weigh_pixel(int j)
     }
     float total = 0.0, raw[MAX_CANDIDATES];
     for (int i = 0; i < candidate_count; i++) {
-        float e = exp(-(cost[i][j] - lowest) / push.softness);
-        raw[i] = e < WEIGHT_CUTOFF ? 0.0 : (push.candidate_prior + coverage[i][j]) * e;
+        raw[i] = (push.candidate_prior + coverage[i][j]) * soft_score(cost[i][j], lowest);
         total += raw[i];
     }
     float fallback = coverage_sum[j] > 0.0 ? fallback_sum[j] / coverage_sum[j] : 0.0;
@@ -448,7 +467,7 @@ void measure_panels(ivec2 q0)
 
 float unmoved(float a, float b)
 {
-    return mix((1.0 - t) * a + t * b, t < 0.5 ? a : b, switch_weight);
+    return mix((1.0 - t) * a + t * b, t < MB_NEAREST_SWITCH ? a : b, switch_weight);
 }
 
 void store_luma(ivec2 q0, float luma[4])
@@ -554,76 +573,196 @@ void blend_quad_chroma(ivec2 q0)
     }
 }
 
+float reach;
+vec2 extrapolation_vectors[MB_EXTRAPOLATION_VECTORS];
+int extrapolation_count = 0;
+float extrapolation_weights[MB_EXTRAPOLATION_VECTORS][4];
+
+bool past_usable()
+{
+    return (push.extrapolate & 1) != 0 && past_stats[MB_STAT_CUT] == 0u;
+}
+
+bool next_usable()
+{
+    return (push.extrapolate & 2) != 0 && next_stats[MB_STAT_CUT] == 0u;
+}
+
+vec2 field_at(int i)
+{
+    return from_b ? next_field[i].xy : past_field[i].xy;
+}
+
 vec2 field_vector(vec2 p)
 {
     BlockTaps taps = taps_at(p / level_scale, blocks());
     vec2 sum = vec2(0.0);
     for (int k = 0; k < 4; k++) {
-        sum += extrapolation_field[taps.index[k]].xy * taps.weight[k];
+        sum += field_at(taps.index[k]) * taps.weight[k];
     }
     return sum * level_scale;
 }
 
-vec2 extrapolated_offset(vec2 p)
+void add_extrapolation_vector(vec2 w)
 {
-    float step = nearest_a ? push.t : 1.0 - push.t;
-    vec2 first = field_vector(p) * step;
-    return field_vector(p + first) * step;
+    for (int i = 0; i < extrapolation_count; i++) {
+        if (l1(extrapolation_vectors[i] - w) < MB_SAME_VECTOR) {
+            return;
+        }
+    }
+    extrapolation_vectors[extrapolation_count++] = w;
 }
 
-void extrapolate_luma(ivec2 q0, out vec2 offsets[4])
+void gather_extrapolation(ivec2 q0)
 {
+    vec2 center = vec2(q0) + 1.0;
+    add_extrapolation_vector(field_vector(center + field_vector(center) * reach));
+    ivec2 block = block_at(center / level_scale);
+    for (int k = 0; k < 9; k++) {
+        add_extrapolation_vector(field_at(neighbour3_index(k, block, blocks())) * level_scale);
+    }
+}
+
+float source_level(vec2 at)
+{
+    return from_b ? textureLod(b_level, at * texel_size, 0.0).r : textureLod(a_level, at * texel_size, 0.0).r;
+}
+
+float neighbour_level(vec2 at)
+{
+    return from_b ? textureLod(next_neighbour_level, at * texel_size, 0.0).r
+                  : textureLod(past_neighbour_level, at * texel_size, 0.0).r;
+}
+
+void score_extrapolation(int i, ivec2 q0)
+{
+    vec2 w = extrapolation_vectors[i];
+    for (int y = 0; y < 4; y++) {
+        for (int x = 0; x < 4; x++) {
+            vec2 p = vec2(q0 + ivec2(x - 1, y - 1)) + 0.5;
+            differences[y * 4 + x] = abs(source_level(p + w * reach) - neighbour_level(p + w * (1.0 + reach))) * 255.0;
+        }
+    }
+    float settled = consistent_share(from_b ? FIELD_NEXT : FIELD_PAST, vec2(q0) + 1.0 + w * reach, w);
+    float unsettled = (1.0 - settled) * push.penalty_unconfirmed;
     for (int j = 0; j < 4; j++) {
-        ivec2 p = q0 + ivec2(j & 1, j >> 1);
-        vec2 pc = vec2(p) + 0.5;
-        offsets[j] = extrapolated_offset(pc);
-        if (p.x < push.width && p.y < push.height) {
-            vec2 at = pc + offsets[j];
-            float v = nearest_a ? cubic(a_luma, at, texel_size, false).x : cubic(b_luma, at, texel_size, false).x;
-            imageStore(out_luma, p, vec4(output_value(v)));
+        extrapolation_weights[i][j] = window_error(j & 1, j >> 1).x + unsettled;
+    }
+}
+
+void weigh_extrapolation(ivec2 q0)
+{
+    for (int i = 0; i < extrapolation_count; i++) {
+        score_extrapolation(i, q0);
+    }
+    for (int j = 0; j < 4; j++) {
+        float lowest = 1e30;
+        for (int i = 0; i < extrapolation_count; i++) {
+            lowest = min(lowest, extrapolation_weights[i][j]);
+        }
+        float total = 0.0;
+        for (int i = 0; i < extrapolation_count; i++) {
+            extrapolation_weights[i][j] = soft_score(extrapolation_weights[i][j], lowest);
+            total += extrapolation_weights[i][j];
+        }
+        for (int i = 0; i < extrapolation_count; i++) {
+            extrapolation_weights[i][j] /= total;
         }
     }
 }
 
-vec2 covered_offset(vec2 offsets[4], ivec2 index)
+bool extrapolation_contributes(int i)
 {
-    CoveredPixels cover = covered_pixels(index);
-    vec2 sum = vec2(0.0);
-    for (int k = 0; k < cover.count; k++) {
-        sum += offsets[cover.index[k]];
-    }
-    return sum * (1.0 / float(cover.count));
+    return extrapolation_weights[i][0] + extrapolation_weights[i][1] + extrapolation_weights[i][2] +
+               extrapolation_weights[i][3] > 0.0;
 }
 
-void extrapolate_chroma(ivec2 q0, vec2 offsets[4])
+void extrapolate_luma(ivec2 q0)
+{
+    float luma[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    for (int i = 0; i < extrapolation_count; i++) {
+        if (!extrapolation_contributes(i)) {
+            continue;
+        }
+        float s[4];
+        vec2 at = vec2(q0) + 0.5 + extrapolation_vectors[i] * reach;
+        if (from_b) {
+            quad_cubic(b_luma, at, texel_size, s);
+        } else {
+            quad_cubic(a_luma, at, texel_size, s);
+        }
+        for (int j = 0; j < 4; j++) {
+            luma[j] += extrapolation_weights[i][j] * s[j];
+        }
+    }
+    for (int j = 0; j < 4; j++) {
+        ivec2 p = q0 + ivec2(j & 1, j >> 1);
+        if (p.x < push.width && p.y < push.height) {
+            imageStore(out_luma, p, vec4(output_value(luma[j])));
+        }
+    }
+}
+
+float covered_extrapolation_weight(int i, ivec2 index)
+{
+    CoveredPixels cover = covered_pixels(index);
+    float sum = 0.0;
+    for (int k = 0; k < cover.count; k++) {
+        sum += extrapolation_weights[i][cover.index[k]];
+    }
+    return sum / float(cover.count);
+}
+
+vec2 extrapolated_chroma(ivec2 index, ivec2 cp)
+{
+    vec2 acc = vec2(0.0);
+    for (int i = 0; i < extrapolation_count; i++) {
+        float w = covered_extrapolation_weight(i, index);
+        if (w > 0.0) {
+            vec2 at = vec2(cp) + 0.5 + extrapolation_vectors[i] * reach / chroma_shift();
+            acc += w * (from_b ? cubic_chroma(b_chroma1, b_chroma2, at) : cubic_chroma(a_chroma1, a_chroma2, at));
+        }
+    }
+    return acc;
+}
+
+void extrapolate_chroma(ivec2 q0)
 {
     for (int cy = 0; cy < (2 >> push.shift_y); cy++) {
         for (int cx = 0; cx < (2 >> push.shift_x); cx++) {
             ivec2 cp = (q0 >> ivec2(push.shift_x, push.shift_y)) + ivec2(cx, cy);
             if (cp.x < push.chroma_width && cp.y < push.chroma_height) {
-                vec2 at = vec2(cp) + 0.5 + covered_offset(offsets, ivec2(cx, cy)) / chroma_shift();
-                store_chroma(cp, nearest_a ? cubic_chroma(a_chroma1, a_chroma2, at) : cubic_chroma(b_chroma1, b_chroma2, at));
+                store_chroma(cp, extrapolated_chroma(ivec2(cx, cy), cp));
             }
         }
     }
 }
 
+void extrapolate_quad(ivec2 q0)
+{
+    reach = from_b ? 1.0 - push.t : push.t;
+    gather_extrapolation(q0);
+    weigh_extrapolation(q0);
+    extrapolate_luma(q0);
+    extrapolate_chroma(q0);
+}
+
 void main()
 {
     level_scale = float(1 << push.base_level);
-    nearest_a = push.t < MB_NEAREST_SWITCH;
     ivec2 q0 = ivec2(gl_GlobalInvocationID.xy) * 2;
     if (q0.x >= push.width || q0.y >= push.height) {
         return;
     }
     texel_size = 1.0 / vec2(push.width, push.height);
     if (stats[MB_STAT_CUT] != 0u) {
-        if (push.extrapolate != 0 && extrapolation_stats[MB_STAT_CUT] == 0u) {
-            vec2 offsets[4];
-            extrapolate_luma(q0, offsets);
-            extrapolate_chroma(q0, offsets);
+        bool past = past_usable(), next = next_usable(), near_a = push.t < MB_CUT_SIDE_SWITCH;
+        if (past || next) {
+            from_b = next && !(past && near_a);
+            extrapolate_quad(q0);
         } else {
-            copy_nearest(q0);
+            from_b = !near_a;
+            copy_frame(q0);
         }
         return;
     }

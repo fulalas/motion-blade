@@ -48,6 +48,7 @@ typedef struct run_config {
     bool interleaved;
     int bit_depth;
     int half_resolution;
+    void (*paint)(test_frame *frame, int index);
 } run_config;
 
 static bool device_available = true;
@@ -101,7 +102,7 @@ static bool play(mb_engine *engine, const run_config *run)
     CHECK(alloc_layout(&input, run) && alloc_layout(&out, run));
     bool converted = run->bit_depth > 8 || run->interleaved;
     for (int k = 0; k < FRAMES; k++) {
-        paint_scene(&planar, k);
+        (run->paint ? run->paint : paint_scene)(&planar, k);
         convert(&planar, &input, run);
         CHECK(mb_engine_push(engine, converted ? &input.image : &planar.image) == MB_SUCCESS);
         mb_frame_report report;
@@ -164,22 +165,27 @@ static bool backends_agree(const run_config *run)
 
 static bool planar_frames_agree(void)
 {
-    return backends_agree(&(run_config){"planar", 256, 160, false, 8, 0});
+    return backends_agree(&(run_config){"planar", 256, 160, false, 8, 0, NULL});
 }
 
 static bool interleaved_frames_agree(void)
 {
-    return backends_agree(&(run_config){"interleaved", 256, 160, true, 8, 0});
+    return backends_agree(&(run_config){"interleaved", 256, 160, true, 8, 0, NULL});
 }
 
 static bool ten_bit_frames_agree(void)
 {
-    return backends_agree(&(run_config){"ten bit", 256, 160, false, 10, 0});
+    return backends_agree(&(run_config){"ten bit", 256, 160, false, 10, 0, NULL});
 }
 
 static bool half_resolution_agrees(void)
 {
-    return backends_agree(&(run_config){"half resolution", 384, 224, false, 8, 1});
+    return backends_agree(&(run_config){"half resolution", 384, 224, false, 8, 1, NULL});
+}
+
+static bool cuts_in_a_row_agree(void)
+{
+    return backends_agree(&(run_config){"cuts in a row", 256, 160, false, 8, 0, paint_cuts_in_a_row});
 }
 
 int main(void)
@@ -189,6 +195,7 @@ int main(void)
         {"interleaved frames agree", interleaved_frames_agree},
         {"ten bit frames agree", ten_bit_frames_agree},
         {"half resolution agrees", half_resolution_agrees},
+        {"cuts in a row agree", cuts_in_a_row_agree},
     };
     int result = RUN_ALL(tests);
     return device_available ? result : SKIP;

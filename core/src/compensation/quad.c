@@ -5,7 +5,6 @@
 #include "compensation/cubic.h"
 #include "reference/cpu_resources.h"
 
-static const float WEIGHT_CUTOFF = 4.9e-4f;
 static const float SIDE_LEVELS = 7.0f;
 static const unsigned SIDE_BITS = 3;
 static const unsigned SIDE_MASK = 7;
@@ -103,19 +102,13 @@ void quad_add_fallback(quad_state *q)
     }
 }
 
-typedef struct field_probe {
-    const mb_buffer *field;
-    float sign;
-    vec2 position;
-} field_probe;
-
-static float consistent_share(const quad_state *q, field_probe probe, vec2 u)
+float quad_consistent_share(const mb_interpolate_pass *pass, field_probe probe, vec2 u)
 {
-    const mb_interpolate_pass *pass = q->pass;
+    float scale = (float)(1 << pass->base_level);
     vec2 p = probe.position;
-    block_taps taps = block_taps_at(v2(p.x / q->scale, p.y / q->scale), pass->grid);
-    vec2 v = v2_scale(u, probe.sign / q->scale);
-    float limit = consistency_limit(pass->costs.consistency, v2_scale(u, 1.0f / q->scale));
+    block_taps taps = block_taps_at(v2(p.x / scale, p.y / scale), pass->grid);
+    vec2 v = v2_scale(u, probe.sign / scale);
+    float limit = consistency_limit(pass->costs.consistency, v2_scale(u, 1.0f / scale));
     float share = 0.0f;
     for (int k = 0; k < 4; k++) {
         vec2 d = v2_sub(v4_xy(vec4s(probe.field)[taps.index[k]]), v);
@@ -139,33 +132,45 @@ static side_trust trust_sides(const quad_state *q, const quad_candidate *c)
     vec2 center = v2((float)q->q0.x + 0.5f, (float)q->q0.y + 0.5f);
     field_probe forward = {q->pass->forward, 1.0f, v2_add(center, v2_scale(c->vector, -q->t))};
     field_probe backward = {q->pass->backward, -1.0f, v2_add(center, v2_scale(c->vector, 1.0f - q->t))};
-    return (side_trust){consistent_share(q, forward, c->vector), consistent_share(q, backward, c->vector)};
+    return (side_trust){quad_consistent_share(q->pass, forward, c->vector),
+                        quad_consistent_share(q->pass, backward, c->vector)};
 }
 
-typedef struct difference_window {
-    float d[16];
-} difference_window;
-
-static difference_window differences(const quad_state *q, vec2 u)
+difference_window quad_difference_window(ivec2 q0, window_sample sample, const void *context)
 {
-    const mb_interpolate_pass *pass = q->pass;
-    vec2 oa = v2_scale(u, -q->t);
-    vec2 ob = v2_scale(u, 1.0f - q->t);
     difference_window w;
     for (int y = 0; y < 4; y++) {
         for (int x = 0; x < 4; x++) {
-            vec2 p = v2((float)(q->q0.x + x - 1) + 0.5f, (float)(q->q0.y + y - 1) + 0.5f);
-            vec2 sa = v2_add(p, oa);
-            vec2 sb = v2_add(p, ob);
-            float a = ref_sample(&pass->a_level->texture, sa.x * q->inv.x, sa.y * q->inv.y, 0);
-            float b = ref_sample(&pass->b_level->texture, sb.x * q->inv.x, sb.y * q->inv.y, 0);
-            w.d[y * 4 + x] = fabsf((a - b) * 255.0f - q->luma_offset);
+            w.d[y * 4 + x] = sample(context, v2((float)(q0.x + x - 1) + 0.5f, (float)(q0.y + y - 1) + 0.5f));
         }
     }
     return w;
 }
 
-static float window_error(const difference_window *w, int jx, int jy)
+typedef struct pair_offsets {
+    const quad_state *q;
+    vec2 a;
+    vec2 b;
+} pair_offsets;
+
+static float pair_difference(const void *context, vec2 p)
+{
+    const pair_offsets *o = context;
+    const quad_state *q = o->q;
+    vec2 sa = v2_add(p, o->a);
+    vec2 sb = v2_add(p, o->b);
+    float a = ref_sample(&q->pass->a_level->texture, sa.x * q->inv.x, sa.y * q->inv.y, 0);
+    float b = ref_sample(&q->pass->b_level->texture, sb.x * q->inv.x, sb.y * q->inv.y, 0);
+    return fabsf((a - b) * 255.0f - q->luma_offset);
+}
+
+static difference_window differences(const quad_state *q, vec2 u)
+{
+    pair_offsets offsets = {q, v2_scale(u, -q->t), v2_scale(u, 1.0f - q->t)};
+    return quad_difference_window(q->q0, pair_difference, &offsets);
+}
+
+float quad_window_error(const difference_window *w, int jx, int jy)
 {
     float sum = 0.0f;
     for (int dy = 0; dy < 3; dy++) {
@@ -194,7 +199,7 @@ typedef struct side_codes {
 
 static side_codes lean_to_nearest(const quad_state *q, side_codes codes, float nearest)
 {
-    if (q->t < 0.5f) {
+    if (q->t < MB_NEAREST_SWITCH) {
         codes.a = fmaxf(codes.a, nearest);
         codes.b = fminf(codes.b, SIDE_LEVELS - codes.a);
     } else {
@@ -218,7 +223,7 @@ static void score_pixel(const quad_state *q, const candidate_scoring *scoring, i
     const difference_window *w = &scoring->window;
     int jx = j & 1;
     int jy = j >> 1;
-    float e = window_error(w, jx, jy);
+    float e = quad_window_error(w, jx, jy);
     side_codes codes = {rintf(s.a * (1.0f - s.b) * SIDE_LEVELS), rintf((1.0f - s.a) * s.b * SIDE_LEVELS)};
     float bonus = costs->foreground_bonus * clampf(v2_l1(c->vector) * 0.5f, 0.0f, 1.0f);
     float cost = s.a * s.b * fmaxf(0.0f, e - bonus) + (codes.a + codes.b) / SIDE_LEVELS * costs->one_sided +
@@ -253,18 +258,30 @@ void quad_score(quad_state *q)
     }
 }
 
+void quad_soft_scores(const float *cost, int count, float softness, float *score)
+{
+    float lowest = 1e30f;
+    for (int i = 0; i < count; i++) {
+        lowest = fminf(lowest, cost[i]);
+    }
+    for (int i = 0; i < count; i++) {
+        float e = expf(-(cost[i] - lowest) / softness);
+        score[i] = e < MB_WEIGHT_CUTOFF ? 0.0f : e;
+    }
+}
+
 static void weigh_pixel(quad_state *q, int j)
 {
     const mb_blend_costs *costs = &q->pass->costs;
-    float lowest = 1e30f;
+    float cost[QUAD_MAX_CANDIDATES];
     for (int i = 0; i < q->count; i++) {
-        lowest = fminf(lowest, q->candidates[i].cost[j]);
+        cost[i] = q->candidates[i].cost[j];
     }
     float raw[QUAD_MAX_CANDIDATES];
+    quad_soft_scores(cost, q->count, costs->softness, raw);
     float total = 0.0f;
     for (int i = 0; i < q->count; i++) {
-        float e = expf(-(q->candidates[i].cost[j] - lowest) / costs->softness);
-        raw[i] = e < WEIGHT_CUTOFF ? 0.0f : (costs->candidate_prior + q->candidates[i].coverage[j]) * e;
+        raw[i] *= costs->candidate_prior + q->candidates[i].coverage[j];
         total += raw[i];
     }
     float fallback = q->coverage_sum[j] > 0.0f ? q->fallback_sum[j] / q->coverage_sum[j] : 0.0f;
@@ -382,7 +399,7 @@ void quad_measure_panels(quad_state *q)
 static float unmoved_value(const quad_state *q, float a, float b)
 {
     float blend = (1.0f - q->t) * a + q->t * b;
-    return mixf(blend, q->t < 0.5f ? a : b, q->panel_switch);
+    return mixf(blend, q->t < MB_NEAREST_SWITCH ? a : b, q->panel_switch);
 }
 
 quad_values quad_mix_panels_luma(const quad_state *q, quad_values luma)
@@ -400,6 +417,18 @@ typedef struct chroma_weights {
     float a;
     float b;
 } chroma_weights;
+
+void quad_visit_chroma(const mb_chroma_layout *chroma, ivec2 q0, chroma_visit visit, const void *context)
+{
+    for (int cy = 0; cy < (2 >> chroma->shift_y); cy++) {
+        for (int cx = 0; cx < (2 >> chroma->shift_x); cx++) {
+            ivec2 cp = iv2((q0.x >> chroma->shift_x) + cx, (q0.y >> chroma->shift_y) + cy);
+            if (cp.x < chroma->width && cp.y < chroma->height) {
+                visit(context, iv2(cx, cy), cp);
+            }
+        }
+    }
+}
 
 covered_pixels quad_covered_pixels(const mb_chroma_layout *chroma, ivec2 chroma_index)
 {
@@ -473,4 +502,24 @@ float quad_output_value(const mb_output_range *range, float value)
     }
     float v = fminf(value, range->max_value);
     return range->step > 0.0f ? rintf(v / range->step) * range->step : v;
+}
+
+void quad_store_luma(const mb_interpolate_pass *pass, ivec2 p, float value)
+{
+    if (p.x < pass->width && p.y < pass->height) {
+        ref_store(&pass->output.luma->texture, p.x, p.y, 0, quad_output_value(&pass->range, value));
+    }
+}
+
+void quad_store_chroma_raw(const mb_interpolate_pass *pass, ivec2 p, vec2 value)
+{
+    chroma_channels out = chroma_channels_of(&pass->output, &pass->chroma);
+    ref_store(out.first, p.x, p.y, 0, value.x);
+    ref_store(out.second, p.x, p.y, out.second_channel, value.y);
+}
+
+void quad_store_chroma(const mb_interpolate_pass *pass, ivec2 p, vec2 value)
+{
+    quad_store_chroma_raw(pass, p,
+                          v2(quad_output_value(&pass->range, value.x), quad_output_value(&pass->range, value.y)));
 }

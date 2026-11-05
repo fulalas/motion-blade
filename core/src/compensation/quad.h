@@ -48,6 +48,19 @@ typedef struct covered_pixels {
     int count;
 } covered_pixels;
 
+typedef struct difference_window {
+    float d[16];
+} difference_window;
+
+typedef float (*window_sample)(const void *context, vec2 position);
+typedef void (*chroma_visit)(const void *context, ivec2 chroma_index, ivec2 chroma_position);
+
+typedef struct field_probe {
+    const mb_buffer *field;
+    float sign;
+    vec2 position;
+} field_probe;
+
 covered_pixels quad_covered_pixels(const mb_chroma_layout *chroma, ivec2 chroma_index);
 void quad_begin(quad_state *q, const mb_interpolate_pass *pass, ivec2 q0);
 void quad_gather_blocks(quad_state *q);
@@ -59,5 +72,13 @@ void quad_measure_panels(quad_state *q);
 quad_values quad_mix_panels_luma(const quad_state *q, quad_values luma);
 vec2 quad_blend_chroma(const quad_state *q, ivec2 chroma_index, ivec2 chroma_position);
 float quad_output_value(const mb_output_range *range, float value);
+difference_window quad_difference_window(ivec2 q0, window_sample sample, const void *context);
+float quad_window_error(const difference_window *w, int jx, int jy);
+void quad_visit_chroma(const mb_chroma_layout *chroma, ivec2 q0, chroma_visit visit, const void *context);
+float quad_consistent_share(const mb_interpolate_pass *pass, field_probe probe, vec2 u);
+void quad_soft_scores(const float *cost, int count, float softness, float *score);
+void quad_store_luma(const mb_interpolate_pass *pass, ivec2 p, float value);
+void quad_store_chroma_raw(const mb_interpolate_pass *pass, ivec2 p, vec2 value);
+void quad_store_chroma(const mb_interpolate_pass *pass, ivec2 p, vec2 value);
 
 #endif

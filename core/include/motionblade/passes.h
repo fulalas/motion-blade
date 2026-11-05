@@ -301,9 +301,15 @@ typedef struct mb_output_range {
     float step;
 } mb_output_range;
 
-typedef struct mb_extrapolation {
+typedef struct mb_extrapolation_side {
     mb_buffer *field;
     mb_buffer *stats;
+    mb_image *neighbour_level;
+} mb_extrapolation_side;
+
+typedef struct mb_extrapolation {
+    mb_extrapolation_side past;
+    mb_extrapolation_side next;
 } mb_extrapolation;
 
 typedef struct mb_interpolate_pass {

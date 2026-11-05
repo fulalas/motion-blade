@@ -231,10 +231,10 @@ static mb_blend_costs blend_costs(const mb_engine *e)
 static mb_extrapolation extrapolation_of(const pass_context *ctx)
 {
     const pair_choice *p = ctx->pair;
-    if (ctx->t < MB_NEAREST_SWITCH) {
-        return (mb_extrapolation){p->previous_backward, p->previous_stats};
-    }
-    return (mb_extrapolation){p->next_forward, p->next_stats};
+    return (mb_extrapolation){
+        {p->previous_backward, p->previous_stats, level_image(ctx->engine, p->z, 0)},
+        {p->next_forward, p->next_stats, level_image(ctx->engine, p->c, 0)},
+    };
 }
 
 static void blend(const pass_context *ctx)
