@@ -36,6 +36,8 @@
 #include "motionblade/schedule.h"
 #include "motionblade/vulkan.h"
 
+#include "vf_motionblade_pulldown.h"
+
 #define MAX_QUEUE 24
 #define DISPLAY_FPS_REFRESH_SECONDS 10
 
@@ -46,6 +48,7 @@ struct opts {
     double max_fps;
     double max_gap;
     int zerocopy;
+    int pulldown;
 };
 
 struct queued_frame {
@@ -1173,6 +1176,18 @@ static void add_formats(struct priv *p, struct mp_autoconvert *conv)
 #endif
 }
 
+static bool add_pulldown(struct mp_filter *f)
+{
+    struct priv *p = f->priv;
+    struct mp_filter *pulldown = mb_pulldown_filter_create(f);
+    if (!pulldown) {
+        return false;
+    }
+    mp_pin_connect(pulldown->pins[0], p->in);
+    p->in = pulldown->pins[1];
+    return true;
+}
+
 static struct mp_filter *f_create(struct mp_filter *parent, void *options)
 {
     struct mp_filter *f = mp_filter_create(parent, &filter);
@@ -1201,6 +1216,10 @@ static struct mp_filter *f_create(struct mp_filter *parent, void *options)
     add_formats(p, conv);
     mp_pin_connect(conv->f->pins[0], f->ppins[0]);
     p->in = conv->f->pins[1];
+    if (p->opts->pulldown && !add_pulldown(f)) {
+        talloc_free(f);
+        return NULL;
+    }
     return f;
 }
 
@@ -1211,6 +1230,7 @@ static const m_option_t opts_list[] = {
     {"max-gap", OPT_DOUBLE(max_gap), M_RANGE(0, 10)},
     {"zerocopy", OPT_CHOICE(zerocopy, {"auto", ZEROCOPY_AUTO}, {"drm", ZEROCOPY_DRM}, {"vulkan", ZEROCOPY_VULKAN},
                             {"no", ZEROCOPY_NO})},
+    {"pulldown", OPT_CHOICE(pulldown, {"no", 0}, {"auto", 1})},
     {0},
 };
 
@@ -1224,6 +1244,7 @@ const struct mp_user_filter_entry vf_motionblade = {
             .max_fps = 0,
             .max_gap = 0.25,
             .zerocopy = ZEROCOPY_AUTO,
+            .pulldown = 1,
         },
         .options = opts_list,
     },

@@ -1,12 +1,13 @@
 --- a/meson.build
 +++ b/meson.build
-@@ -1311,7 +1311,9 @@
+@@ -1311,7 +1311,10 @@
      sources += files('video/out/hwdec/hwdec_vulkan.c',
                       'video/out/vulkan/context.c',
                       'video/out/vulkan/utils.c',
 -                     'video/filter/vf_gpu_vulkan.c')
 +                     'video/filter/vf_gpu_vulkan.c',
-+                     'video/filter/vf_motionblade.c')
++                     'video/filter/vf_motionblade.c',
++                     'video/filter/vf_motionblade_pulldown.c')
 +    dependencies += subproject('motionblade').get_variable('motionblade_dep')
  endif
  
@@ -42,7 +43,7 @@
  #g ignore
 --- a/DOCS/man/vf.rst
 +++ b/DOCS/man/vf.rst
-@@ -865,3 +865,47 @@
+@@ -865,3 +865,56 @@
          Do not use this with ``--vo=gpu``. It will apply filtering twice, since
          most ``--vo=gpu`` options are unconditionally applied to the ``gpu``
          filter. There is no mechanism in mpv to prevent this.
@@ -77,6 +78,15 @@
 +    ``max-gap=<0-10>``
 +        Do not interpolate between frames that are more than this many seconds
 +        apart (default: 0.25, 0 means no limit).
++
++    ``pulldown=<auto|no>``
++        Film converted to 29.97 fps for TV or DVD (3:2 pulldown) repeats some
++        fields, so motion stutters. With ``auto`` (the default) the filter
++        finds this pattern and restores the original 23.976 fps frames before
++        interpolating, using libavfilter's ``fieldmatch``, ``yadif`` and
++        ``decimate``. It works on frames in system memory only (software
++        decoding or ``--hwdec=auto-copy``). Leave ``--deinterlace`` off: it
++        runs before this filter and hides the pattern.
 +
 +    ``zerocopy=<auto|drm|vulkan|no>``
 +        Which paths may keep frames on the GPU: VA-API decoding through dma-buf

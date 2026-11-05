@@ -38,6 +38,7 @@ core_sources = files(
   'src/framing/border.c',
   'src/reference/cpu_backend.c',
   'src/reference/cpu_transfers.c',
+  'src/retiming/pulldown.c',
   'src/retiming/schedule.c',
   'src/scene/cut.c',
   'src/selection/fallback.c',

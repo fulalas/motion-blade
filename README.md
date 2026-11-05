@@ -58,12 +58,15 @@ Windows (static, cross-built from Linux): extract
 mpv --vf=motionblade video.mp4
 ```
 
-Options: `--vf=motionblade=factor=2:max-fps=0:max-gap=0.25:zerocopy=auto`
+Options: `--vf=motionblade=factor=2:max-fps=0:max-gap=0.25:pulldown=auto:zerocopy=auto`
 
 - `factor`: a number from 2 to 8 to multiply the frame rate; `auto` matches the display
   refresh rate instead (default 2).
 - `max-fps`: skip sources faster than this (default 0 = never skip).
 - `max-gap`: skip timestamp gaps longer than this, in seconds (default 0.25, 0 = never skip).
+- `pulldown`: film turned into 29.97 fps for TV or DVD repeats some fields and stutters; `auto`
+  finds it and restores the original 23.976 fps frames first (default `auto`, `no` to turn off). Only
+  for frames in system memory (software decoding or `--hwdec=auto-copy`); keep `--deinterlace` off.
 - `zerocopy`: set to `no` if you see wrong colours or glitches (default `auto`).
 
 It works with or without hardware decoding. With `--hwdec=vaapi` or `--gpu-api=vulkan --hwdec=vulkan`
