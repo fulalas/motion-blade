@@ -32,9 +32,10 @@ static bool measures_each_field(void)
     for (int y = 1; y < HEIGHT; y += 2) {
         memset(b + y * WIDTH, 110, WIDTH);
     }
-    mb_luma_plane pa = {a, WIDTH, WIDTH, HEIGHT, 1, 255};
-    mb_luma_plane pb = {b, WIDTH, WIDTH, HEIGHT, 1, 255};
-    mb_field_motion m = mb_field_motion_measure(&pa, &pb);
+    mb_video_format format = {WIDTH, HEIGHT, 8, 1, 1, false, 0};
+    mb_host_image pa = {{a}, {WIDTH}};
+    mb_host_image pb = {{b}, {WIDTH}};
+    mb_field_motion m = mb_field_motion_measure((mb_frame_pair){&format, &pa, &pb});
     CHECK(m.top == 0.0);
     CHECK(fabs(m.bottom - 10.0) < 1e-9);
     return true;
@@ -47,9 +48,10 @@ static bool scales_deep_samples(void)
         a[i] = 400;
         b[i] = 440;
     }
-    mb_luma_plane pa = {a, WIDTH * 2, WIDTH, HEIGHT, 2, 1023};
-    mb_luma_plane pb = {b, WIDTH * 2, WIDTH, HEIGHT, 2, 1023};
-    mb_field_motion m = mb_field_motion_measure(&pa, &pb);
+    mb_video_format format = {WIDTH, HEIGHT, 10, 1, 1, false, 0};
+    mb_host_image pa = {{(uint8_t *)a}, {WIDTH * 2}};
+    mb_host_image pb = {{(uint8_t *)b}, {WIDTH * 2}};
+    mb_field_motion m = mb_field_motion_measure((mb_frame_pair){&format, &pa, &pb});
     CHECK(fabs(m.top - 40.0 * 255.0 / 1023.0) < 1e-9);
     CHECK(fabs(m.bottom - m.top) < 1e-9);
     return true;
@@ -137,6 +139,54 @@ static bool finds_repeated_frames(void)
     return true;
 }
 
+typedef struct motion_script {
+    const double *from_shown;
+    const double *from_pending;
+    int step;
+} motion_script;
+
+static double scripted_motion(void *context, mb_motion_origin origin)
+{
+    const motion_script *s = context;
+    return origin == MB_FROM_SHOWN ? s->from_shown[s->step] : s->from_pending[s->step];
+}
+
+static mb_repeat_decision push_scripted(mb_repeat_filter *f, motion_script *s)
+{
+    mb_repeat_decision d = mb_repeat_filter_push(f, (mb_motion_source){scripted_motion, s});
+    s->step++;
+    return d;
+}
+
+static bool drops_a_repeated_frame(void)
+{
+    static const double from_shown[] = {NAN, 0, 0, 12.0, 0};
+    static const double from_pending[] = {0, 10.0, 1.0, 12.0, 11.0};
+    motion_script s = {from_shown, from_pending, 0};
+    mb_repeat_filter f;
+    mb_repeat_filter_reset(&f);
+    CHECK(push_scripted(&f, &s) == MB_REPEAT_WAIT);
+    CHECK(push_scripted(&f, &s) == MB_REPEAT_SHOW_PENDING);
+    CHECK(push_scripted(&f, &s) == MB_REPEAT_SHOW_PENDING);
+    CHECK(push_scripted(&f, &s) == MB_REPEAT_DROP_PENDING);
+    CHECK(push_scripted(&f, &s) == MB_REPEAT_SHOW_PENDING);
+    return true;
+}
+
+static bool keeps_frames_of_steady_motion(void)
+{
+    static const double from_shown[] = {NAN, 0, 0, 0};
+    static const double from_pending[] = {0, 8.0, 9.0, 8.5};
+    motion_script s = {from_shown, from_pending, 0};
+    mb_repeat_filter f;
+    mb_repeat_filter_reset(&f);
+    CHECK(push_scripted(&f, &s) == MB_REPEAT_WAIT);
+    for (int i = 0; i < 3; i++) {
+        CHECK(push_scripted(&f, &s) == MB_REPEAT_SHOW_PENDING);
+    }
+    return true;
+}
+
 static bool leaves_film_soon_after_a_seek_into_video(void)
 {
     mb_pulldown_detector *d = mb_pulldown_create();
@@ -184,6 +234,8 @@ int main(void)
         {"keeps film through other cadences", keeps_film_through_other_cadences},
         {"keeps film when repeats are faint", keeps_film_when_repeats_are_faint},
         {"finds repeated frames", finds_repeated_frames},
+        {"drops a repeated frame", drops_a_repeated_frame},
+        {"keeps frames of steady motion", keeps_frames_of_steady_motion},
         {"leaves film soon after a seek into video", leaves_film_soon_after_a_seek_into_video},
         {"keeps film after a seek into film", keeps_film_after_a_seek_into_film},
         {"switches field order", switches_field_order},

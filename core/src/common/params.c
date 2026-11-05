@@ -52,7 +52,6 @@ static const param_entry PARAM_TABLE[] = {
     FLOAT_PARAM("cut_zero_mean_min", cut.zero_mean_min, 1, ANY),
     FLOAT_PARAM("cut_spread_norm", cut.spread_norm, 45, ANY),
     FLOAT_PARAM("cut_spread_min", cut.spread_min, 0.1f, ANY),
-    INT_PARAM("lookahead", select.lookahead, 1, 0, 1),
     FLOAT_PARAM("consistency_threshold", select.consistency_threshold, 8, ANY),
     FLOAT_PARAM("penalty_inconsistent", select.penalty_inconsistent, 256, ANY),
     FLOAT_PARAM("foreground_bonus", select.foreground_bonus, 1024, ANY),

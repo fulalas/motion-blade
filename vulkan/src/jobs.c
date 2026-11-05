@@ -161,6 +161,7 @@ static void start_recording(mbvk_backend *vk, job_slot *s)
     }
     s->timestamp_count = 0;
     s->target = TARGET_NONE;
+    vk->pending = (hazards){.read_count = 0};
     VkMemoryBarrier all = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT,
                            VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
     VkPipelineStageFlags stages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -271,7 +272,7 @@ job_slot *jobs_current(mbvk_backend *vk)
     return &vk->slots[vk->current];
 }
 
-VkCommandBuffer jobs_commands(mbvk_backend *vk)
+VkCommandBuffer jobs_tracked_commands(mbvk_backend *vk)
 {
     return vk->slots[vk->current].commands;
 }
@@ -282,7 +283,77 @@ void jobs_barrier(mbvk_backend *vk)
     VkAccessFlags reads = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
     VkMemoryBarrier b = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, writes, reads | writes};
     VkPipelineStageFlags stages = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
-    vkCmdPipelineBarrier(jobs_commands(vk), stages, stages, 0, 1, &b, 0, NULL, 0, NULL);
+    vkCmdPipelineBarrier(jobs_tracked_commands(vk), stages, stages, 0, 1, &b, 0, NULL, 0, NULL);
+    vk->pending = (hazards){.read_count = 0};
+}
+
+VkCommandBuffer jobs_commands(mbvk_backend *vk)
+{
+    if (vk->pending.read_count || vk->pending.write_count) {
+        jobs_barrier(vk);
+    }
+    vk->pending.untracked = true;
+    return jobs_tracked_commands(vk);
+}
+
+static bool listed(const uint64_t *list, int count, uint64_t handle)
+{
+    for (int i = 0; i < count; i++) {
+        if (list[i] == handle) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool conflicts(const hazards *h, resource_use use)
+{
+    return listed(h->writes, h->write_count, use.handle) || (use.write && listed(h->reads, h->read_count, use.handle));
+}
+
+static bool must_wait(const hazards *h, const resource_use *uses, int count)
+{
+    if (h->untracked || h->read_count + count > MAX_TRACKED || h->write_count + count > MAX_TRACKED) {
+        return true;
+    }
+    for (int i = 0; i < count; i++) {
+        if (conflicts(h, uses[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void jobs_prepare(mbvk_backend *vk, const resource_use *uses, int count)
+{
+    hazards *h = &vk->pending;
+    if (must_wait(h, uses, count)) {
+        jobs_barrier(vk);
+    }
+    for (int i = 0; i < count; i++) {
+        if (uses[i].write) {
+            h->writes[h->write_count++] = uses[i].handle;
+        } else {
+            h->reads[h->read_count++] = uses[i].handle;
+        }
+    }
+}
+
+static uint64_t handle_bits(const void *handle, size_t size)
+{
+    uint64_t bits = 0;
+    memcpy(&bits, handle, size);
+    return bits;
+}
+
+uint64_t buffer_handle(const struct mb_buffer *buffer)
+{
+    return handle_bits(&buffer->buffer, sizeof(buffer->buffer));
+}
+
+uint64_t image_handle(const struct mb_image *image)
+{
+    return handle_bits(&image->image, sizeof(image->image));
 }
 
 void jobs_host_barrier(mbvk_backend *vk)
@@ -302,16 +373,22 @@ void jobs_timestamp(mbvk_backend *vk, const char *name)
     }
 }
 
-void jobs_to_general(mbvk_backend *vk, struct mb_image *image)
+VkImageMemoryBarrier image_barrier(VkImage image, VkImageLayout from, VkImageLayout to)
 {
     VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-    b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    b.oldLayout = from;
+    b.newLayout = to;
     b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.image = image->image;
-    b.subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    b.image = image;
+    b.subresourceRange = COLOR_RANGE;
+    return b;
+}
+
+void jobs_to_general(mbvk_backend *vk, struct mb_image *image)
+{
+    VkImageMemoryBarrier b = image_barrier(image->image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
     vkCmdPipelineBarrier(jobs_commands(vk), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
                          NULL, 0, NULL, 1, &b);
 }

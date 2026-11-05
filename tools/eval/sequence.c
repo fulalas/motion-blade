@@ -7,6 +7,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "y4m.h"
+
 typedef struct input {
     FILE *file;
     pid_t decoder;
@@ -67,13 +69,7 @@ static void close_input(input in)
 
 static int parse_header(sequence *s, const char *path)
 {
-    char *w = strstr(s->header, " W");
-    char *h = strstr(s->header, " H");
-    char *c = strstr(s->header, " C");
-    s->width = w ? atoi(w + 2) : 0;
-    s->height = h ? atoi(h + 2) : 0;
-    bool bad_chroma = c && (strncmp(c + 2, "420", 3) || strstr(c, "p1"));
-    if (s->width <= 0 || s->height <= 0 || s->width % 2 || s->height % 2 || bad_chroma) {
+    if (!y4m_frame_size(s->header, &s->width, &s->height)) {
         fprintf(stderr, "%s: needs 8-bit 4:2:0 with even width and height\n", path);
         return -1;
     }

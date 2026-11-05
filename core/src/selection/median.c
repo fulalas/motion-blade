@@ -9,18 +9,13 @@ typedef struct neighbour_set {
     int count;
 } neighbour_set;
 
-static bool two_sided(vec4 v)
-{
-    return (int)v.z == MB_MODE_TWO_SIDED;
-}
-
 static neighbour_set two_sided_neighbours(const vec4 *selection, ivec2 block, mb_grid grid)
 {
     neighbour_set set = {.count = 0};
     for (int k = 0; k < NEIGHBOURS; k++) {
         ivec2 q = iv2_add(block, neighbour3(k));
-        if (block_inside(q, grid) && two_sided(selection[q.y * grid.blocks_x + q.x])) {
-            set.vectors[set.count++] = selection[q.y * grid.blocks_x + q.x];
+        if (block_inside(q, grid) && is_two_sided(selection[block_index(q, grid)])) {
+            set.vectors[set.count++] = selection[block_index(q, grid)];
         }
     }
     return set;
@@ -49,7 +44,7 @@ void ref_median(const mb_median_pass *pass)
     vec4 *filtered = vec4s(pass->filtered);
     for (int id = 0; id < mb_grid_block_count(pass->grid); id++) {
         vec4 v = selection[id];
-        if (!two_sided(v)) {
+        if (!is_two_sided(v)) {
             filtered[id] = v;
             continue;
         }

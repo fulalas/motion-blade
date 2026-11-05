@@ -2,6 +2,7 @@
 
 #include <string.h>
 #ifndef _WIN32
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -12,7 +13,7 @@
 #include "vk_pipelines.h"
 #include "vk_transfers.h"
 
-enum { BLACK_LUMA_MAX = 24, BLACK_CHROMA_TOLERANCE = 10, BAR_TILE = 16 };
+enum { BAR_TILE = 16, IMPORT_IDLE_LOADS = 2 * MAX_IMPORTS };
 
 typedef struct frame_size {
     int width;
@@ -155,6 +156,23 @@ static mb_status import_dmabuf(mbvk_backend *vk, const mb_device_load *load, str
     }
     return status;
 }
+
+static bool key_of(const mb_device_load *load, import_key *key)
+{
+    const mbvk_dmabuf_input *in = load->frame->payload;
+    *key = (import_key){.modifier = in->modifier, .width = load->format->width, .height = load->format->height};
+    for (int plane = 0; plane < 2; plane++) {
+        struct stat st;
+        if (fstat(in->fds[in->objects[plane]], &st) != 0) {
+            return false;
+        }
+        key->devices[plane] = (uint64_t)st.st_dev;
+        key->inodes[plane] = (uint64_t)st.st_ino;
+        key->offsets[plane] = in->offsets[plane];
+        key->pitches[plane] = in->pitches[plane];
+    }
+    return true;
+}
 #else
 static mb_status import_dmabuf(mbvk_backend *vk, const mb_device_load *load, struct mb_image images[2])
 {
@@ -162,6 +180,13 @@ static mb_status import_dmabuf(mbvk_backend *vk, const mb_device_load *load, str
     (void)load;
     (void)images;
     return MB_ERROR_UNSUPPORTED;
+}
+
+static bool key_of(const mb_device_load *load, import_key *key)
+{
+    (void)load;
+    (void)key;
+    return false;
 }
 #endif
 
@@ -171,15 +196,11 @@ static void transfer_ownership(mbvk_backend *vk, struct mb_image images[2], bool
     VkAccessFlags use = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
     VkImageMemoryBarrier b[2];
     for (int k = 0; k < 2; k++) {
-        b[k] = (VkImageMemoryBarrier){VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b[k] = image_barrier(images[k].image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
         b[k].srcAccessMask = acquire ? 0 : use;
         b[k].dstAccessMask = acquire ? use : 0;
-        b[k].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-        b[k].newLayout = VK_IMAGE_LAYOUT_GENERAL;
         b[k].srcQueueFamilyIndex = acquire ? external : vk->queue_family;
         b[k].dstQueueFamilyIndex = acquire ? vk->queue_family : external;
-        b[k].image = images[k].image;
-        b[k].subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     }
     VkPipelineStageFlags work = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
     vkCmdPipelineBarrier(jobs_commands(vk), acquire ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : work,
@@ -193,12 +214,9 @@ typedef struct source_planes {
 
 static void copy_active_area(mbvk_backend *vk, const mb_device_load *load, source_planes source)
 {
-    int sx = load->format->chroma_shift_x;
-    int sy = load->format->chroma_shift_y;
+    mb_rect area = mb_plane_area(load->format, 1, load->area);
     mb_overlap_copy luma = {source.luma, load->planes.luma, -load->area.x, -load->area.y, 0, 0};
-    mb_overlap_copy chroma = {
-        source.chroma, load->planes.chroma[0], -(load->area.x >> sx), -(load->area.y >> sy), 0, 0,
-    };
+    mb_overlap_copy chroma = {source.chroma, load->planes.chroma[0], -area.x, -area.y, 0, 0};
     copy_overlap_images(vk, &luma);
     copy_overlap_images(vk, &chroma);
 }
@@ -218,12 +236,12 @@ static void detect_bars(mbvk_backend *vk, const mb_device_load *load, source_pla
         source = (source_planes){&vk->bg.luma, &vk->bg.chroma};
     }
     struct bar_flags_push push = {load->format->width, load->format->height, load->format->chroma_shift_x,
-                                  load->format->chroma_shift_y, BLACK_LUMA_MAX / 255.0f,
-                                  BLACK_CHROMA_TOLERANCE / 255.0f};
+                                  load->format->chroma_shift_y, MB_BLACK_LUMA_MAX / 255.0f,
+                                  MB_BLACK_CHROMA_TOLERANCE / 255.0f};
     binding b[] = {{source.luma, NULL}, {source.chroma, NULL}, {NULL, &vk->bg.bar_flags}};
     uint32_t gx = (uint32_t)(source.chroma->width + BAR_TILE - 1) / BAR_TILE;
     uint32_t gy = (uint32_t)(source.chroma->height + BAR_TILE - 1) / BAR_TILE;
-    dispatch_desc desc = {PASS_BAR_FLAGS, b, PUSH(push), NULL, gx, gy};
+    dispatch_desc desc = {PASS_BAR_FLAGS, BINDINGS(b), PUSH(push), NULL, gx, gy};
     pipeline_dispatch(vk, &desc);
     vk->bg.bars_requested = true;
     vk->bg.bar_slot = vk->current;
@@ -241,6 +259,123 @@ static void record_load(mbvk_backend *vk, const mb_device_load *load, source_pla
     }
 }
 
+static bool import_empty(const cached_import *e)
+{
+    return !e->images[0].image;
+}
+
+static bool import_in_flight(const mbvk_backend *vk, const cached_import *e)
+{
+    const job_slot *s = &vk->slots[e->slot];
+    bool recording = vk->recording && vk->current == e->slot && e->serial == vk->serial + 1;
+    return recording || (s->busy && s->serial == e->serial);
+}
+
+static void forget_import(mbvk_backend *vk, cached_import *e)
+{
+    image_destroy(vk, &e->images[0]);
+    image_destroy(vk, &e->images[1]);
+    *e = (cached_import){.slot = 0};
+}
+
+static cached_import *find_import(import_cache *cache, const import_key *key)
+{
+    for (int i = 0; i < cache->count; i++) {
+        cached_import *e = &cache->entries[i];
+        if (!import_empty(e) && memcmp(&e->key, key, sizeof(*key)) == 0) {
+            return e;
+        }
+    }
+    return NULL;
+}
+
+static cached_import *oldest_idle_import(mbvk_backend *vk)
+{
+    cached_import *oldest = NULL;
+    for (int i = 0; i < vk->imports.count; i++) {
+        cached_import *e = &vk->imports.entries[i];
+        if (import_empty(e)) {
+            return e;
+        }
+        if (!import_in_flight(vk, e) && (!oldest || e->used_at < oldest->used_at)) {
+            oldest = e;
+        }
+    }
+    return oldest;
+}
+
+static cached_import *claim_import(mbvk_backend *vk)
+{
+    import_cache *cache = &vk->imports;
+    if (cache->count < MAX_IMPORTS) {
+        cached_import *e = &cache->entries[cache->count++];
+        *e = (cached_import){.slot = 0};
+        return e;
+    }
+    cached_import *e = oldest_idle_import(vk);
+    if (e) {
+        forget_import(vk, e);
+    }
+    return e;
+}
+
+static void reclaim_idle_imports(mbvk_backend *vk)
+{
+    for (int i = 0; i < vk->imports.count; i++) {
+        cached_import *e = &vk->imports.entries[i];
+        bool idle = vk->imports.clock - e->used_at > IMPORT_IDLE_LOADS;
+        if (!import_empty(e) && idle && !import_in_flight(vk, e)) {
+            forget_import(vk, e);
+        }
+    }
+}
+
+static mb_status import_cached(mbvk_backend *vk, const mb_device_load *load, struct mb_image **planes)
+{
+    import_key key;
+    if (!key_of(load, &key)) {
+        return MB_ERROR_BUSY;
+    }
+    cached_import *e = find_import(&vk->imports, &key);
+    if (!e) {
+        e = claim_import(vk);
+        if (!e) {
+            return MB_ERROR_BUSY;
+        }
+        mb_status status = import_dmabuf(vk, load, e->images);
+        if (status != MB_SUCCESS) {
+            forget_import(vk, e);
+            return status;
+        }
+        e->key = key;
+    }
+    e->slot = vk->current;
+    e->serial = vk->serial + 1;
+    e->used_at = ++vk->imports.clock;
+    *planes = e->images;
+    reclaim_idle_imports(vk);
+    return MB_SUCCESS;
+}
+
+void imports_destroy(mbvk_backend *vk)
+{
+    for (int i = 0; i < vk->imports.count; i++) {
+        forget_import(vk, &vk->imports.entries[i]);
+    }
+    vk->imports.count = 0;
+}
+
+static mb_status import_planes(mbvk_backend *vk, const mb_device_load *load, struct mb_image **planes)
+{
+    mb_status status = import_cached(vk, load, planes);
+    if (status != MB_ERROR_BUSY) {
+        return status;
+    }
+    job_slot *slot = jobs_current(vk);
+    *planes = slot->imports;
+    return import_dmabuf(vk, load, slot->imports);
+}
+
 static mb_status load_dmabuf(mbvk_backend *vk, const mb_device_load *load)
 {
     const mbvk_dmabuf_input *in = load->frame->payload;
@@ -248,20 +383,17 @@ static mb_status load_dmabuf(mbvk_backend *vk, const mb_device_load *load)
         return MB_ERROR_UNSUPPORTED;
     }
     jobs_poll(vk);
-    struct mb_image images[2];
-    mb_status status = import_dmabuf(vk, load, images);
+    struct mb_image *planes;
+    mb_status status = import_planes(vk, load, &planes);
     if (status != MB_SUCCESS) {
         return status;
     }
-    job_slot *slot = jobs_current(vk);
-    slot->imports[0] = images[0];
-    slot->imports[1] = images[1];
     if (ensure_background(vk, load) != MB_SUCCESS) {
         return MB_ERROR_NO_MEMORY;
     }
-    transfer_ownership(vk, slot->imports, true);
-    record_load(vk, load, (source_planes){&slot->imports[0], &slot->imports[1]});
-    transfer_ownership(vk, slot->imports, false);
+    transfer_ownership(vk, planes, true);
+    record_load(vk, load, (source_planes){&planes[0], &planes[1]});
+    transfer_ownership(vk, planes, false);
     jobs_host_barrier(vk);
     if (in->release) {
         jobs_add_release(vk, in->release, in->context);
@@ -306,15 +438,9 @@ static void begin_shared_frame(mbvk_backend *vk, mbvk_vulkan_frame *f, VkImageLa
 {
     VkImageMemoryBarrier b[2];
     for (int i = 0; i < f->image_count; i++) {
-        b[i] = (VkImageMemoryBarrier){VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b[i] = image_barrier(f->images[i], f->layouts[i], layout);
         b[i].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
         b[i].dstAccessMask = access;
-        b[i].oldLayout = f->layouts[i];
-        b[i].newLayout = layout;
-        b[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        b[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        b[i].image = f->images[i];
-        b[i].subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         vk->waits.semaphores[vk->waits.count] = f->semaphores[i];
         vk->waits.values[vk->waits.count++] = f->semaphore_values[i];
     }
@@ -379,9 +505,9 @@ void vk_fill_from_border(void *self, mb_frame_planes planes, mb_rect area, const
     if (!vk->recording || !vk->bg.luma.image) {
         return;
     }
+    mb_rect chroma_area = mb_plane_area(format, 1, area);
     mb_overlap_copy luma = {&vk->bg.luma, planes.luma, 0, 0, area.x, area.y};
-    mb_overlap_copy chroma = {&vk->bg.chroma, planes.chroma[0], 0, 0, area.x >> format->chroma_shift_x,
-                              area.y >> format->chroma_shift_y};
+    mb_overlap_copy chroma = {&vk->bg.chroma, planes.chroma[0], 0, 0, chroma_area.x, chroma_area.y};
     copy_overlap_images(vk, &luma);
     copy_overlap_images(vk, &chroma);
     jobs_barrier(vk);
@@ -415,9 +541,7 @@ void vk_clear_bar_flags(void *self)
 static void copy_bars_into_frame(mbvk_backend *vk, const mb_output_copy *copy, struct mb_image *target, int plane)
 {
     struct mb_image *source = plane ? &vk->bg.chroma : &vk->bg.luma;
-    int sx = plane ? copy->format->chroma_shift_x : 0;
-    int sy = plane ? copy->format->chroma_shift_y : 0;
-    bar_rects bars = bars_around(copy->area, (plane_extent){target->width, target->height, sx, sy});
+    bar_rects bars = bars_around(mb_plane_area(copy->format, plane, copy->area), target);
     for (int k = 0; k < bars.count; k++) {
         mb_rect r = bars.rects[k];
         image_region region = {source, r.x, r.y, target, r.x, r.y, r.width, r.height};
@@ -440,10 +564,8 @@ static mb_status record_shared_output(mbvk_backend *vk, const mb_output_copy *co
         if (area_is_cropped(copy->area, copy->format) && vk->bg.luma.image) {
             copy_bars_into_frame(vk, copy, &target, i);
         }
-        int sx = i ? copy->format->chroma_shift_x : 0;
-        int sy = i ? copy->format->chroma_shift_y : 0;
-        image_region region = {outputs[i], 0, 0, &target, copy->area.x >> sx, copy->area.y >> sy, outputs[i]->width,
-                               outputs[i]->height};
+        mb_rect area = mb_plane_area(copy->format, i, copy->area);
+        image_region region = {outputs[i], 0, 0, &target, area.x, area.y, outputs[i]->width, outputs[i]->height};
         copy_image_region(vk, &region);
     }
     end_shared_frame(vk, f, layout);

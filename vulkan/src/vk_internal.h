@@ -17,6 +17,8 @@ enum {
     MAX_SEMAPHORES = 4,
     MAX_EXPORTS = 32,
     UPLOAD_RING = 2,
+    MAX_TRACKED = 64,
+    MAX_IMPORTS = 24,
 };
 
 struct mb_image {
@@ -61,6 +63,10 @@ typedef enum pass_id {
     PASS_INTERPOLATE_16,
     PASS_INTERPOLATE_8_NV,
     PASS_INTERPOLATE_16_NV,
+    PASS_EXTRAPOLATE_8,
+    PASS_EXTRAPOLATE_16,
+    PASS_EXTRAPOLATE_8_NV,
+    PASS_EXTRAPOLATE_16_NV,
     PASS_COUNT,
 } pass_id;
 
@@ -97,8 +103,7 @@ typedef struct job_slot {
     uint32_t serial;
     output_target target;
     mb_rect area;
-    int shift_x;
-    int shift_y;
+    mb_video_format format;
     plane_layout layout;
     void (*releases[MAX_RELEASES])(void *context);
     void *release_contexts[MAX_RELEASES];
@@ -114,6 +119,14 @@ typedef struct semaphore_list {
     uint64_t values[MAX_SEMAPHORES];
     int count;
 } semaphore_list;
+
+typedef struct hazards {
+    uint64_t reads[MAX_TRACKED];
+    uint64_t writes[MAX_TRACKED];
+    int read_count;
+    int write_count;
+    bool untracked;
+} hazards;
 
 typedef struct profile {
     bool enabled;
@@ -159,10 +172,33 @@ typedef struct exports {
     size_t offsets[3];
     size_t pitches[3];
     size_t size;
-    int plane_count;
     mb_video_format format;
     int border_version;
 } exports;
+
+typedef struct import_key {
+    uint64_t devices[2];
+    uint64_t inodes[2];
+    uint32_t offsets[2];
+    uint32_t pitches[2];
+    uint64_t modifier;
+    int width;
+    int height;
+} import_key;
+
+typedef struct cached_import {
+    import_key key;
+    struct mb_image images[2];
+    int slot;
+    uint32_t serial;
+    uint32_t used_at;
+} cached_import;
+
+typedef struct import_cache {
+    cached_import entries[MAX_IMPORTS];
+    int count;
+    uint32_t clock;
+} import_cache;
 
 typedef struct device_features {
     bool dmabuf;
@@ -173,6 +209,13 @@ typedef struct device_features {
     bool full_subgroups;
     uint32_t import_memory_bits;
 } device_features;
+
+static const VkImageSubresourceRange COLOR_RANGE = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+static inline size_t align_up(size_t value, size_t alignment)
+{
+    return (value + alignment - 1) & ~(alignment - 1);
+}
 
 struct mbvk_backend {
     mb_logger logger;
@@ -194,17 +237,22 @@ struct mbvk_backend {
     VkCommandPool command_pool;
     VkSampler sampler;
     pipeline pipelines[PASS_COUNT];
+    VkPipelineCache pipeline_cache;
+    size_t pipeline_cache_bytes;
     struct mb_buffer dummy;
+    struct mb_image dummy_image;
     job_slot slots[SLOT_COUNT];
     int current;
     int next_slot;
     bool recording;
     uint32_t serial;
+    hazards pending;
     semaphore_list waits;
     semaphore_list signals;
     staging uploads[UPLOAD_RING];
     int next_upload;
     background bg;
+    import_cache imports;
     exports out;
     profile prof;
     bool healthy;

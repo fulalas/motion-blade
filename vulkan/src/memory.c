@@ -2,8 +2,6 @@
 
 #include <string.h>
 
-static const VkImageSubresourceRange COLOR_RANGE = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
 int memory_type(const mbvk_backend *vk, uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid)
 {
     const VkPhysicalDeviceMemoryProperties *p = &vk->memory_properties;
@@ -86,7 +84,7 @@ void buffer_destroy(mbvk_backend *vk, struct mb_buffer *buffer)
     memset(buffer, 0, sizeof(*buffer));
 }
 
-VkFormat texel_format(mb_texel_format format)
+static VkFormat texel_format(mb_texel_format format)
 {
     switch (format) {
     case MB_TEXELS_R8:

@@ -2,6 +2,7 @@
 
 #include "check.h"
 #include "frames.h"
+#include "pixel_formats.h"
 #include "motionblade/cpu_backend.h"
 #include "motionblade/engine.h"
 #include "motionblade/vulkan.h"
@@ -53,6 +54,14 @@ typedef struct run_config {
 
 static bool device_available = true;
 
+static const test_format *layout_of(const run_config *run)
+{
+    if (run->bit_depth > 8) {
+        return test_format_find("yuv420p10");
+    }
+    return test_format_find(run->interleaved ? "nv12" : "yuv420p");
+}
+
 static mb_status tee_engine(const run_config *run, tee_report *report, mb_engine **engine)
 {
     mb_backend reference, device;
@@ -66,7 +75,7 @@ static mb_status tee_engine(const run_config *run, tee_report *report, mb_engine
         return MB_ERROR_UNSUPPORTED;
     }
     mb_engine_config config = {
-        .format = {run->width, run->height, run->bit_depth, 1, 1, run->interleaved, 0},
+        .format = test_format_video(layout_of(run), run->width, run->height),
         .logger = mb_logger_stderr(MB_LOG_WARNING),
         .params = mb_params_default(),
     };
@@ -75,36 +84,17 @@ static mb_status tee_engine(const run_config *run, tee_report *report, mb_engine
     return status == MB_SUCCESS ? mb_engine_create(&config, engine) : status;
 }
 
-static bool alloc_layout(test_frame *frame, const run_config *run)
-{
-    if (run->bit_depth > 8) {
-        return test_frame_alloc_wide(frame, run->width, run->height);
-    }
-    if (run->interleaved) {
-        return test_frame_alloc_nv12(frame, run->width, run->height);
-    }
-    return test_frame_alloc(frame, run->width, run->height);
-}
-
-static void convert(const test_frame *planar, test_frame *frame, const run_config *run)
-{
-    if (run->bit_depth > 8) {
-        copy_to_wide(planar, frame, run->bit_depth - 8);
-    } else if (run->interleaved) {
-        copy_to_nv12(planar, frame);
-    }
-}
-
 static bool play(mb_engine *engine, const run_config *run)
 {
-    test_frame planar, input, out;
+    test_frame planar;
+    converted_frame input, out;
     CHECK(test_frame_alloc(&planar, run->width, run->height));
-    CHECK(alloc_layout(&input, run) && alloc_layout(&out, run));
-    bool converted = run->bit_depth > 8 || run->interleaved;
+    CHECK(converted_alloc(&input, layout_of(run), run->width, run->height));
+    CHECK(converted_alloc(&out, layout_of(run), run->width, run->height));
     for (int k = 0; k < FRAMES; k++) {
         (run->paint ? run->paint : paint_scene)(&planar, k);
-        convert(&planar, &input, run);
-        CHECK(mb_engine_push(engine, converted ? &input.image : &planar.image) == MB_SUCCESS);
+        convert_from_yuv420(&input, planar.storage);
+        CHECK(mb_engine_push(engine, &input.image) == MB_SUCCESS);
         mb_frame_report report;
         if (k >= 2) {
             CHECK(mb_engine_submit(engine, k % 2 ? 0.5 : 0.3) == MB_SUCCESS);
@@ -112,8 +102,8 @@ static bool play(mb_engine *engine, const run_config *run)
         }
     }
     test_frame_free(&planar);
-    test_frame_free(&input);
-    test_frame_free(&out);
+    converted_free(&input);
+    converted_free(&out);
     return true;
 }
 

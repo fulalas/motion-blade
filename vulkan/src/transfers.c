@@ -9,36 +9,21 @@
 
 enum { PLANE_ALIGN = 256 };
 
-static size_t align_up(size_t value, size_t alignment)
-{
-    return (value + alignment - 1) & ~(alignment - 1);
-}
-
 static int texel_bytes(mb_texel_format format)
 {
-    switch (format) {
-    case MB_TEXELS_R8:
-        return 1;
-    case MB_TEXELS_RG8:
-    case MB_TEXELS_R16:
-    case MB_TEXELS_R16F:
-        return 2;
-    case MB_TEXELS_RG16:
-        return 4;
-    }
-    return 1;
+    return mb_texel_sample_bytes(format) * mb_texel_channels(format);
 }
 
-plane_layout layout_of_planes(mb_frame_planes planes)
+static plane_layout layout_of_planes(mb_frame_planes planes)
 {
     plane_layout layout = {.count = 0};
-    const struct mb_image *images[3] = {planes.luma, planes.chroma[0], planes.chroma[1]};
     size_t offset = 0;
-    for (int i = 0; i < 3 && images[i]; i++) {
+    for (int i = 0; i < 3 && mb_frame_plane(planes, i); i++) {
+        const struct mb_image *image = mb_frame_plane(planes, i);
         layout.offsets[i] = offset;
-        layout.pixel_bytes[i] = (size_t)texel_bytes(images[i]->format);
-        layout.row_bytes[i] = (size_t)images[i]->width * layout.pixel_bytes[i];
-        layout.rows[i] = images[i]->height;
+        layout.pixel_bytes[i] = (size_t)texel_bytes(image->format);
+        layout.row_bytes[i] = (size_t)image->width * layout.pixel_bytes[i];
+        layout.rows[i] = image->height;
         offset += align_up(layout.row_bytes[i] * (size_t)layout.rows[i], PLANE_ALIGN);
         layout.count = i + 1;
     }
@@ -48,20 +33,20 @@ plane_layout layout_of_planes(mb_frame_planes planes)
 
 bool area_is_cropped(mb_rect area, const mb_video_format *format)
 {
-    return area.x || area.y || area.width != format->width || area.height != format->height;
+    return !mb_rect_equal(area, mb_full_rect(format));
 }
 
-bar_rects bars_around(mb_rect area, plane_extent plane)
+bar_rects bars_around(mb_rect inner, const struct mb_image *plane)
 {
-    int ax = area.x >> plane.shift_x;
-    int ay = area.y >> plane.shift_y;
-    int aw = (area.width + (1 << plane.shift_x) - 1) >> plane.shift_x;
-    int ah = (area.height + (1 << plane.shift_y) - 1) >> plane.shift_y;
+    int ax = inner.x;
+    int ay = inner.y;
+    int aw = inner.width;
+    int ah = inner.height;
     mb_rect all[4] = {
-        {0, 0, plane.width, ay},
-        {0, ay + ah, plane.width, plane.height - ay - ah},
+        {0, 0, plane->width, ay},
+        {0, ay + ah, plane->width, plane->height - ay - ah},
         {0, ay, ax, ah},
-        {ax + aw, ay, plane.width - ax - aw, ah},
+        {ax + aw, ay, plane->width - ax - aw, ah},
     };
     bar_rects bars = {.count = 0};
     for (int k = 0; k < 4; k++) {
@@ -78,8 +63,9 @@ void vk_fill_buffer(void *self, mb_buffer *buffer, uint32_t value)
     if (!vk->recording) {
         return;
     }
-    vkCmdFillBuffer(jobs_commands(vk), buffer->buffer, 0, VK_WHOLE_SIZE, value);
-    jobs_barrier(vk);
+    resource_use use = {buffer_handle(buffer), true};
+    jobs_prepare(vk, &use, 1);
+    vkCmdFillBuffer(jobs_tracked_commands(vk), buffer->buffer, 0, VK_WHOLE_SIZE, value);
 }
 
 void copy_image_region(mbvk_backend *vk, const image_region *r)
@@ -123,6 +109,11 @@ typedef struct strided {
     ptrdiff_t stride;
 } strided;
 
+typedef struct plane_rows {
+    int count;
+    size_t bytes;
+} plane_rows;
+
 static void copy_rows(uint8_t *to, ptrdiff_t to_stride, strided from, plane_rows rows)
 {
     for (int y = 0; y < rows.count; y++) {
@@ -130,19 +121,17 @@ static void copy_rows(uint8_t *to, ptrdiff_t to_stride, strided from, plane_rows
     }
 }
 
-static size_t area_offset(const plane_layout *layout, int plane, plane_origin origin, ptrdiff_t stride)
+static size_t area_offset(const plane_layout *layout, int plane, mb_rect area, ptrdiff_t stride)
 {
-    int x = plane ? origin.area.x >> origin.shift_x : origin.area.x;
-    int y = plane ? origin.area.y >> origin.shift_y : origin.area.y;
-    return (size_t)y * (size_t)stride + (size_t)x * layout->pixel_bytes[plane];
+    return (size_t)area.y * (size_t)stride + (size_t)area.x * layout->pixel_bytes[plane];
 }
 
 static void stage_planes(const mb_upload *upload, const plane_layout *layout, uint8_t *target)
 {
-    plane_origin origin = {upload->area, upload->format->chroma_shift_x, upload->format->chroma_shift_y};
     for (int i = 0; i < layout->count; i++) {
         ptrdiff_t stride = upload->source->strides[i];
-        const uint8_t *from = upload->source->planes[i] + area_offset(layout, i, origin, stride);
+        mb_rect area = mb_plane_area(upload->format, i, upload->area);
+        const uint8_t *from = upload->source->planes[i] + area_offset(layout, i, area, stride);
         copy_rows(target + layout->offsets[i], (ptrdiff_t)layout->row_bytes[i], (strided){from, stride},
                   (plane_rows){layout->rows[i], layout->row_bytes[i]});
     }
@@ -189,9 +178,8 @@ mb_status vk_upload_frame(void *self, const mb_upload *upload)
         return status;
     }
     stage_planes(upload, &layout, s->buffer.mapped);
-    struct mb_image *images[3] = {upload->planes.luma, upload->planes.chroma[0], upload->planes.chroma[1]};
     for (int i = 0; i < layout.count; i++) {
-        copy_buffer_to_image(vk, &s->buffer, layout.offsets[i], images[i]);
+        copy_buffer_to_image(vk, &s->buffer, layout.offsets[i], mb_frame_plane(upload->planes, i));
     }
     jobs_barrier(vk);
     return MB_SUCCESS;
@@ -215,8 +203,7 @@ void remember_output(job_slot *s, const mb_output_copy *copy, output_target targ
 {
     s->target = target;
     s->area = copy->area;
-    s->shift_x = copy->format->chroma_shift_x;
-    s->shift_y = copy->format->chroma_shift_y;
+    s->format = *copy->format;
     s->layout = layout_of_planes(copy->planes);
 }
 
@@ -234,9 +221,8 @@ mb_status vk_record_host_output(void *self, const mb_output_copy *copy, mb_buffe
             return MB_ERROR_NO_MEMORY;
         }
     }
-    struct mb_image *images[3] = {copy->planes.luma, copy->planes.chroma[0], copy->planes.chroma[1]};
     for (int i = 0; i < layout.count; i++) {
-        copy_image_to_buffer(vk, images[i], &s->readback, layout.offsets[i]);
+        copy_image_to_buffer(vk, mb_frame_plane(copy->planes, i), &s->readback, layout.offsets[i]);
     }
     capture_stats(vk, stats);
     jobs_host_barrier(vk);
@@ -254,12 +240,12 @@ bool vk_output_ready(void *self, mb_ticket ticket)
 static void download(const job_slot *s, const mb_host_image *target, mb_rect area)
 {
     const plane_layout *layout = &s->layout;
-    plane_origin origin = {area, s->shift_x, s->shift_y};
     for (int i = 0; i < layout->count; i++) {
         ptrdiff_t stride = target->strides[i];
         const uint8_t *from = (const uint8_t *)s->readback.mapped + layout->offsets[i];
         strided source = {from, (ptrdiff_t)layout->row_bytes[i]};
-        copy_rows(target->planes[i] + area_offset(layout, i, origin, stride), stride, source,
+        mb_rect plane = mb_plane_area(&s->format, i, area);
+        copy_rows(target->planes[i] + area_offset(layout, i, plane, stride), stride, source,
                   (plane_rows){layout->rows[i], layout->row_bytes[i]});
     }
 }
@@ -353,8 +339,7 @@ typedef struct texel_codec {
 static texel_codec codec_of(mb_texel_format format)
 {
     int channels = mb_texel_channels(format);
-    int bytes = format == MB_TEXELS_R8 || format == MB_TEXELS_RG8 ? 1 : 2;
-    return (texel_codec){channels, bytes, format == MB_TEXELS_R16F};
+    return (texel_codec){channels, mb_texel_sample_bytes(format), format == MB_TEXELS_R16F};
 }
 
 static float decode_texel(const uint8_t *p, texel_codec c)
@@ -379,7 +364,7 @@ static void encode_texel(uint8_t *p, texel_codec c, float value)
 
 static size_t image_values(const mb_image *image)
 {
-    return (size_t)image->width * (size_t)image->height * (size_t)mb_texel_channels(image->format);
+    return mb_texel_count((mb_image_desc){image->width, image->height, image->format});
 }
 
 mb_status vk_read_image(void *self, mb_image *image, float *texels)

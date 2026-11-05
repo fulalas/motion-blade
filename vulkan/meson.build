@@ -13,10 +13,12 @@ foreach name : shader_names
   shader_headers += custom_target(name + '.spv.h', input: 'shaders' / name + '.comp', output: name + '.spv.h',
     depfile: name + '.spv.h.d', command: glslc_command)
 endforeach
-foreach variant : [['interpolate8', []], ['interpolate16', ['-DDEPTH16']], ['interpolate8nv', ['-DNV']],
-                   ['interpolate16nv', ['-DNV', '-DDEPTH16']]]
-  shader_headers += custom_target(variant[0] + '.spv.h', input: 'shaders/interpolate.comp',
-    output: variant[0] + '.spv.h', depfile: variant[0] + '.spv.h.d', command: glslc_command + variant[1])
+foreach name : ['interpolate', 'extrapolate']
+  foreach variant : [['8', []], ['16', ['-DDEPTH16']], ['8nv', ['-DNV']], ['16nv', ['-DNV', '-DDEPTH16']]]
+    shader_headers += custom_target(name + variant[0] + '.spv.h', input: 'shaders' / name + '.comp',
+      output: name + variant[0] + '.spv.h', depfile: name + variant[0] + '.spv.h.d',
+      command: glslc_command + variant[1])
+  endforeach
 endforeach
 
 vulkan_sources = files(
@@ -27,6 +29,7 @@ vulkan_sources = files(
   'src/jobs.c',
   'src/memory.c',
   'src/passes.c',
+  'src/pipeline_cache.c',
   'src/pipelines.c',
   'src/transfers.c',
 )

@@ -3,14 +3,14 @@
 #include "reference/cpu_resources.h"
 #include "reference/kernels.h"
 
-enum { NEIGHBOURS = 9, CHANNELS = 3 };
+enum { NEIGHBOURS = 9 };
 
 static vec2 chroma_offset(const mb_chroma_offset_pass *pass, int id, vec2 u)
 {
     const mb_chroma_layout *chroma = &pass->chroma;
     float m = (float)(1 << pass->base_level);
     ivec2 block = block_coord(id, pass->grid);
-    vec2 corner = v2_scale(v2_scale(v2((float)block.x, (float)block.y), 8.0f), m);
+    vec2 corner = block_corner(block, m);
     vec2 scaled = v2_scale(u, m);
     vec2 c0 = chroma_from_luma(chroma, corner);
     vec2 to_a = chroma_from_luma(chroma, v2_scale(scaled, -pass->t));

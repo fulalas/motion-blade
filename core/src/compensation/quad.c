@@ -21,9 +21,9 @@ static vec2 at_level(const quad_state *q, ivec2 p)
 
 void quad_begin(quad_state *q, const mb_interpolate_pass *pass, ivec2 q0)
 {
-    *q = (quad_state){.pass = pass, .q0 = q0, .t = pass->t};
-    q->scale = (float)(1 << pass->base_level);
-    q->inv = v2_inverse_size(pass->width, pass->height);
+    *q = (quad_state){.pass = pass, .q0 = q0, .t = pass->warp.t};
+    q->scale = (float)(1 << pass->warp.base_level);
+    q->inv = v2_inverse_size(pass->warp.width, pass->warp.height);
 }
 
 static int shift_down(int value, int bits)
@@ -49,15 +49,15 @@ static vec4 cell_of(const quad_state *q, ivec2 block, ivec2 qm)
     const mb_interpolate_pass *pass = q->pass;
     int cx = clampi(shift_down(qm.x - block.x * 8, 2), 0, 1);
     int cy = clampi(shift_down(qm.y - block.y * 8, 2), 0, 1);
-    int sx = clampi(block.x * 2 + cx, 0, pass->grid.blocks_x * 2 - 1);
-    int sy = clampi(block.y * 2 + cy, 0, pass->grid.blocks_y * 2 - 1);
-    return vec4s(pass->cells)[sy * pass->grid.blocks_x * 2 + sx];
+    int sx = clampi(block.x * 2 + cx, 0, pass->warp.grid.blocks_x * 2 - 1);
+    int sy = clampi(block.y * 2 + cy, 0, pass->warp.grid.blocks_y * 2 - 1);
+    return vec4s(pass->cells)[sy * pass->warp.grid.blocks_x * 2 + sx];
 }
 
 static void add_block_coverage(quad_state *q, int slot, ivec2 block, int index)
 {
     const mb_interpolate_pass *pass = q->pass;
-    vec2 center = v2((float)(block.x * 8) + 3.5f, (float)(block.y * 8) + 3.5f);
+    vec2 center = v2((float)(block.x * MB_BLOCK_SIZE) + 3.5f, (float)(block.y * MB_BLOCK_SIZE) + 3.5f);
     vec4 offset = vec4s(pass->offsets)[index];
     for (int j = 0; j < QUAD_PIXELS; j++) {
         vec2 p = at_level(q, pixel_of(q, j));
@@ -76,7 +76,7 @@ static void add_block_coverage(quad_state *q, int slot, ivec2 block, int index)
 void quad_gather_blocks(quad_state *q)
 {
     const mb_interpolate_pass *pass = q->pass;
-    ivec2 qm = iv2(q->q0.x >> pass->base_level, q->q0.y >> pass->base_level);
+    ivec2 qm = iv2(q->q0.x >> pass->warp.base_level, q->q0.y >> pass->warp.base_level);
     int qx = qm.x >> 2;
     int qy = qm.y >> 2;
     int bx = (qx & 1) ? qx / 2 : qx / 2 - 1;
@@ -85,7 +85,7 @@ void quad_gather_blocks(quad_state *q)
         ivec2 block = iv2(bx + (k & 1), by + (k >> 1));
         vec4 cell = cell_of(q, block, qm);
         int slot = candidate_slot(q, v2_scale(v4_xy(cell), q->scale), (int)cell.z);
-        add_block_coverage(q, slot, block, block_index(block, pass->grid));
+        add_block_coverage(q, slot, block, block_index(block, pass->warp.grid));
     }
     float norm = fmaxf(q->offset.w, 1e-6f);
     q->offset = (vec4){q->offset.x / norm, q->offset.y / norm, q->offset.z / norm, q->offset.w / norm};
@@ -102,13 +102,13 @@ void quad_add_fallback(quad_state *q)
     }
 }
 
-float quad_consistent_share(const mb_interpolate_pass *pass, field_probe probe, vec2 u)
+float quad_consistent_share(const mb_warp *warp, float consistency, field_probe probe, vec2 u)
 {
-    float scale = (float)(1 << pass->base_level);
+    float scale = (float)(1 << warp->base_level);
     vec2 p = probe.position;
-    block_taps taps = block_taps_at(v2(p.x / scale, p.y / scale), pass->grid);
+    block_taps taps = block_taps_at(v2(p.x / scale, p.y / scale), warp->grid);
     vec2 v = v2_scale(u, probe.sign / scale);
-    float limit = consistency_limit(pass->costs.consistency, v2_scale(u, 1.0f / scale));
+    float limit = consistency_limit(consistency, v2_scale(u, 1.0f / scale));
     float share = 0.0f;
     for (int k = 0; k < 4; k++) {
         vec2 d = v2_sub(v4_xy(vec4s(probe.field)[taps.index[k]]), v);
@@ -132,8 +132,9 @@ static side_trust trust_sides(const quad_state *q, const quad_candidate *c)
     vec2 center = v2((float)q->q0.x + 0.5f, (float)q->q0.y + 0.5f);
     field_probe forward = {q->pass->forward, 1.0f, v2_add(center, v2_scale(c->vector, -q->t))};
     field_probe backward = {q->pass->backward, -1.0f, v2_add(center, v2_scale(c->vector, 1.0f - q->t))};
-    return (side_trust){quad_consistent_share(q->pass, forward, c->vector),
-                        quad_consistent_share(q->pass, backward, c->vector)};
+    float consistency = q->pass->costs.consistency;
+    return (side_trust){quad_consistent_share(&q->pass->warp, consistency, forward, c->vector),
+                        quad_consistent_share(&q->pass->warp, consistency, backward, c->vector)};
 }
 
 difference_window quad_difference_window(ivec2 q0, window_sample sample, const void *context)
@@ -159,8 +160,8 @@ static float pair_difference(const void *context, vec2 p)
     const quad_state *q = o->q;
     vec2 sa = v2_add(p, o->a);
     vec2 sb = v2_add(p, o->b);
-    float a = ref_sample(&q->pass->a_level->texture, sa.x * q->inv.x, sa.y * q->inv.y, 0);
-    float b = ref_sample(&q->pass->b_level->texture, sb.x * q->inv.x, sb.y * q->inv.y, 0);
+    float a = ref_sample(&q->pass->warp.a_level->texture, sa.x * q->inv.x, sa.y * q->inv.y, 0);
+    float b = ref_sample(&q->pass->warp.b_level->texture, sb.x * q->inv.x, sb.y * q->inv.y, 0);
     return fabsf((a - b) * 255.0f - q->luma_offset);
 }
 
@@ -327,8 +328,8 @@ quad_values quad_blend_luma(const quad_state *q)
         vec2 pb = v2_add(base, v2_scale(c->vector, 1.0f - q->t));
         for (int j = 0; j < QUAD_PIXELS; j++) {
             vec2 step = v2((float)(j & 1), (float)(j >> 1));
-            float a = cubic_sample(&pass->frames.a.luma->texture, v2_add(pa, step), 0);
-            float b = cubic_sample(&pass->frames.b.luma->texture, v2_add(pb, step), 0);
+            float a = cubic_sample(&pass->warp.frames.a.luma->texture, v2_add(pa, step), 0);
+            float b = cubic_sample(&pass->warp.frames.b.luma->texture, v2_add(pb, step), 0);
             acc.v[j] += c->weight_a[j] * (a - q->t * dy) + c->weight_b[j] * (b + (1.0f - q->t) * dy);
         }
     }
@@ -354,10 +355,10 @@ static global_offsets global_offsets_of(const quad_state *q)
 static float sample_global_chroma(quad_state *q, global_offsets g)
 {
     const mb_interpolate_pass *pass = q->pass;
-    const mb_chroma_layout *chroma = &pass->chroma;
+    const mb_chroma_layout *chroma = &pass->warp.chroma;
     vec2 qc = chroma_from_luma(chroma, v2((float)q->q0.x + 1.0f, (float)q->q0.y + 1.0f));
-    q->global_chroma_a = chroma_sample(&pass->frames.a, chroma, v2_add(qc, chroma_from_luma(chroma, g.a)));
-    q->global_chroma_b = chroma_sample(&pass->frames.b, chroma, v2_add(qc, chroma_from_luma(chroma, g.b)));
+    q->global_chroma_a = chroma_sample(&pass->warp.frames.a, chroma, v2_add(qc, chroma_from_luma(chroma, g.a)));
+    q->global_chroma_b = chroma_sample(&pass->warp.frames.b, chroma, v2_add(qc, chroma_from_luma(chroma, g.b)));
     vec2 a = q->global_chroma_a;
     vec2 b = q->global_chroma_b;
     return fmaxf(fabsf(a.x - b.x), fabsf(a.y - b.y));
@@ -372,8 +373,8 @@ static float sample_global_luma(quad_state *q, global_offsets g)
         vec2 pp = v2((float)p.x + 0.5f, (float)p.y + 0.5f);
         vec2 sa = v2_add(pp, g.a);
         vec2 sb = v2_add(pp, g.b);
-        q->global_a[j] = ref_sample(&pass->frames.a.luma->texture, sa.x * q->inv.x, sa.y * q->inv.y, 0);
-        q->global_b[j] = ref_sample(&pass->frames.b.luma->texture, sb.x * q->inv.x, sb.y * q->inv.y, 0);
+        q->global_a[j] = ref_sample(&pass->warp.frames.a.luma->texture, sa.x * q->inv.x, sa.y * q->inv.y, 0);
+        q->global_b[j] = ref_sample(&pass->warp.frames.b.luma->texture, sb.x * q->inv.x, sb.y * q->inv.y, 0);
         change = fmaxf(change, fabsf(q->global_a[j] - q->global_b[j]));
     }
     return change;
@@ -444,7 +445,7 @@ covered_pixels quad_covered_pixels(const mb_chroma_layout *chroma, ivec2 chroma_
 
 static chroma_weights covered_weights(const quad_state *q, const quad_candidate *c, ivec2 index)
 {
-    covered_pixels cover = quad_covered_pixels(&q->pass->chroma, index);
+    covered_pixels cover = quad_covered_pixels(&q->pass->warp.chroma, index);
     chroma_weights w = {0.0f, 0.0f};
     for (int k = 0; k < cover.count; k++) {
         w.a += c->weight_a[cover.index[k]];
@@ -457,14 +458,14 @@ static chroma_weights covered_weights(const quad_state *q, const quad_candidate 
 static vec2 global_chroma(const quad_state *q, vec2 pc, bool first)
 {
     const mb_interpolate_pass *pass = q->pass;
-    if (pass->chroma.shift_x == 1 && pass->chroma.shift_y == 1) {
+    if (pass->warp.chroma.shift_x == 1 && pass->warp.chroma.shift_y == 1) {
         return first ? q->global_chroma_a : q->global_chroma_b;
     }
     vec2 global = v2_scale(v4_xy(vec4s(pass->global_motion)[0]), q->scale);
     vec2 g = v2_scale(global, first ? -q->t : 1.0f - q->t);
-    vec2 p = v2_add(pc, chroma_from_luma(&pass->chroma, g));
-    const mb_frame_planes *planes = first ? &pass->frames.a : &pass->frames.b;
-    return chroma_sample(planes, &pass->chroma, p);
+    vec2 p = v2_add(pc, chroma_from_luma(&pass->warp.chroma, g));
+    const mb_frame_planes *planes = first ? &pass->warp.frames.a : &pass->warp.frames.b;
+    return chroma_sample(planes, &pass->warp.chroma, p);
 }
 
 vec2 quad_blend_chroma(const quad_state *q, ivec2 chroma_index, ivec2 chroma_position_index)
@@ -479,10 +480,10 @@ vec2 quad_blend_chroma(const quad_state *q, ivec2 chroma_index, ivec2 chroma_pos
         if (w.a + w.b <= 0.0f) {
             continue;
         }
-        vec2 pa = v2_sub(pc, chroma_from_luma(&pass->chroma, v2_scale(c->vector, q->t)));
-        vec2 pb = v2_add(pc, chroma_from_luma(&pass->chroma, v2_scale(c->vector, 1.0f - q->t)));
-        vec2 a = chroma_cubic_sample(&pass->frames.a, &pass->chroma, pa);
-        vec2 b = chroma_cubic_sample(&pass->frames.b, &pass->chroma, pb);
+        vec2 pa = v2_sub(pc, chroma_from_luma(&pass->warp.chroma, v2_scale(c->vector, q->t)));
+        vec2 pb = v2_add(pc, chroma_from_luma(&pass->warp.chroma, v2_scale(c->vector, 1.0f - q->t)));
+        vec2 a = chroma_cubic_sample(&pass->warp.frames.a, &pass->warp.chroma, pa);
+        vec2 b = chroma_cubic_sample(&pass->warp.frames.b, &pass->warp.chroma, pb);
         acc = v2_add(acc, v2_add(v2_scale(v2_sub(a, v2_scale(dcc, q->t)), w.a),
                                  v2_scale(v2_add(b, v2_scale(dcc, 1.0f - q->t)), w.b)));
     }
@@ -495,7 +496,7 @@ vec2 quad_blend_chroma(const quad_state *q, ivec2 chroma_index, ivec2 chroma_pos
     return acc;
 }
 
-float quad_output_value(const mb_output_range *range, float value)
+static float quad_output_value(const mb_output_range *range, float value)
 {
     if (!range->sixteen_bit) {
         return value;
@@ -504,22 +505,22 @@ float quad_output_value(const mb_output_range *range, float value)
     return range->step > 0.0f ? rintf(v / range->step) * range->step : v;
 }
 
-void quad_store_luma(const mb_interpolate_pass *pass, ivec2 p, float value)
+void quad_store_luma(const mb_warp *warp, ivec2 p, float value)
 {
-    if (p.x < pass->width && p.y < pass->height) {
-        ref_store(&pass->output.luma->texture, p.x, p.y, 0, quad_output_value(&pass->range, value));
+    if (p.x < warp->width && p.y < warp->height) {
+        ref_store(&warp->output.luma->texture, p.x, p.y, 0, quad_output_value(&warp->range, value));
     }
 }
 
-void quad_store_chroma_raw(const mb_interpolate_pass *pass, ivec2 p, vec2 value)
+void quad_store_chroma_raw(const mb_warp *warp, ivec2 p, vec2 value)
 {
-    chroma_channels out = chroma_channels_of(&pass->output, &pass->chroma);
+    chroma_channels out = chroma_channels_of(&warp->output, &warp->chroma);
     ref_store(out.first, p.x, p.y, 0, value.x);
     ref_store(out.second, p.x, p.y, out.second_channel, value.y);
 }
 
-void quad_store_chroma(const mb_interpolate_pass *pass, ivec2 p, vec2 value)
+void quad_store_chroma(const mb_warp *warp, ivec2 p, vec2 value)
 {
-    quad_store_chroma_raw(pass, p,
-                          v2(quad_output_value(&pass->range, value.x), quad_output_value(&pass->range, value.y)));
+    vec2 stored = v2(quad_output_value(&warp->range, value.x), quad_output_value(&warp->range, value.y));
+    quad_store_chroma_raw(warp, p, stored);
 }

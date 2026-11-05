@@ -23,6 +23,7 @@ PUSH_FITS(struct panels_push);
 PUSH_FITS(struct panel_spread_push);
 PUSH_FITS(struct split_push);
 PUSH_FITS(struct interpolate_push);
+PUSH_FITS(struct extrapolate_push);
 PUSH_FITS(struct bar_flags_push);
 
 static uint32_t tiles(int size)
@@ -61,14 +62,14 @@ void vk_normalize(void *self, const mb_normalize_pass *pass)
 {
     struct normalize_push push = {pass->width, pass->height, pass->scale};
     binding b[] = {image(pass->source), image(pass->target)};
-    over_tiles(self, (dispatch_desc){PASS_NORMALIZE, b, PUSH(push)}, pass->width, pass->height);
+    over_tiles(self, (dispatch_desc){PASS_NORMALIZE, BINDINGS(b), PUSH(push)}, pass->width, pass->height);
 }
 
 void vk_downsample(void *self, const mb_downsample_pass *pass)
 {
     struct downsample_push push = {pass->width, pass->height, pass->source_width, pass->source_height};
     binding b[] = {image(pass->source), image(pass->target)};
-    over_tiles(self, (dispatch_desc){PASS_DOWNSAMPLE, b, PUSH(push)}, pass->width, pass->height);
+    over_tiles(self, (dispatch_desc){PASS_DOWNSAMPLE, BINDINGS(b), PUSH(push)}, pass->width, pass->height);
 }
 
 void vk_full_search(void *self, const mb_full_search_pass *pass)
@@ -76,7 +77,7 @@ void vk_full_search(void *self, const mb_full_search_pass *pass)
     mb_grid g = pass->grid;
     struct full_search_push push = {g.blocks_x, g.blocks_y, g.width, g.height, pass->radius, pass->length_penalty};
     binding b[] = {image(pass->origin), image(pass->target), buffer(pass->field)};
-    over_items(self, (dispatch_desc){PASS_FULL_SEARCH, b, PUSH(push)}, mb_grid_block_count(g));
+    over_items(self, (dispatch_desc){PASS_FULL_SEARCH, BINDINGS(b), PUSH(push)}, mb_grid_block_count(g));
 }
 
 static const char *iterate_name(int level)
@@ -98,7 +99,7 @@ void vk_iterate_search(void *self, const mb_iterate_pass *pass)
     };
     binding b[] = {image(pass->origin),    image(pass->target),   buffer(pass->previous), buffer(pass->field),
                    buffer(pass->parent),   buffer(pass->temporal), buffer(pass->reverse), buffer(pass->history)};
-    dispatch_desc desc = {PASS_ITERATE, b, PUSH(push), iterate_name(pass->level)};
+    dispatch_desc desc = {PASS_ITERATE, BINDINGS(b), PUSH(push), iterate_name(pass->level)};
     over_items(self, desc, mb_grid_block_count(g));
 }
 
@@ -108,14 +109,14 @@ void vk_measure(void *self, const mb_measure_pass *pass)
     struct measure_push push = {g.blocks_x, g.blocks_y, g.width, g.height, pass->accumulate_error, pass->direction,
                                 pass->mean_removal.lo, pass->mean_removal.hi};
     binding b[] = {image(pass->origin), image(pass->target), buffer(pass->field), buffer(pass->stats)};
-    over_items(self, (dispatch_desc){PASS_MEASURE, b, PUSH(push)}, mb_grid_block_count(g));
+    over_items(self, (dispatch_desc){PASS_MEASURE, BINDINGS(b), PUSH(push)}, mb_grid_block_count(g));
 }
 
 void vk_project(void *self, const mb_project_pass *pass)
 {
     struct project_push push = {pass->grid.blocks_x, pass->grid.blocks_y, pass->time_scale, pass->tag};
     binding b[] = {buffer(pass->field), buffer(pass->keys)};
-    over_items(self, (dispatch_desc){PASS_PROJECT, b, PUSH(push)}, mb_grid_block_count(pass->grid));
+    over_items(self, (dispatch_desc){PASS_PROJECT, BINDINGS(b), PUSH(push)}, mb_grid_block_count(pass->grid));
 }
 
 void vk_cross_check(void *self, const mb_cross_check_pass *pass)
@@ -127,7 +128,7 @@ void vk_cross_check(void *self, const mb_cross_check_pass *pass)
     };
     binding b[] = {image(pass->origin), image(pass->target), buffer(pass->field),
                    buffer(pass->repaired), buffer(pass->other), buffer(pass->keys)};
-    over_items(self, (dispatch_desc){PASS_CROSS_CHECK, b, PUSH(push)}, mb_grid_block_count(g));
+    over_items(self, (dispatch_desc){PASS_CROSS_CHECK, BINDINGS(b), PUSH(push)}, mb_grid_block_count(g));
 }
 
 void vk_local_search(void *self, const mb_local_search_pass *pass)
@@ -140,7 +141,7 @@ void vk_local_search(void *self, const mb_local_search_pass *pass)
     };
     binding b[] = {image(pass->origin), image(pass->target), buffer(pass->field),
                    buffer(pass->repaired), buffer(pass->reference), buffer(pass->stats)};
-    over_items(self, (dispatch_desc){PASS_LOCAL_SEARCH, b, PUSH(push)}, mb_grid_block_count(g));
+    over_items(self, (dispatch_desc){PASS_LOCAL_SEARCH, BINDINGS(b), PUSH(push)}, mb_grid_block_count(g));
 }
 
 void vk_decide_cut(void *self, const mb_cut_pass *pass)
@@ -148,7 +149,7 @@ void vk_decide_cut(void *self, const mb_cut_pass *pass)
     struct cut_push push = {pass->block_count, pass->error_scale, pass->max_threshold, pass->error_ratio,
                             pass->zero_mean_ratio, pass->zero_mean_min, pass->spread_norm, pass->spread_min};
     binding b[] = {buffer(pass->stats), buffer(pass->history)};
-    over_items(self, (dispatch_desc){PASS_DECIDE_CUT, b, PUSH(push)}, 1);
+    over_items(self, (dispatch_desc){PASS_DECIDE_CUT, BINDINGS(b), PUSH(push)}, 1);
 }
 
 static struct select_push select_constants(const mb_select_pass *pass)
@@ -182,21 +183,21 @@ void vk_select(void *self, const mb_select_pass *pass)
                    buffer(pass->next_stats),
                    buffer(pass->previous_stats),
                    buffer(pass->extra_keys)};
-    over_items(self, (dispatch_desc){PASS_SELECT, b, PUSH(push)}, mb_grid_block_count(pass->grid));
+    over_items(self, (dispatch_desc){PASS_SELECT, BINDINGS(b), PUSH(push)}, mb_grid_block_count(pass->grid));
 }
 
 void vk_median(void *self, const mb_median_pass *pass)
 {
     struct median_push push = {pass->grid.blocks_x, pass->grid.blocks_y, pass->threshold};
     binding b[] = {buffer(pass->selection), buffer(pass->filtered)};
-    over_items(self, (dispatch_desc){PASS_MEDIAN, b, PUSH(push)}, mb_grid_block_count(pass->grid));
+    over_items(self, (dispatch_desc){PASS_MEDIAN, BINDINGS(b), PUSH(push)}, mb_grid_block_count(pass->grid));
 }
 
 void vk_fallback(void *self, const mb_fallback_pass *pass)
 {
     struct fallback_push push = {pass->grid.blocks_x, pass->grid.blocks_y, pass->t, pass->spread, pass->lo, pass->hi};
     binding b[] = {buffer(pass->selection), buffer(pass->weights), buffer(pass->forward), buffer(pass->backward)};
-    over_items(self, (dispatch_desc){PASS_FALLBACK, b, PUSH(push)}, mb_grid_block_count(pass->grid));
+    over_items(self, (dispatch_desc){PASS_FALLBACK, BINDINGS(b), PUSH(push)}, mb_grid_block_count(pass->grid));
 }
 
 static mb_image *second_chroma(const mb_frame_planes *planes)
@@ -214,21 +215,21 @@ void vk_chroma_offsets(void *self, const mb_chroma_offset_pass *pass)
     const mb_pair_planes *f = &pass->frames;
     binding b[] = {image(f->a.chroma[0]), image(f->b.chroma[0]), image(second_chroma(&f->a)),
                    image(second_chroma(&f->b)), buffer(pass->selection), buffer(pass->offsets)};
-    over_items(self, (dispatch_desc){PASS_CHROMA_OFFSETS, b, PUSH(push)}, mb_grid_block_count(pass->grid));
+    over_items(self, (dispatch_desc){PASS_CHROMA_OFFSETS, BINDINGS(b), PUSH(push)}, mb_grid_block_count(pass->grid));
 }
 
 void vk_offset_median(void *self, const mb_offset_median_pass *pass)
 {
     struct blocks_push push = {pass->grid.blocks_x, pass->grid.blocks_y};
     binding b[] = {buffer(pass->offsets), buffer(pass->filtered)};
-    over_items(self, (dispatch_desc){PASS_OFFSET_MEDIAN, b, PUSH(push)}, mb_grid_block_count(pass->grid));
+    over_items(self, (dispatch_desc){PASS_OFFSET_MEDIAN, BINDINGS(b), PUSH(push)}, mb_grid_block_count(pass->grid));
 }
 
 void vk_global_motion(void *self, const mb_global_motion_pass *pass)
 {
     struct blocks_push push = {pass->grid.blocks_x, pass->grid.blocks_y};
     binding b[] = {buffer(pass->selection), buffer(pass->global_motion)};
-    over_items(self, (dispatch_desc){PASS_GLOBAL_MOTION, b, PUSH(push)}, 1);
+    over_items(self, (dispatch_desc){PASS_GLOBAL_MOTION, BINDINGS(b), PUSH(push)}, 1);
 }
 
 void vk_panels(void *self, const mb_panel_pass *pass)
@@ -243,7 +244,7 @@ void vk_panels(void *self, const mb_panel_pass *pass)
     binding b[] = {image(f->a.luma),           image(f->b.luma),           image(f->a.chroma[0]),
                    image(f->b.chroma[0]),      image(second_chroma(&f->a)), image(second_chroma(&f->b)),
                    buffer(pass->flags),        buffer(pass->global_motion)};
-    over_items(self, (dispatch_desc){PASS_PANELS, b, PUSH(push)}, mb_grid_block_count(pass->grid));
+    over_items(self, (dispatch_desc){PASS_PANELS, BINDINGS(b), PUSH(push)}, mb_grid_block_count(pass->grid));
 }
 
 void vk_panel_spread(void *self, const mb_panel_spread_pass *pass)
@@ -251,7 +252,7 @@ void vk_panel_spread(void *self, const mb_panel_spread_pass *pass)
     struct panel_spread_push push = {pass->grid.blocks_x, pass->grid.blocks_y, pass->radius, pass->source_distance,
                                      pass->t};
     binding b[] = {buffer(pass->flags), buffer(pass->spread), buffer(pass->selection), buffer(pass->global_motion)};
-    over_items(self, (dispatch_desc){PASS_PANEL_SPREAD, b, PUSH(push)}, mb_grid_block_count(pass->grid));
+    over_items(self, (dispatch_desc){PASS_PANEL_SPREAD, BINDINGS(b), PUSH(push)}, mb_grid_block_count(pass->grid));
 }
 
 void vk_split(void *self, const mb_split_pass *pass)
@@ -260,28 +261,7 @@ void vk_split(void *self, const mb_split_pass *pass)
     struct split_push push = {g.blocks_x, g.blocks_y, g.width, g.height, pass->refine_radius, pass->t, pass->threshold,
                               pass->luma_scale, pass->refine_penalty};
     binding b[] = {image(pass->a), image(pass->b), buffer(pass->selection), buffer(pass->cells), buffer(pass->offsets)};
-    over_items(self, (dispatch_desc){PASS_SPLIT, b, PUSH(push)}, mb_grid_block_count(g) * 4);
-}
-
-static pass_id interpolate_variant(const mb_interpolate_pass *pass)
-{
-    if (pass->chroma.interleaved) {
-        return pass->range.sixteen_bit ? PASS_INTERPOLATE_16_NV : PASS_INTERPOLATE_8_NV;
-    }
-    return pass->range.sixteen_bit ? PASS_INTERPOLATE_16 : PASS_INTERPOLATE_8;
-}
-
-static struct interpolate_push interpolate_constants(const mb_interpolate_pass *pass)
-{
-    const mb_blend_costs *k = &pass->costs;
-    const mb_chroma_layout *c = &pass->chroma;
-    return (struct interpolate_push){
-        pass->width, pass->height, pass->grid.blocks_x, pass->grid.blocks_y, c->width, c->height, c->shift_x,
-        c->shift_y, pass->base_level, pass->t, k->softness, k->one_sided, k->unconfirmed, k->fallback,
-        k->candidate_prior, k->consistency, k->fallback_uncover, pass->luma_scale, pass->range.max_value,
-        pass->range.step, k->foreground_bonus, k->nearest_side_lo, k->nearest_side_hi, k->panel_switch,
-        (pass->extrapolation.past.field != NULL) | (pass->extrapolation.next.field != NULL) << 1,
-    };
+    over_items(self, (dispatch_desc){PASS_SPLIT, BINDINGS(b), PUSH(push)}, mb_grid_block_count(g) * 4);
 }
 
 static uint32_t quad_groups(int size)
@@ -289,21 +269,66 @@ static uint32_t quad_groups(int size)
     return (uint32_t)(((size + 1) / 2 + QUAD_GROUP - 1) / QUAD_GROUP);
 }
 
+static void over_quads(mbvk_backend *vk, dispatch_desc desc, const mb_warp *warp)
+{
+    over_groups(vk, desc, quad_groups(warp->width), quad_groups(warp->height));
+}
+
+static struct interpolate_push interpolate_constants(const mb_interpolate_pass *pass)
+{
+    const mb_warp *w = &pass->warp;
+    const mb_blend_costs *k = &pass->costs;
+    const mb_chroma_layout *c = &w->chroma;
+    return (struct interpolate_push){
+        w->width, w->height, w->grid.blocks_x, w->grid.blocks_y, c->width, c->height, c->shift_x, c->shift_y,
+        w->base_level, w->t, k->softness, k->one_sided, k->unconfirmed, k->fallback, k->candidate_prior,
+        k->consistency, k->fallback_uncover, pass->luma_scale, w->range.max_value, w->range.step, k->foreground_bonus,
+        k->nearest_side_lo, k->nearest_side_hi, k->panel_switch,
+    };
+}
+
 void vk_interpolate(void *self, const mb_interpolate_pass *pass)
 {
     struct interpolate_push push = interpolate_constants(pass);
-    const mb_pair_planes *f = &pass->frames;
-    const mb_frame_planes *o = &pass->output;
-    binding b[] = {image(f->a.luma),          image(f->b.luma),          image(f->a.chroma[0]),
+    const mb_warp *w = &pass->warp;
+    const mb_pair_planes *f = &w->frames;
+    const mb_frame_planes *o = &w->output;
+    binding b[] = {image(f->a.luma),        image(f->b.luma),           image(f->a.chroma[0]),
+                   image(f->b.chroma[0]),   image(second_chroma(&f->a)), image(second_chroma(&f->b)),
+                   buffer(pass->cells),     buffer(pass->forward),     buffer(pass->backward),
+                   image(o->luma),          image(o->chroma[0]),       image(second_chroma(o)),
+                   image(w->a_level),       image(w->b_level),         buffer(w->stats),
+                   buffer(pass->fallback),  buffer(pass->offsets),     buffer(pass->panels),
+                   buffer(pass->global_motion)};
+    pass_id variant = warp_variant(PASS_INTERPOLATE_8, w->chroma.interleaved, w->range.sixteen_bit);
+    over_quads(self, (dispatch_desc){variant, BINDINGS(b), PUSH(push)}, w);
+}
+
+static struct extrapolate_push extrapolate_constants(const mb_extrapolate_pass *pass)
+{
+    const mb_warp *w = &pass->warp;
+    const mb_chroma_layout *c = &w->chroma;
+    const mb_extrapolation *e = &pass->extrapolation;
+    return (struct extrapolate_push){
+        w->width, w->height, w->grid.blocks_x, w->grid.blocks_y, c->width, c->height, c->shift_x, c->shift_y,
+        w->base_level, w->t, pass->softness, pass->unconfirmed, pass->consistency, w->range.max_value, w->range.step,
+        (e->past.field != NULL) | (e->next.field != NULL) << 1,
+    };
+}
+
+void vk_extrapolate(void *self, const mb_extrapolate_pass *pass)
+{
+    struct extrapolate_push push = extrapolate_constants(pass);
+    const mb_warp *w = &pass->warp;
+    const mb_pair_planes *f = &w->frames;
+    const mb_frame_planes *o = &w->output;
+    const mb_extrapolation *e = &pass->extrapolation;
+    binding b[] = {image(f->a.luma),          image(f->b.luma),           image(f->a.chroma[0]),
                    image(f->b.chroma[0]),     image(second_chroma(&f->a)), image(second_chroma(&f->b)),
-                   buffer(pass->cells),       buffer(pass->forward),     buffer(pass->backward),
-                   image(o->luma),            image(o->chroma[0]),       image(second_chroma(o)),
-                   image(pass->a_level),      image(pass->b_level),      buffer(pass->stats),
-                   buffer(pass->fallback),    buffer(pass->offsets),     buffer(pass->panels),
-                   buffer(pass->global_motion),
-                   buffer(pass->extrapolation.past.field), buffer(pass->extrapolation.past.stats),
-                   buffer(pass->extrapolation.next.field), buffer(pass->extrapolation.next.stats),
-                   image(pass->extrapolation.past.neighbour_level), image(pass->extrapolation.next.neighbour_level)};
-    over_groups(self, (dispatch_desc){interpolate_variant(pass), b, PUSH(push)}, quad_groups(pass->width),
-                quad_groups(pass->height));
+                   buffer(e->past.field),     buffer(e->past.stats),      buffer(w->stats),
+                   image(o->luma),            image(o->chroma[0]),        image(second_chroma(o)),
+                   image(w->a_level),         image(w->b_level),          buffer(e->next.field),
+                   buffer(e->next.stats),     image(e->past.neighbour_level), image(e->next.neighbour_level)};
+    pass_id variant = warp_variant(PASS_EXTRAPOLATE_8, w->chroma.interleaved, w->range.sixteen_bit);
+    over_quads(self, (dispatch_desc){variant, BINDINGS(b), PUSH(push)}, w);
 }

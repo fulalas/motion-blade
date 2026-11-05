@@ -1,2 +1,3 @@
+subdir('common')
 subdir('eval')
-executable('flick', 'flick/flick.c', dependencies: libm)
+executable('flick', 'flick/flick.c', dependencies: framekit_dep)

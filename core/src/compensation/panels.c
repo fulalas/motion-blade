@@ -76,7 +76,7 @@ static vec2 panel_flag(const mb_panel_pass *pass, int id)
     float m = (float)(1 << pass->base_level);
     vec2 u = v2_scale(v4_xy(vec4s(pass->global_motion)[0]), m);
     ivec2 block = block_coord(id, pass->grid);
-    vec2 corner = v2_scale(v2_scale(v2((float)block.x, (float)block.y), 8.0f), m);
+    vec2 corner = block_corner(block, m);
     panel_probe acc = {0.0f, 0.0f, 0.0f, v2(1e30f, 1e30f), v2(-1e30f, -1e30f)};
     for (int k = 0; k < PROBES; k++) {
         vec2 grid = v2_add(v2_scale(v2((float)(k % 3), (float)(k / 3)), 3.0f), v2(1.0f, 1.0f));

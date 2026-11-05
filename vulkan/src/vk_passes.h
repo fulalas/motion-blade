@@ -22,5 +22,6 @@ void vk_panels(void *self, const mb_panel_pass *pass);
 void vk_panel_spread(void *self, const mb_panel_spread_pass *pass);
 void vk_split(void *self, const mb_split_pass *pass);
 void vk_interpolate(void *self, const mb_interpolate_pass *pass);
+void vk_extrapolate(void *self, const mb_extrapolate_pass *pass);
 
 #endif

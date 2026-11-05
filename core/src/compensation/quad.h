@@ -71,14 +71,13 @@ quad_values quad_blend_luma(const quad_state *q);
 void quad_measure_panels(quad_state *q);
 quad_values quad_mix_panels_luma(const quad_state *q, quad_values luma);
 vec2 quad_blend_chroma(const quad_state *q, ivec2 chroma_index, ivec2 chroma_position);
-float quad_output_value(const mb_output_range *range, float value);
 difference_window quad_difference_window(ivec2 q0, window_sample sample, const void *context);
 float quad_window_error(const difference_window *w, int jx, int jy);
 void quad_visit_chroma(const mb_chroma_layout *chroma, ivec2 q0, chroma_visit visit, const void *context);
-float quad_consistent_share(const mb_interpolate_pass *pass, field_probe probe, vec2 u);
+float quad_consistent_share(const mb_warp *warp, float consistency, field_probe probe, vec2 u);
 void quad_soft_scores(const float *cost, int count, float softness, float *score);
-void quad_store_luma(const mb_interpolate_pass *pass, ivec2 p, float value);
-void quad_store_chroma_raw(const mb_interpolate_pass *pass, ivec2 p, vec2 value);
-void quad_store_chroma(const mb_interpolate_pass *pass, ivec2 p, vec2 value);
+void quad_store_luma(const mb_warp *warp, ivec2 p, float value);
+void quad_store_chroma_raw(const mb_warp *warp, ivec2 p, vec2 value);
+void quad_store_chroma(const mb_warp *warp, ivec2 p, vec2 value);
 
 #endif

@@ -12,6 +12,7 @@
 #include "video/mp_image.h"
 
 #include "motionblade/pulldown.h"
+#include "vf_motionblade_format.h"
 
 struct pulldown_priv {
     struct mp_subfilter sub;
@@ -23,40 +24,38 @@ struct pulldown_priv {
     bool failed;
 };
 
-static bool luma_plane(struct mp_image *mpi, mb_luma_plane *plane)
-{
-    struct mp_regular_imgfmt reg;
-    if (IMGFMT_IS_HWACCEL(mpi->imgfmt) || !mp_get_regular_imgfmt(&reg, mpi->imgfmt) ||
-        reg.component_type != MP_COMPONENT_TYPE_UINT || reg.component_size > 2) {
-        return false;
-    }
-    int bits = reg.component_size * 8 - (reg.component_pad < 0 ? -reg.component_pad : 0);
-    *plane = (mb_luma_plane){
-        .data = mpi->planes[0],
-        .stride = mpi->stride[0],
-        .width = mpi->w,
-        .height = mpi->h,
-        .bytes_per_sample = reg.component_size,
-        .max_value = (1 << bits) - 1,
-    };
-    return true;
-}
-
 static bool same_layout(struct mp_image *a, struct mp_image *b)
 {
     return a && a->imgfmt == b->imgfmt && a->w == b->w && a->h == b->h;
 }
 
+static bool measurable(struct mp_image *mpi, mb_video_format *format)
+{
+    return !IMGFMT_IS_HWACCEL(mpi->imgfmt) && mb_mpv_luma_format(mpi->imgfmt, mpi->w, mpi->h, format);
+}
+
+static bool frame_pair(struct mp_image *previous, struct mp_image *current, mb_video_format *format)
+{
+    return same_layout(previous, current) && measurable(current, format);
+}
+
+static mb_field_motion field_motion(const mb_video_format *format, struct mp_image *previous,
+                                    struct mp_image *current)
+{
+    mb_host_image a = mb_mpv_host_image(previous);
+    mb_host_image b = mb_mpv_host_image(current);
+    return mb_field_motion_measure((mb_frame_pair){format, &a, &b});
+}
+
 static mb_pulldown observe(struct pulldown_priv *p, struct mp_image *mpi)
 {
-    mb_luma_plane current;
-    if (p->failed || !luma_plane(mpi, &current)) {
+    mb_video_format format;
+    if (p->failed || !measurable(mpi, &format)) {
         mp_image_unrefp(&p->previous);
         return MB_PULLDOWN_NONE;
     }
-    mb_luma_plane previous;
-    if (same_layout(p->previous, mpi) && luma_plane(p->previous, &previous)) {
-        mb_pulldown_push(p->detector, mb_field_motion_measure(&previous, &current));
+    if (same_layout(p->previous, mpi)) {
+        mb_pulldown_push(p->detector, field_motion(&format, p->previous, mpi));
     } else {
         mb_pulldown_forget(p->detector);
     }
@@ -68,54 +67,50 @@ static mb_pulldown observe(struct pulldown_priv *p, struct mp_image *mpi)
 struct dropper_priv {
     struct mp_image *shown;
     struct mp_image *pending;
-    double motion_shown;
-    double motion_pending;
+    struct mp_image *incoming;
+    mb_repeat_filter filter;
     bool eof_waiting;
 };
 
 static double motion_between(struct mp_image *a, struct mp_image *b)
 {
-    mb_luma_plane pa, pb;
-    if (!a || !same_layout(a, b) || !luma_plane(a, &pa) || !luma_plane(b, &pb)) {
+    mb_video_format format;
+    if (!frame_pair(a, b, &format)) {
         return NAN;
     }
-    return mb_frame_motion(&pa, &pb);
+    mb_host_image from = mb_mpv_host_image(a);
+    mb_host_image to = mb_mpv_host_image(b);
+    return mb_frame_motion((mb_frame_pair){&format, &from, &to});
+}
+
+static double motion_to_incoming(void *context, mb_motion_origin origin)
+{
+    struct dropper_priv *p = context;
+    return motion_between(origin == MB_FROM_SHOWN ? p->shown : p->pending, p->incoming);
 }
 
 static void forget_frames(struct dropper_priv *p)
 {
     mp_image_unrefp(&p->shown);
     mp_image_unrefp(&p->pending);
-    p->motion_shown = NAN;
-    p->motion_pending = NAN;
-}
-
-static struct mp_image *pass_pending(struct dropper_priv *p, struct mp_image *next, double motion_after)
-{
-    struct mp_image *out = p->pending;
-    mp_image_unrefp(&p->shown);
-    p->shown = mp_image_new_ref(out);
-    p->motion_shown = p->motion_pending;
-    p->pending = next;
-    p->motion_pending = motion_after;
-    return out;
+    mb_repeat_filter_reset(&p->filter);
 }
 
 static struct mp_image *accept_frame(struct dropper_priv *p, struct mp_image *next)
 {
-    if (!p->pending) {
-        p->pending = next;
-        p->motion_pending = motion_between(p->shown, next);
-        return NULL;
+    p->incoming = next;
+    mb_repeat_decision d = mb_repeat_filter_push(&p->filter, (mb_motion_source){motion_to_incoming, p});
+    p->incoming = NULL;
+    struct mp_image *out = NULL;
+    if (d == MB_REPEAT_SHOW_PENDING) {
+        out = p->pending;
+        mp_image_unrefp(&p->shown);
+        p->shown = mp_image_new_ref(out);
+    } else if (d == MB_REPEAT_DROP_PENDING) {
+        talloc_free(p->pending);
     }
-    double motion_after = motion_between(p->pending, next);
-    if (!mb_frame_repeats(p->motion_shown, p->motion_pending, motion_after)) {
-        return pass_pending(p, next, motion_after);
-    }
-    talloc_free(p->pending);
     p->pending = next;
-    p->motion_pending = motion_between(p->shown, next);
-    return NULL;
+    return out;
 }
 
 static void flush_at_eof(struct mp_filter *f)
@@ -178,8 +173,7 @@ static struct mp_filter *create_dropper(struct mp_filter *parent)
         return NULL;
     }
     struct dropper_priv *p = f->priv;
-    p->motion_shown = NAN;
-    p->motion_pending = NAN;
+    mb_repeat_filter_reset(&p->filter);
     mp_filter_add_pin(f, MP_PIN_IN, "in");
     mp_filter_add_pin(f, MP_PIN_OUT, "out");
     return f;

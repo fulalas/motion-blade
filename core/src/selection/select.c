@@ -120,7 +120,7 @@ static void begin_block(select_context *ctx, const mb_select_pass *pass, int id)
     find_agreed_vector(ctx);
     ctx->two_sided_count = ctx->count;
     add_ring(ctx);
-    ctx->mean_weight = mean_weight(pass->mean_removal.lo, pass->mean_removal.hi, neighbour_dc(ctx));
+    ctx->mean_weight = mean_weight(pass->mean_removal, neighbour_dc(ctx));
     ctx->any_supported = any_long_supported(ctx);
 }
 

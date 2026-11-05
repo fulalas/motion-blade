@@ -1,12 +1,13 @@
 --- a/meson.build
 +++ b/meson.build
-@@ -1311,7 +1311,10 @@
+@@ -1311,7 +1311,11 @@
      sources += files('video/out/hwdec/hwdec_vulkan.c',
                       'video/out/vulkan/context.c',
                       'video/out/vulkan/utils.c',
 -                     'video/filter/vf_gpu_vulkan.c')
 +                     'video/filter/vf_gpu_vulkan.c',
 +                     'video/filter/vf_motionblade.c',
++                     'video/filter/vf_motionblade_format.c',
 +                     'video/filter/vf_motionblade_pulldown.c')
 +    dependencies += subproject('motionblade').get_variable('motionblade_dep')
  endif

@@ -47,8 +47,7 @@ vec2 select_landing_b(const select_context *ctx, vec2 u)
 
 vec2 select_field_at(const select_context *ctx, const mb_buffer *field, vec2 position)
 {
-    int index = block_index(block_at(position), ctx->pass->grid);
-    return v4_xy(vec4s(field)[index]);
+    return field_at_position(vec4s(field), position, ctx->pass->grid);
 }
 
 vec2 select_consistency_errors(const select_context *ctx, vec2 u)

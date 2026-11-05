@@ -22,14 +22,9 @@ static void write_sample(uint8_t *row, int index, int bytes, float value)
     memcpy(row + (size_t)index * 2, &stored, sizeof(stored));
 }
 
-static int sample_bytes(const ref_texture *texture)
-{
-    return texture->format == MB_TEXELS_R8 || texture->format == MB_TEXELS_RG8 ? 1 : 2;
-}
-
 static void upload_plane(ref_texture *plane, const uint8_t *source, ptrdiff_t stride, ivec2 origin)
 {
-    int bytes = sample_bytes(plane);
+    int bytes = mb_texel_sample_bytes(plane->format);
     int span = plane->width * plane->channels;
     for (int y = 0; y < plane->height; y++) {
         const uint8_t *row = source + (ptrdiff_t)(origin.y + y) * stride;
@@ -43,19 +38,16 @@ static void upload_plane(ref_texture *plane, const uint8_t *source, ptrdiff_t st
 void cpu_upload_frame(const mb_upload *upload)
 {
     const mb_video_format *format = upload->format;
-    mb_image *planes[3] = {upload->planes.luma, upload->planes.chroma[0], upload->planes.chroma[1]};
     for (int i = 0; i < mb_plane_count(format); i++) {
-        ivec2 origin = iv2(upload->area.x, upload->area.y);
-        if (i > 0) {
-            origin = iv2(upload->area.x >> format->chroma_shift_x, upload->area.y >> format->chroma_shift_y);
-        }
-        upload_plane(&planes[i]->texture, upload->source->planes[i], upload->source->strides[i], origin);
+        mb_rect area = mb_plane_area(format, i, upload->area);
+        upload_plane(&mb_frame_plane(upload->planes, i)->texture, upload->source->planes[i], upload->source->strides[i],
+                     iv2(area.x, area.y));
     }
 }
 
 static void download_plane(const ref_texture *plane, uint8_t *target, ptrdiff_t stride, ivec2 origin)
 {
-    int bytes = sample_bytes(plane);
+    int bytes = mb_texel_sample_bytes(plane->format);
     int span = plane->width * plane->channels;
     for (int y = 0; y < plane->height; y++) {
         uint8_t *row = target + (ptrdiff_t)(origin.y + y) * stride;
@@ -69,11 +61,8 @@ static void download_plane(const ref_texture *plane, uint8_t *target, ptrdiff_t 
 void cpu_download_planes(const cpu_output *output, const mb_host_image *target, mb_rect area)
 {
     for (int i = 0; i < output->plane_count; i++) {
-        ivec2 origin = iv2(area.x, area.y);
-        if (i > 0) {
-            origin = iv2(area.x >> output->shift.x, area.y >> output->shift.y);
-        }
-        download_plane(&output->planes[i], target->planes[i], target->strides[i], origin);
+        mb_rect plane = mb_plane_area(&output->format, i, area);
+        download_plane(&output->planes[i], target->planes[i], target->strides[i], iv2(plane.x, plane.y));
     }
 }
 
@@ -83,7 +72,7 @@ static bool copy_texture(ref_texture *copy, const ref_texture *source)
     if (!ref_texture_alloc(copy, &desc)) {
         return false;
     }
-    size_t count = (size_t)source->width * (size_t)source->height * (size_t)source->channels;
+    size_t count = mb_texel_count(desc);
     memcpy(copy->texels, source->texels, count * sizeof(float));
     return true;
 }
@@ -96,18 +85,18 @@ void cpu_output_clear(cpu_output *output)
     output->plane_count = 0;
 }
 
-bool cpu_output_capture(cpu_output *output, mb_frame_planes planes, const mb_buffer *stats, ivec2 shift)
+bool cpu_output_capture(cpu_output *output, mb_frame_planes planes, const mb_buffer *stats,
+                        const mb_video_format *format)
 {
     cpu_output_clear(output);
-    mb_image *sources[3] = {planes.luma, planes.chroma[0], planes.chroma[1]};
-    for (int i = 0; i < 3 && sources[i]; i++) {
-        if (!copy_texture(&output->planes[i], &sources[i]->texture)) {
+    for (int i = 0; i < 3 && mb_frame_plane(planes, i); i++) {
+        if (!copy_texture(&output->planes[i], &mb_frame_plane(planes, i)->texture)) {
             cpu_output_clear(output);
             return false;
         }
         output->plane_count = i + 1;
     }
-    output->shift = shift;
+    output->format = *format;
     memcpy(output->stats, stats->data, sizeof(output->stats));
     return true;
 }

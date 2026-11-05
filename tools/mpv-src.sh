@@ -14,7 +14,8 @@ if [ "$(cat "$out/.motionblade-stamp" 2>/dev/null)" != "$want" ]; then
 fi
 mkdir -p "$out/subprojects"
 ln -snf "$root" "$out/subprojects/motionblade"
-for file in vf_motionblade.c vf_motionblade_pulldown.c vf_motionblade_pulldown.h; do
+for file in vf_motionblade.c vf_motionblade_format.c vf_motionblade_format.h vf_motionblade_pulldown.c \
+    vf_motionblade_pulldown.h; do
     ln -snf "$root/adapters/mpv/$file" "$out/video/filter/$file"
 done
 echo "$out"

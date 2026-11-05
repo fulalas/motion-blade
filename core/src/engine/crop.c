@@ -27,34 +27,17 @@ mb_status allocate_geometry(mb_engine *engine)
     return status != MB_SUCCESS ? status : finished;
 }
 
-typedef struct plane_shift_pair {
-    int x;
-    int y;
-} plane_shift_pair;
-
-static plane_shift_pair plane_shift(const mb_engine *engine, int plane)
-{
-    if (plane == 0) {
-        return (plane_shift_pair){0, 0};
-    }
-    return (plane_shift_pair){engine->source.chroma_shift_x, engine->source.chroma_shift_y};
-}
-
-static mb_image *plane_of(const mb_frame_planes *planes, int plane)
-{
-    return plane == 0 ? planes->luma : planes->chroma[plane - 1];
-}
-
 static void copy_old_content(mb_engine *engine, const frame_slot *old, mb_rect old_active)
 {
     const mb_backend *b = &engine->backend;
     mb_rect active = engine->geo.active;
     for (int k = 0; k < FRAME_RING; k++) {
         for (int plane = 0; plane < mb_plane_count(&engine->source); plane++) {
-            plane_shift_pair s = plane_shift(engine, plane);
+            mb_rect from = mb_plane_area(&engine->source, plane, old_active);
+            mb_rect to = mb_plane_area(&engine->source, plane, active);
             mb_overlap_copy copy = {
-                plane_of(&old[k].planes, plane), plane_of(&engine->frames[k].planes, plane), old_active.x >> s.x,
-                old_active.y >> s.y, active.x >> s.x, active.y >> s.y,
+                mb_frame_plane(old[k].planes, plane), mb_frame_plane(engine->frames[k].planes, plane), from.x, from.y,
+                to.x, to.y,
             };
             b->ops->copy_overlap(b->self, &copy);
         }
@@ -66,8 +49,8 @@ static void spread_first_frame(mb_engine *engine)
     const mb_backend *b = &engine->backend;
     for (int k = 1; k < FRAME_RING; k++) {
         for (int plane = 0; plane < mb_plane_count(&engine->source); plane++) {
-            mb_image *first = plane_of(&engine->frames[0].planes, plane);
-            mb_overlap_copy copy = {first, plane_of(&engine->frames[k].planes, plane), 0, 0, 0, 0};
+            mb_image *first = mb_frame_plane(engine->frames[0].planes, plane);
+            mb_overlap_copy copy = {first, mb_frame_plane(engine->frames[k].planes, plane), 0, 0, 0, 0};
             b->ops->copy_overlap(b->self, &copy);
         }
     }
@@ -112,14 +95,6 @@ static mb_status migrate_frames(mb_engine *engine, const frame_slot *old, mb_rec
     return status != MB_SUCCESS ? status : finished;
 }
 
-static void forget_pairs(mb_engine *engine)
-{
-    engine->pair.motion_ready = false;
-    engine->pair.has_previous = false;
-    engine->pair.has_older = false;
-    engine->pair.history_stale = true;
-}
-
 mb_status crop_to(mb_engine *engine, mb_rect active)
 {
     mb_status status = finish_all_work(&engine->backend);
@@ -129,7 +104,8 @@ mb_status crop_to(mb_engine *engine, mb_rect active)
     mb_rect old_active = engine->geo.active;
     buffers_destroy(engine);
     engine->geo = geometry_for(&engine->source, active, &engine->params.search);
-    forget_pairs(engine);
+    motion_forget(engine);
+    engine->pair.history_stale = true;
     engine->framing.border_version++;
     bool had_border = border_exists(&engine->framing.border);
     if (status == MB_SUCCESS && !had_border && !border_create(&engine->framing.border, &engine->source)) {

@@ -85,7 +85,7 @@ static mb_status cpu_write_buffer(void *self, mb_buffer *buffer, const void *dat
 
 static size_t texel_count(const ref_texture *t)
 {
-    return (size_t)t->width * (size_t)t->height * (size_t)t->channels;
+    return mb_texel_count((mb_image_desc){t->width, t->height, t->format});
 }
 
 static mb_status cpu_read_image(void *self, mb_image *image, float *texels)
@@ -100,6 +100,12 @@ static mb_status cpu_write_image(void *self, mb_image *image, const float *texel
     (void)self;
     memcpy(image->texture.texels, texels, texel_count(&image->texture) * sizeof(float));
     return MB_SUCCESS;
+}
+
+static void cpu_prepare(void *self, const mb_video_format *format)
+{
+    (void)self;
+    (void)format;
 }
 
 static mb_status cpu_nothing_to_do(void *self)
@@ -241,8 +247,7 @@ static mb_status cpu_record_host_output(void *self, const mb_output_copy *copy, 
     if (slot < 0) {
         return MB_ERROR_BUSY;
     }
-    ivec2 shift = iv2(copy->format->chroma_shift_x, copy->format->chroma_shift_y);
-    if (!cpu_output_capture(&cpu->outputs[slot], copy->planes, stats, shift)) {
+    if (!cpu_output_capture(&cpu->outputs[slot], copy->planes, stats, copy->format)) {
         return MB_ERROR_NO_MEMORY;
     }
     cpu->recorded = slot;
@@ -283,9 +288,11 @@ REFERENCE_PASS(panels, mb_panel_pass)
 REFERENCE_PASS(panel_spread, mb_panel_spread_pass)
 REFERENCE_PASS(split, mb_split_pass)
 REFERENCE_PASS(interpolate, mb_interpolate_pass)
+REFERENCE_PASS(extrapolate, mb_extrapolate_pass)
 
 static const mb_backend_ops CPU_OPS = {
     .destroy = cpu_destroy,
+    .prepare = cpu_prepare,
     .create_image = cpu_create_image,
     .destroy_image = cpu_destroy_image,
     .create_buffer = cpu_create_buffer,
@@ -329,6 +336,7 @@ static const mb_backend_ops CPU_OPS = {
     .panel_spread = cpu_panel_spread,
     .split = cpu_split,
     .interpolate = cpu_interpolate,
+    .extrapolate = cpu_extrapolate,
 };
 
 mb_status mb_cpu_backend_create(mb_backend *backend)

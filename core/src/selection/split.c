@@ -17,7 +17,7 @@ static cell_candidates gather(const mb_split_pass *pass, ivec2 block, vec2 own)
     const vec4 *selection = vec4s(pass->selection);
     for (int k = 0; k < NEIGHBOURS; k++) {
         vec4 q = selection[neighbour3_index(k, block, pass->grid)];
-        if ((int)q.z != MB_MODE_TWO_SIDED) {
+        if (!is_two_sided(q)) {
             continue;
         }
         vec2 v = v4_xy(q);
@@ -94,7 +94,7 @@ void ref_split(const mb_split_pass *pass)
         int index = block_index(block, pass->grid);
         vec4 own = selection[index];
         cells[id] = own;
-        if ((int)own.z != MB_MODE_TWO_SIDED || pass->threshold <= 0.0f) {
+        if (!is_two_sided(own) || pass->threshold <= 0.0f) {
             continue;
         }
         cell_candidates list = gather(pass, block, v4_xy(own));

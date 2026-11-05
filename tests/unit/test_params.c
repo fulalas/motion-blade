@@ -5,7 +5,6 @@ static bool defaults_match_tuning(void)
 {
     mb_params p = mb_params_default();
     CHECK(p.search.full_search_radius == 16);
-    CHECK(p.select.lookahead == 1);
     CHECK(p.blend.softness == 250.0f);
     CHECK(p.framing.settle_frames == 48);
     return true;

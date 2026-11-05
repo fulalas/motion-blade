@@ -40,7 +40,6 @@ typedef struct mb_field_dump {
 mb_status mb_engine_create(const mb_engine_config *config, mb_engine **engine);
 void mb_engine_destroy(mb_engine *engine);
 bool mb_engine_is_healthy(const mb_engine *engine);
-bool mb_engine_uses_lookahead(const mb_engine *engine);
 mb_status mb_engine_set_param(mb_engine *engine, const char *name, double value);
 
 mb_status mb_engine_push(mb_engine *engine, const mb_host_image *frame);
@@ -50,7 +49,11 @@ void mb_engine_reset(mb_engine *engine);
 
 mb_status mb_engine_submit(mb_engine *engine, double t);
 mb_status mb_engine_submit_device(mb_engine *engine, double t, const mb_device_frame *target);
+uint64_t mb_engine_newest_frame(const mb_engine *engine);
+mb_status mb_engine_submit_real(mb_engine *engine, uint64_t id, const mb_host_image *frame,
+                                const mb_device_frame *target);
 int mb_engine_pending(const mb_engine *engine);
+int mb_engine_capacity(const mb_engine *engine);
 bool mb_engine_output_ready(const mb_engine *engine);
 mb_status mb_engine_retrieve(mb_engine *engine, const mb_host_image *target, mb_frame_report *report);
 mb_status mb_engine_finish_device(mb_engine *engine, mb_frame_report *report);

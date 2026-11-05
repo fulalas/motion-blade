@@ -5,7 +5,7 @@
 #include "framing/border.h"
 #include "motionblade/engine.h"
 
-enum { FRAME_RING = 4, MAX_QUEUE = 16 };
+enum { FRAME_RING = 4, PAIR_RING = 3, MAX_QUEUE = 16 };
 
 typedef struct geometry {
     mb_rect active;
@@ -20,18 +20,21 @@ typedef struct geometry {
 typedef struct frame_slot {
     mb_frame_planes planes;
     mb_image *levels[MB_MAX_LEVELS];
+    int border_version;
+    uint64_t id;
 } frame_slot;
 
-typedef struct motion_fields {
+typedef struct pair_motion {
     mb_buffer *forward[MB_MAX_LEVELS];
     mb_buffer *backward[MB_MAX_LEVELS];
-    mb_buffer *previous_forward[MB_MAX_LEVELS];
-    mb_buffer *previous_backward[MB_MAX_LEVELS];
-    mb_buffer *scratch[MB_MAX_LEVELS];
-    mb_buffer *older_backward;
     mb_buffer *stats;
-    mb_buffer *previous_stats;
-    mb_buffer *older_stats;
+    bool ready;
+} pair_motion;
+
+typedef struct motion_fields {
+    pair_motion pairs[PAIR_RING];
+    int newest_pair;
+    mb_buffer *scratch[MB_MAX_LEVELS];
     mb_buffer *history;
     mb_buffer *cross_keys;
 } motion_fields;
@@ -50,11 +53,9 @@ typedef struct selection_buffers {
 } selection_buffers;
 
 typedef struct pair_state {
+    uint64_t pushed;
     int frame_count;
     int newest;
-    bool motion_ready;
-    bool has_previous;
-    bool has_older;
     bool end_of_stream;
     bool history_stale;
 } pair_state;

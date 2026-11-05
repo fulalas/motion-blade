@@ -14,6 +14,11 @@ static inline int block_index(ivec2 block, mb_grid grid)
     return y * grid.blocks_x + x;
 }
 
+static inline bool is_two_sided(vec4 selected)
+{
+    return (int)selected.z == MB_MODE_TWO_SIDED;
+}
+
 static inline ivec2 block_coord(int index, mb_grid grid)
 {
     return iv2(index % grid.blocks_x, index / grid.blocks_x);
@@ -38,6 +43,11 @@ static inline vec2 block_center(ivec2 block)
 {
     int half = MB_BLOCK_SIZE / 2;
     return v2((float)(block.x * MB_BLOCK_SIZE + half), (float)(block.y * MB_BLOCK_SIZE + half));
+}
+
+static inline vec2 block_corner(ivec2 block, float level_scale)
+{
+    return v2_scale(v2_scale(v2((float)block.x, (float)block.y), (float)MB_BLOCK_SIZE), level_scale);
 }
 
 typedef struct block_taps {
@@ -67,6 +77,11 @@ static inline ivec2 window_origin(ivec2 block)
 static inline ivec2 block_at(vec2 position)
 {
     return iv2_floor(v2_scale(position, 1.0f / MB_BLOCK_SIZE));
+}
+
+static inline vec2 field_at_position(const vec4 *field, vec2 position, mb_grid grid)
+{
+    return v4_xy(field[block_index(block_at(position), grid)]);
 }
 
 static inline float consistency_limit(float threshold, vec2 u)

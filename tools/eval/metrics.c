@@ -4,17 +4,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "samples.h"
+
 enum { BLOCK = 16, SSIM_WINDOW = 8, SSIM_STEP = 4 };
 
 static const double C1 = 6.5025;
 static const double C2 = 58.5225;
-static const double PERFECT_DB = 99.0;
-
-static double decibels(double mse)
-{
-    return mse < 1e-10 ? PERFECT_DB : 10 * log10(255.0 * 255.0 / mse);
-}
-
 double metric_psnr(const uint8_t *a, const uint8_t *b, size_t count)
 {
     double squared = 0;
@@ -22,7 +17,7 @@ double metric_psnr(const uint8_t *a, const uint8_t *b, size_t count)
         int d = a[i] - b[i];
         squared += d * d;
     }
-    return decibels(squared / (double)count);
+    return psnr_decibels(squared / (double)count);
 }
 
 static int descending(const void *x, const void *y)
@@ -61,7 +56,7 @@ double metric_worst_blocks(const uint8_t *a, const uint8_t *b, int width, int he
     double *mse = malloc(sizeof(double) * (size_t)(count > 0 ? count : 1));
     if (!mse || count == 0) {
         free(mse);
-        return PERFECT_DB;
+        return psnr_decibels(0.0);
     }
     for (int by = 0; by < bh; by++) {
         for (int bx = 0; bx < bw; bx++) {
@@ -75,7 +70,7 @@ double metric_worst_blocks(const uint8_t *a, const uint8_t *b, int width, int he
         sum += mse[i];
     }
     free(mse);
-    return decibels(sum / worst);
+    return psnr_decibels(sum / worst);
 }
 
 typedef struct prefix_sums {
@@ -84,7 +79,6 @@ typedef struct prefix_sums {
     int64_t *aa;
     int64_t *bb;
     int64_t *ab;
-    size_t length;
 } prefix_sums;
 
 static void accumulate_rows(prefix_sums *p, const uint8_t *a, const uint8_t *b, int width)
@@ -135,7 +129,7 @@ double metric_ssim(const uint8_t *a, const uint8_t *b, int width, int height)
         return 0;
     }
     prefix_sums p = {
-        storage, storage + length, storage + 2 * length, storage + 3 * length, storage + 4 * length, length,
+        storage, storage + length, storage + 2 * length, storage + 3 * length, storage + 4 * length,
     };
     double sum = 0;
     int count = 0;

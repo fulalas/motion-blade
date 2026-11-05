@@ -148,7 +148,7 @@ float block_dc(float diff_sum)
     return diff_sum * (LEVELS / PIXELS);
 }
 
-float mean_weight(float lo, float hi, float min_abs_dc)
+float mean_weight(mb_mean_removal removal, float min_abs_dc)
 {
-    return smoothstepf(lo, hi, min_abs_dc);
+    return smoothstepf(removal.lo, removal.hi, min_abs_dc);
 }

@@ -35,14 +35,31 @@ int mb_bytes_per_sample(const mb_video_format *format)
     return format->bit_depth > 8 ? 2 : 1;
 }
 
+int mb_shift_up(int value, int shift)
+{
+    return (value + (1 << shift) - 1) >> shift;
+}
+
+mb_rect mb_full_rect(const mb_video_format *format)
+{
+    return (mb_rect){0, 0, format->width, format->height};
+}
+
+mb_rect mb_plane_area(const mb_video_format *format, int plane, mb_rect area)
+{
+    int sx = plane ? format->chroma_shift_x : 0;
+    int sy = plane ? format->chroma_shift_y : 0;
+    return (mb_rect){area.x >> sx, area.y >> sy, mb_shift_up(area.width, sx), mb_shift_up(area.height, sy)};
+}
+
 int mb_chroma_width(const mb_video_format *format)
 {
-    return (format->width + (1 << format->chroma_shift_x) - 1) >> format->chroma_shift_x;
+    return mb_plane_area(format, 1, mb_full_rect(format)).width;
 }
 
 int mb_chroma_height(const mb_video_format *format)
 {
-    return (format->height + (1 << format->chroma_shift_y) - 1) >> format->chroma_shift_y;
+    return mb_plane_area(format, 1, mb_full_rect(format)).height;
 }
 
 bool mb_rect_equal(mb_rect a, mb_rect b)

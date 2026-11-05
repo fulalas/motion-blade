@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "vk_jobs.h"
+#include "vk_pipeline_cache.h"
 
 static const uint32_t SPV_NORMALIZE[] =
 #include "normalize.spv.h"
@@ -73,6 +74,18 @@ static const uint32_t SPV_INTERPOLATE_8_NV[] =
 static const uint32_t SPV_INTERPOLATE_16_NV[] =
 #include "interpolate16nv.spv.h"
     ;
+static const uint32_t SPV_EXTRAPOLATE_8[] =
+#include "extrapolate8.spv.h"
+    ;
+static const uint32_t SPV_EXTRAPOLATE_16[] =
+#include "extrapolate16.spv.h"
+    ;
+static const uint32_t SPV_EXTRAPOLATE_8_NV[] =
+#include "extrapolate8nv.spv.h"
+    ;
+static const uint32_t SPV_EXTRAPOLATE_16_NV[] =
+#include "extrapolate16nv.spv.h"
+    ;
 
 enum { MAX_BINDINGS = 32 };
 
@@ -86,32 +99,37 @@ typedef struct pass_info {
 } pass_info;
 
 #define SPIRV(code) code, sizeof(code)
-#define INTERPOLATE_BINDINGS "SSSSSSBBBIIISSBBBBBBBBBSS"
+#define INTERPOLATE_BINDINGS "SSSSSSBBBIIISSBBBBB"
+#define EXTRAPOLATE_BINDINGS "SSSSSSBBBIIISSBBSS"
 
 static const pass_info PASSES[PASS_COUNT] = {
     [PASS_NORMALIZE] = {SPIRV(SPV_NORMALIZE), "SI", false, 0, "normalize"},
     [PASS_DOWNSAMPLE] = {SPIRV(SPV_DOWNSAMPLE), "SI", false, 0, "downsample"},
-    [PASS_FULL_SEARCH] = {SPIRV(SPV_FULL_SEARCH), "SSB", false, 1, "full_search"},
-    [PASS_ITERATE] = {SPIRV(SPV_ITERATE), "SSBBBBBB", true, 4, "iterate"},
-    [PASS_MEASURE] = {SPIRV(SPV_MEASURE), "SSBB", true, 4, "measure"},
-    [PASS_PROJECT] = {SPIRV(SPV_PROJECT), "BB", false, 64, "project"},
-    [PASS_CROSS_CHECK] = {SPIRV(SPV_CROSS_CHECK), "SSBBBB", true, 64, "cross_check"},
-    [PASS_LOCAL_SEARCH] = {SPIRV(SPV_LOCAL_SEARCH), "SSBBBB", true, 64, "local_search"},
-    [PASS_DECIDE_CUT] = {SPIRV(SPV_DECIDE_CUT), "BB", false, 1, "decide_cut"},
-    [PASS_SELECT] = {SPIRV(SPV_SELECT), "SSSSBBBBBBBBB", true, 4, "select"},
-    [PASS_MEDIAN] = {SPIRV(SPV_MEDIAN), "BB", false, 64, "median"},
-    [PASS_FALLBACK] = {SPIRV(SPV_FALLBACK), "BBBB", false, 64, "fallback"},
-    [PASS_CHROMA_OFFSETS] = {SPIRV(SPV_CHROMA_OFFSETS), "SSSSBB", false, 64, "chroma_offsets"},
-    [PASS_OFFSET_MEDIAN] = {SPIRV(SPV_OFFSET_MEDIAN), "BB", false, 64, "offset_median"},
-    [PASS_GLOBAL_MOTION] = {SPIRV(SPV_GLOBAL_MOTION), "BB", false, 1, "global_motion"},
-    [PASS_PANELS] = {SPIRV(SPV_PANELS), "SSSSSSBB", false, 64, "panels"},
-    [PASS_PANEL_SPREAD] = {SPIRV(SPV_PANEL_SPREAD), "BBBB", false, 64, "panel_spread"},
-    [PASS_SPLIT] = {SPIRV(SPV_SPLIT), "SSBBB", true, 64, "split"},
-    [PASS_BAR_FLAGS] = {SPIRV(SPV_BAR_FLAGS), "SSB", false, 0, "bar_flags"},
+    [PASS_FULL_SEARCH] = {SPIRV(SPV_FULL_SEARCH), "SSW", false, 1, "full_search"},
+    [PASS_ITERATE] = {SPIRV(SPV_ITERATE), "SSBWBBBB", true, 4, "iterate"},
+    [PASS_MEASURE] = {SPIRV(SPV_MEASURE), "SSWW", true, 4, "measure"},
+    [PASS_PROJECT] = {SPIRV(SPV_PROJECT), "BW", false, 64, "project"},
+    [PASS_CROSS_CHECK] = {SPIRV(SPV_CROSS_CHECK), "SSBWBB", true, 64, "cross_check"},
+    [PASS_LOCAL_SEARCH] = {SPIRV(SPV_LOCAL_SEARCH), "SSBWBB", true, 64, "local_search"},
+    [PASS_DECIDE_CUT] = {SPIRV(SPV_DECIDE_CUT), "WW", false, 1, "decide_cut"},
+    [PASS_SELECT] = {SPIRV(SPV_SELECT), "SSSSBBBWBBBBB", true, 4, "select"},
+    [PASS_MEDIAN] = {SPIRV(SPV_MEDIAN), "BW", false, 64, "median"},
+    [PASS_FALLBACK] = {SPIRV(SPV_FALLBACK), "BWBB", false, 64, "fallback"},
+    [PASS_CHROMA_OFFSETS] = {SPIRV(SPV_CHROMA_OFFSETS), "SSSSBW", false, 64, "chroma_offsets"},
+    [PASS_OFFSET_MEDIAN] = {SPIRV(SPV_OFFSET_MEDIAN), "BW", false, 64, "offset_median"},
+    [PASS_GLOBAL_MOTION] = {SPIRV(SPV_GLOBAL_MOTION), "BW", false, 1, "global_motion"},
+    [PASS_PANELS] = {SPIRV(SPV_PANELS), "SSSSSSWB", false, 64, "panels"},
+    [PASS_PANEL_SPREAD] = {SPIRV(SPV_PANEL_SPREAD), "BWBB", false, 64, "panel_spread"},
+    [PASS_SPLIT] = {SPIRV(SPV_SPLIT), "SSBWB", true, 64, "split"},
+    [PASS_BAR_FLAGS] = {SPIRV(SPV_BAR_FLAGS), "SSW", false, 0, "bar_flags"},
     [PASS_INTERPOLATE_8] = {SPIRV(SPV_INTERPOLATE_8), INTERPOLATE_BINDINGS, true, 0, "interpolate"},
     [PASS_INTERPOLATE_16] = {SPIRV(SPV_INTERPOLATE_16), INTERPOLATE_BINDINGS, true, 0, "interpolate"},
     [PASS_INTERPOLATE_8_NV] = {SPIRV(SPV_INTERPOLATE_8_NV), INTERPOLATE_BINDINGS, true, 0, "interpolate"},
     [PASS_INTERPOLATE_16_NV] = {SPIRV(SPV_INTERPOLATE_16_NV), INTERPOLATE_BINDINGS, true, 0, "interpolate"},
+    [PASS_EXTRAPOLATE_8] = {SPIRV(SPV_EXTRAPOLATE_8), EXTRAPOLATE_BINDINGS, true, 0, "extrapolate"},
+    [PASS_EXTRAPOLATE_16] = {SPIRV(SPV_EXTRAPOLATE_16), EXTRAPOLATE_BINDINGS, true, 0, "extrapolate"},
+    [PASS_EXTRAPOLATE_8_NV] = {SPIRV(SPV_EXTRAPOLATE_8_NV), EXTRAPOLATE_BINDINGS, true, 0, "extrapolate"},
+    [PASS_EXTRAPOLATE_16_NV] = {SPIRV(SPV_EXTRAPOLATE_16_NV), EXTRAPOLATE_BINDINGS, true, 0, "extrapolate"},
 };
 
 static VkDescriptorType descriptor_type(char kind)
@@ -173,20 +191,21 @@ static mb_status create_pipeline(mbvk_backend *vk, pipeline *p, const pass_info 
         }
     }
     create.layout = p->layout;
-    VkResult r = vkCreateComputePipelines(vk->device, VK_NULL_HANDLE, 1, &create, NULL, &p->pipeline);
+    VkResult r = vkCreateComputePipelines(vk->device, vk->pipeline_cache, 1, &create, NULL, &p->pipeline);
     vkDestroyShaderModule(vk->device, module, NULL);
     return r == VK_SUCCESS ? MB_SUCCESS : MB_ERROR_DEVICE;
 }
 
-static bool is_interpolate(pass_id pass)
+static bool depends_on_format(pass_id pass)
 {
     return pass >= PASS_INTERPOLATE_8;
 }
 
 mb_status pipelines_create(mbvk_backend *vk)
 {
+    pipeline_cache_open(vk);
     for (int i = 0; i < PASS_COUNT; i++) {
-        if (is_interpolate((pass_id)i)) {
+        if (depends_on_format((pass_id)i)) {
             continue;
         }
         mb_status status = create_pipeline(vk, &vk->pipelines[i], &PASSES[i]);
@@ -217,6 +236,7 @@ void pipelines_destroy(mbvk_backend *vk)
     for (int i = 0; i < PASS_COUNT; i++) {
         destroy_pipeline(vk, &vk->pipelines[i]);
     }
+    pipeline_cache_close(vk);
 }
 
 static const pipeline *ready_pipeline(mbvk_backend *vk, pass_id pass)
@@ -237,6 +257,29 @@ typedef struct descriptor_writes {
     VkDescriptorBufferInfo buffers[MAX_BINDINGS];
 } descriptor_writes;
 
+static bool is_buffer(char kind)
+{
+    return kind == 'B' || kind == 'W';
+}
+
+static resource_use use_of(const mbvk_backend *vk, char kind, const binding *b)
+{
+    if (is_buffer(kind)) {
+        return (resource_use){buffer_handle(b->buffer ? b->buffer : &vk->dummy), kind == 'W'};
+    }
+    return (resource_use){image_handle(b->image ? b->image : &vk->dummy_image), kind == 'I'};
+}
+
+static void wait_for_inputs(mbvk_backend *vk, const char *kinds, const binding *bindings)
+{
+    resource_use uses[MAX_BINDINGS];
+    int count = (int)strlen(kinds);
+    for (int i = 0; i < count; i++) {
+        uses[i] = use_of(vk, kinds[i], &bindings[i]);
+    }
+    jobs_prepare(vk, uses, count);
+}
+
 static void describe(mbvk_backend *vk, descriptor_writes *d, const char *kinds, const binding *bindings)
 {
     int count = (int)strlen(kinds);
@@ -246,12 +289,13 @@ static void describe(mbvk_backend *vk, descriptor_writes *d, const char *kinds, 
         w->dstBinding = (uint32_t)i;
         w->descriptorCount = 1;
         w->descriptorType = descriptor_type(kinds[i]);
-        if (kinds[i] == 'B') {
+        if (is_buffer(kinds[i])) {
             const struct mb_buffer *b = bindings[i].buffer ? bindings[i].buffer : &vk->dummy;
             d->buffers[i] = (VkDescriptorBufferInfo){b->buffer, 0, VK_WHOLE_SIZE};
             w->pBufferInfo = &d->buffers[i];
         } else {
-            d->images[i] = (VkDescriptorImageInfo){vk->sampler, bindings[i].image->view, VK_IMAGE_LAYOUT_GENERAL};
+            const struct mb_image *image = bindings[i].image ? bindings[i].image : &vk->dummy_image;
+            d->images[i] = (VkDescriptorImageInfo){vk->sampler, image->view, VK_IMAGE_LAYOUT_GENERAL};
             w->pImageInfo = &d->images[i];
         }
     }
@@ -264,16 +308,38 @@ void pipeline_dispatch(mbvk_backend *vk, const dispatch_desc *desc)
         return;
     }
     const char *kinds = PASSES[desc->pass].bindings;
+    if (desc->binding_count != (int)strlen(kinds)) {
+        mb_log(&vk->logger, MB_LOG_ERROR, "%s got %d bindings, needs %d", PASSES[desc->pass].name, desc->binding_count,
+               (int)strlen(kinds));
+        vk->healthy = false;
+        return;
+    }
     descriptor_writes d;
     describe(vk, &d, kinds, desc->bindings);
-    VkCommandBuffer commands = jobs_commands(vk);
+    wait_for_inputs(vk, kinds, desc->bindings);
+    VkCommandBuffer commands = jobs_tracked_commands(vk);
     vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_COMPUTE, p->pipeline);
     vk->push_descriptor_set(commands, VK_PIPELINE_BIND_POINT_COMPUTE, p->layout, 0, (uint32_t)strlen(kinds), d.writes);
     vkCmdPushConstants(commands, p->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, (uint32_t)desc->push.bytes,
                        desc->push.data);
     vkCmdDispatch(commands, desc->groups_x, desc->groups_y, 1);
-    jobs_barrier(vk);
+    if (vk->prof.enabled) {
+        jobs_barrier(vk);
+    }
     jobs_timestamp(vk, desc->name ? desc->name : PASSES[desc->pass].name);
+}
+
+pass_id warp_variant(pass_id first, bool interleaved, bool sixteen_bit)
+{
+    return (pass_id)(first + (interleaved ? 2 : 0) + (sixteen_bit ? 1 : 0));
+}
+
+void pipelines_prepare(mbvk_backend *vk, const mb_video_format *format)
+{
+    bool interleaved = format->interleaved_chroma;
+    bool sixteen_bit = mb_bytes_per_sample(format) == 2;
+    ready_pipeline(vk, warp_variant(PASS_INTERPOLATE_8, interleaved, sixteen_bit));
+    ready_pipeline(vk, warp_variant(PASS_EXTRAPOLATE_8, interleaved, sixteen_bit));
 }
 
 uint32_t pipeline_groups(pass_id pass, int items)

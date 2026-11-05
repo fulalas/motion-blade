@@ -258,35 +258,62 @@ static void tee_split(void *self, const mb_split_pass *pass)
     check_buffer(t, "split", pass->cells, COMPARE_FIELD);
 }
 
+static mb_warp warp_side(const mb_warp *warp, int side)
+{
+    mb_warp w = *warp;
+    w.frames = pair_side(warp->frames, side);
+    w.a_level = IMAGE(warp->a_level);
+    w.b_level = IMAGE(warp->b_level);
+    w.output = planes_side(warp->output, side);
+    w.stats = BUFFER(warp->stats);
+    return w;
+}
+
 static void tee_interpolate(void *self, const mb_interpolate_pass *pass)
 {
     tee *t = self;
     for (int side = 0; side < SIDES; side++) {
         mb_interpolate_pass p = *pass;
-        p.frames = pair_side(pass->frames, side);
-        p.a_level = IMAGE(pass->a_level);
-        p.b_level = IMAGE(pass->b_level);
-        p.output = planes_side(pass->output, side);
+        p.warp = warp_side(&pass->warp, side);
         p.cells = BUFFER(pass->cells);
         p.forward = BUFFER(pass->forward);
         p.backward = BUFFER(pass->backward);
-        p.stats = BUFFER(pass->stats);
         p.fallback = BUFFER(pass->fallback);
         p.offsets = BUFFER(pass->offsets);
         p.panels = BUFFER(pass->panels);
         p.global_motion = BUFFER(pass->global_motion);
-        p.extrapolation = (mb_extrapolation){
-            {BUFFER(pass->extrapolation.past.field), BUFFER(pass->extrapolation.past.stats),
-             IMAGE(pass->extrapolation.past.neighbour_level)},
-            {BUFFER(pass->extrapolation.next.field), BUFFER(pass->extrapolation.next.stats),
-             IMAGE(pass->extrapolation.next.neighbour_level)},
-        };
         OPS(t, side)->interpolate(SELF(t, side), &p);
+    }
+}
+
+static mb_extrapolation_side extrapolation_side(mb_extrapolation_side from, int side)
+{
+    return (mb_extrapolation_side){BUFFER(from.field), BUFFER(from.stats), IMAGE(from.neighbour_level)};
+}
+
+static void tee_extrapolate(void *self, const mb_extrapolate_pass *pass)
+{
+    tee *t = self;
+    for (int side = 0; side < SIDES; side++) {
+        mb_extrapolate_pass p = *pass;
+        p.warp = warp_side(&pass->warp, side);
+        p.extrapolation.past = extrapolation_side(pass->extrapolation.past, side);
+        p.extrapolation.next = extrapolation_side(pass->extrapolation.next, side);
+        OPS(t, side)->extrapolate(SELF(t, side), &p);
+    }
+}
+
+static void tee_prepare(void *self, const mb_video_format *format)
+{
+    tee *t = self;
+    for (int side = 0; side < SIDES; side++) {
+        OPS(t, side)->prepare(SELF(t, side), format);
     }
 }
 
 const mb_backend_ops TEE_OPS = {
     .destroy = tee_destroy,
+    .prepare = tee_prepare,
     .create_image = tee_create_image,
     .destroy_image = tee_destroy_image,
     .create_buffer = tee_create_buffer,
@@ -330,4 +357,5 @@ const mb_backend_ops TEE_OPS = {
     .panel_spread = tee_panel_spread,
     .split = tee_split,
     .interpolate = tee_interpolate,
+    .extrapolate = tee_extrapolate,
 };

@@ -44,7 +44,6 @@ typedef struct mb_cut_params {
 } mb_cut_params;
 
 typedef struct mb_select_params {
-    int lookahead;
     float consistency_threshold;
     float penalty_inconsistent;
     float foreground_bonus;

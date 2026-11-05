@@ -36,7 +36,7 @@ static vec4 repair_block(const mb_cross_check_pass *pass, int id, vec4 current, 
     search_state_begin(&state, &pass->origin->texture, block_coord(id, pass->grid));
     vec2 v = v4_xy(current);
     float original = search_state_sad_exact(&state, &pass->target->texture, v).sad;
-    state.best = (best_match){original + pass->length_penalty * v2_l1(v), original, 0.0f, v};
+    search_state_seed(&state, v, (sad_result){original, 0.0f}, pass->length_penalty);
     bool moved = false;
     for (int k = 0; k < list->count; k++) {
         vec2 u = list->vectors[k];

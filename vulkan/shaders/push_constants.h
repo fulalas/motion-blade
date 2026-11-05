@@ -241,6 +241,24 @@ struct interpolate_push {
     float nearest_lo;
     float nearest_hi;
     float panel_switch;
+};
+
+struct extrapolate_push {
+    int32_t width;
+    int32_t height;
+    int32_t blocks_x;
+    int32_t blocks_y;
+    int32_t chroma_width;
+    int32_t chroma_height;
+    int32_t shift_x;
+    int32_t shift_y;
+    int32_t base_level;
+    float t;
+    float softness;
+    float penalty_unconfirmed;
+    float consistency;
+    float max_value;
+    float quant_step;
     int32_t extrapolate;
 };
 

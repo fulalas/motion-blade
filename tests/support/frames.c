@@ -4,23 +4,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-static bool alloc_planar(test_frame *frame, int width, int height, int sample_bytes)
-{
-    size_t luma = (size_t)width * (size_t)height * (size_t)sample_bytes;
-    int stride = width * sample_bytes;
-    frame->format = (mb_video_format){width, height, 8 * sample_bytes, 1, 1, false, 0};
-    frame->storage = calloc(1, luma * 3 / 2);
-    if (!frame->storage) {
-        return false;
-    }
-    frame->image = (mb_host_image){{frame->storage, frame->storage + luma, frame->storage + luma + luma / 4},
-                                   {stride, stride / 2, stride / 2}};
-    return true;
-}
+#include "pixel_formats.h"
+#include "samples.h"
 
 bool test_frame_alloc(test_frame *frame, int width, int height)
 {
-    return alloc_planar(frame, width, height, 1);
+    frame->format = test_format_video(test_format_default(), width, height);
+    frame->storage = calloc(1, (size_t)width * (size_t)height * 3 / 2);
+    if (!frame->storage) {
+        return false;
+    }
+    frame->image = yuv420_image(frame->storage, width, height);
+    return true;
 }
 
 void test_frame_free(test_frame *frame)
@@ -42,11 +37,6 @@ static double texture_value(int x, int y, int seed)
     double smooth = 60.0 * sin(0.23 * x + seed) * cos(0.19 * y - seed) + 30.0 * sin(0.07 * (x + y));
     unsigned cell = scramble((unsigned)(x >> 3) * 73856093u ^ (unsigned)(y >> 3) * 19349663u ^ (unsigned)seed);
     return 128.0 + smooth + (double)(cell % 40) - 20.0;
-}
-
-static uint8_t clamp_byte(double v)
-{
-    return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : lrint(v));
 }
 
 void paint_texture(test_frame *frame, test_motion motion)
@@ -91,8 +81,7 @@ double luma_psnr(const test_frame *a, const test_frame *b, mb_rect area)
             squared += d * d;
         }
     }
-    double mse = squared / ((double)area.width * area.height);
-    return mse < 1e-10 ? 99.0 : 10 * log10(255.0 * 255.0 / mse);
+    return psnr_decibels(squared / ((double)area.width * area.height));
 }
 
 bool luma_rows_equal(const test_frame *a, const test_frame *b, int first_row, int rows)
@@ -141,50 +130,4 @@ void paint_cuts_in_a_row(test_frame *frame, int index)
     int seed = SEEDS[shot < 3 ? shot : 3];
     paint_texture(frame, (test_motion){3 * index, index, seed});
     paint_box(frame, frame->format.width - 60 - 5 * index, 40 + index, seed + 1);
-}
-
-bool test_frame_alloc_nv12(test_frame *frame, int width, int height)
-{
-    if (!test_frame_alloc(frame, width, height)) {
-        return false;
-    }
-    frame->format.interleaved_chroma = true;
-    frame->image.planes[2] = NULL;
-    frame->image.strides[1] = width;
-    frame->image.strides[2] = 0;
-    return true;
-}
-
-void copy_to_nv12(const test_frame *planar, test_frame *nv12)
-{
-    int w = planar->format.width;
-    int h = planar->format.height;
-    memcpy(nv12->image.planes[0], planar->image.planes[0], (size_t)w * (size_t)h);
-    for (int y = 0; y < h / 2; y++) {
-        for (int x = 0; x < w / 2; x++) {
-            nv12->image.planes[1][y * w + 2 * x] = planar->image.planes[1][y * (w / 2) + x];
-            nv12->image.planes[1][y * w + 2 * x + 1] = planar->image.planes[2][y * (w / 2) + x];
-        }
-    }
-}
-
-bool test_frame_alloc_wide(test_frame *frame, int width, int height)
-{
-    return alloc_planar(frame, width, height, 2);
-}
-
-static void widen_plane(const uint8_t *from, uint8_t *to, size_t count, int shift)
-{
-    for (size_t i = 0; i < count; i++) {
-        uint16_t v = (uint16_t)(from[i] << shift);
-        memcpy(to + 2 * i, &v, sizeof(v));
-    }
-}
-
-void copy_to_wide(const test_frame *planar, test_frame *wide, int shift)
-{
-    size_t luma = (size_t)planar->format.width * (size_t)planar->format.height;
-    widen_plane(planar->image.planes[0], wide->image.planes[0], luma, shift);
-    widen_plane(planar->image.planes[1], wide->image.planes[1], luma / 4, shift);
-    widen_plane(planar->image.planes[2], wide->image.planes[2], luma / 4, shift);
 }

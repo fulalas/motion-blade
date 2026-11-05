@@ -10,15 +10,14 @@ static float inconsistency(const mb_fallback_pass *pass, ivec2 block)
 {
     int index = block_index(block, pass->grid);
     vec4 selected = vec4s(pass->selection)[index];
-    if (selected.z != 0.0f) {
+    if (!is_two_sided(selected)) {
         return 0.0f;
     }
     vec2 u = v4_xy(selected);
     ivec2 b = block_coord(index, pass->grid);
     vec2 c = block_center(b);
-    vec2 forward = v4_xy(vec4s(pass->forward)[block_index(block_at(v2_sub(c, v2_scale(u, pass->t))), pass->grid)]);
-    vec2 backward =
-        v4_xy(vec4s(pass->backward)[block_index(block_at(v2_add(c, v2_scale(u, 1.0f - pass->t))), pass->grid)]);
+    vec2 forward = field_at_position(vec4s(pass->forward), v2_sub(c, v2_scale(u, pass->t)), pass->grid);
+    vec2 backward = field_at_position(vec4s(pass->backward), v2_add(c, v2_scale(u, 1.0f - pass->t)), pass->grid);
     float ia = v2_l1(v2_sub(forward, u));
     float ib = v2_l1(v2_add(backward, u));
     float relative = fminf(ia, ib) / (1.0f + 0.1f * v2_l1(u));

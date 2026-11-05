@@ -47,7 +47,7 @@ static float brightness_spread(const uint32_t *stats, int direction, float block
 {
     int slot = direction * 2;
     float mean = (float)stats[MB_STAT_MEANS + slot] / blocks;
-    return sqrtf(fmaxf((float)stats[MB_STAT_SQUARES + slot] * 16.0f / blocks - mean * mean, 0.0f));
+    return sqrtf(fmaxf((float)stats[MB_STAT_SQUARES + slot] * (float)MB_STAT_SCALE / blocks - mean * mean, 0.0f));
 }
 
 static float contrast_factor(const mb_cut_pass *pass, const uint32_t *stats)

@@ -4,6 +4,7 @@
 #include "common/texture.h"
 #include "common/vec.h"
 #include "motionblade/layout.h"
+#include "motionblade/passes.h"
 
 typedef struct window {
     float rows[MB_WINDOW_SIZE][MB_WINDOW_SIZE];
@@ -28,6 +29,6 @@ float window_sum(const window *w);
 float window_texture(const window *w, const window *below);
 float cluster_sum(const float lanes[MB_WINDOW_SIZE]);
 float block_dc(float diff_sum);
-float mean_weight(float lo, float hi, float min_abs_dc);
+float mean_weight(mb_mean_removal removal, float min_abs_dc);
 
 #endif

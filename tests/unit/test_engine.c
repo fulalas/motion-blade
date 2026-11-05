@@ -1,5 +1,6 @@
 #include "check.h"
 #include "frames.h"
+#include "pixel_formats.h"
 #include "motionblade/cpu_backend.h"
 #include "motionblade/engine.h"
 
@@ -8,7 +9,7 @@ enum { WIDTH = 192, HEIGHT = 128, MARGIN = 24 };
 static mb_engine *cpu_engine(int width, int height)
 {
     mb_engine_config config = {
-        .format = {width, height, 8, 1, 1, false, 0},
+        .format = test_format_video(test_format_default(), width, height),
         .logger = mb_logger_stderr(MB_LOG_WARNING),
         .params = mb_params_default(),
     };

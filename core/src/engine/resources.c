@@ -90,21 +90,30 @@ void frames_destroy(const mb_backend *backend, frame_slot frames[FRAME_RING])
     }
 }
 
-static void create_fields(allocator *a, motion_fields *f, const geometry *g)
+static size_t field_bytes(const geometry *g, int level)
+{
+    return (size_t)mb_grid_block_count(g->grids[level]) * FIELD_BYTES;
+}
+
+static void create_pair(allocator *a, pair_motion *m, const geometry *g)
 {
     for (int level = g->base_level; level < g->level_count; level++) {
-        size_t bytes = (size_t)mb_grid_block_count(g->grids[level]) * FIELD_BYTES;
-        f->forward[level] = new_buffer(a, bytes);
-        f->backward[level] = new_buffer(a, bytes);
-        f->previous_forward[level] = new_buffer(a, bytes);
-        f->previous_backward[level] = new_buffer(a, bytes);
-        f->scratch[level] = new_buffer(a, bytes);
+        m->forward[level] = new_buffer(a, field_bytes(g, level));
+        m->backward[level] = new_buffer(a, field_bytes(g, level));
+    }
+    m->stats = new_buffer(a, STATS_BYTES);
+    m->ready = false;
+}
+
+static void create_fields(allocator *a, motion_fields *f, const geometry *g)
+{
+    for (int k = 0; k < PAIR_RING; k++) {
+        create_pair(a, &f->pairs[k], g);
+    }
+    for (int level = g->base_level; level < g->level_count; level++) {
+        f->scratch[level] = new_buffer(a, field_bytes(g, level));
     }
     size_t blocks = (size_t)geometry_base_blocks(g);
-    f->older_backward = new_buffer(a, blocks * FIELD_BYTES);
-    f->stats = new_buffer(a, STATS_BYTES);
-    f->previous_stats = new_buffer(a, STATS_BYTES);
-    f->older_stats = new_buffer(a, STATS_BYTES);
     f->history = new_buffer(a, HISTORY_BYTES);
     f->cross_keys = new_buffer(a, blocks * KEY_BYTES);
 }
@@ -134,19 +143,24 @@ mb_status buffers_create(mb_engine *engine)
     return a.status;
 }
 
-static void destroy_fields(const mb_backend *backend, motion_fields *f)
+static void destroy_pair(const mb_backend *backend, pair_motion *m)
 {
     for (int level = 0; level < MB_MAX_LEVELS; level++) {
-        free_buffer(backend, &f->forward[level]);
-        free_buffer(backend, &f->backward[level]);
-        free_buffer(backend, &f->previous_forward[level]);
-        free_buffer(backend, &f->previous_backward[level]);
+        free_buffer(backend, &m->forward[level]);
+        free_buffer(backend, &m->backward[level]);
+    }
+    free_buffer(backend, &m->stats);
+    m->ready = false;
+}
+
+static void destroy_fields(const mb_backend *backend, motion_fields *f)
+{
+    for (int k = 0; k < PAIR_RING; k++) {
+        destroy_pair(backend, &f->pairs[k]);
+    }
+    for (int level = 0; level < MB_MAX_LEVELS; level++) {
         free_buffer(backend, &f->scratch[level]);
     }
-    free_buffer(backend, &f->older_backward);
-    free_buffer(backend, &f->stats);
-    free_buffer(backend, &f->previous_stats);
-    free_buffer(backend, &f->older_stats);
     free_buffer(backend, &f->history);
     free_buffer(backend, &f->cross_keys);
 }

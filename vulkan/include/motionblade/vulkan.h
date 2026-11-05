@@ -75,6 +75,7 @@ mb_status mbvk_export_host_image(mbvk_backend *vk, const mb_host_image *source, 
 mb_device_frame mbvk_export_target(mbvk_export_buffer *buffer);
 mb_status mbvk_export_describe(mbvk_backend *vk, mbvk_export_buffer *buffer, mbvk_dmabuf_output *output);
 void mbvk_export_cancel(mbvk_backend *vk, mbvk_export_buffer *buffer);
+void mbvk_export_read(mbvk_backend *vk, const mbvk_export_buffer *buffer, const mb_host_image *target);
 void mbvk_export_release(void *pool, int index);
 
 #endif

@@ -121,7 +121,7 @@ void check_buffer(tee *t, const char *name, mb_buffer *buffer, compare_kind kind
 
 static size_t image_values(const mb_image *image)
 {
-    return (size_t)image->width * (size_t)image->height * (size_t)mb_texel_channels(image->format);
+    return mb_texel_count((mb_image_desc){image->width, image->height, image->format});
 }
 
 void check_image(tee *t, const char *name, mb_image *image)

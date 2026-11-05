@@ -5,7 +5,7 @@
 #include "reference/cpu_resources.h"
 #include "reference/kernels.h"
 
-static const float STAT_UNIT = 1.0f / 16.0f;
+static const float STAT_UNIT = (float)(1.0 / MB_STAT_SCALE);
 
 static uint32_t rounded(float value)
 {
@@ -32,7 +32,7 @@ static void measure_block(const mb_measure_pass *pass, int id)
     window y;
     window_load_texels(&x, &pass->origin->texture, origin);
     window_load_exact(&y, &pass->target->texture, origin, v4_xy(field[id]));
-    float weight = mean_weight(pass->mean_removal.lo, pass->mean_removal.hi, fabsf(field[id].w));
+    float weight = mean_weight(pass->mean_removal, fabsf(field[id].w));
     sad_result r = window_zsad(&x, &y, weight);
     float block_mean = window_sum(&x) * (255.0f / 256.0f);
     field[id] = (vec4){field[id].x, field[id].y, r.sad, block_dc(r.diff_sum)};

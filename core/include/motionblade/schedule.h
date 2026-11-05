@@ -46,6 +46,7 @@ typedef struct mb_schedule mb_schedule;
 mb_schedule *mb_schedule_create(const mb_schedule_config *config, mb_action_sink sink);
 void mb_schedule_destroy(mb_schedule *schedule);
 void mb_schedule_set_factor(mb_schedule *schedule, int factor);
+void mb_schedule_set_capacity(mb_schedule *schedule, int max_pending);
 int mb_schedule_factor(const mb_schedule *schedule);
 void mb_schedule_frame(mb_schedule *schedule, mb_timed_frame frame, double display_fps);
 void mb_schedule_end(mb_schedule *schedule, double display_fps);

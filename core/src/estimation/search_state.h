@@ -22,6 +22,9 @@ void search_state_begin(search_state *state, const ref_texture *origin, ivec2 bl
 sad_result search_state_sad_hardware(const search_state *state, const ref_texture *target, vec2 v);
 sad_result search_state_sad_exact(const search_state *state, const ref_texture *target, vec2 v);
 void search_state_consider(search_state *state, vec2 v, sad_result r, float cost);
+void search_state_try(search_state *state, const ref_texture *target, vec2 v, float penalty,
+                      float length_penalty);
+void search_state_seed(search_state *state, vec2 v, sad_result r, float length_penalty);
 vec4 search_state_result(const search_state *state);
 bool search_accepts(const mb_acceptance *rule, float sad, float original);
 

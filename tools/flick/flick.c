@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "samples.h"
+#include "y4m.h"
+
 enum { FADE_FRAMES = 40, FLASH_PERIOD = 20, FLASH_PEAK = 10 };
 
 typedef enum light_mode {
@@ -25,11 +28,6 @@ typedef struct tint {
     double v;
 } tint;
 
-static unsigned char clip_byte(double v)
-{
-    return v < 0 ? 0 : v > 255 ? 255 : (unsigned char)lrint(v);
-}
-
 static bool parse_mode(const char *name, light_mode *mode)
 {
     static const char *const NAMES[] = {"flicker", "fade", "flash"};
@@ -49,15 +47,10 @@ static bool read_header(FILE *in, FILE *out, clip *c)
         return false;
     }
     fputs(header, out);
-    char *w = strstr(header, " W");
-    char *h = strstr(header, " H");
-    char *colour = strstr(header, " C");
-    c->width = w ? atoi(w + 2) : 0;
-    c->height = h ? atoi(h + 2) : 0;
-    bool bad = colour && (strncmp(colour + 2, "420", 3) || strstr(colour, "p1"));
+    bool valid = y4m_frame_size(header, &c->width, &c->height);
     c->luma = (size_t)c->width * (size_t)c->height;
     c->frame = c->luma * 3 / 2;
-    return c->width > 0 && c->height > 0 && c->width % 2 == 0 && c->height % 2 == 0 && !bad;
+    return valid;
 }
 
 static void light_falloff(float *weights, const clip *c, light_mode mode)
@@ -76,10 +69,10 @@ static void fade(unsigned char *frame, const clip *c, int n)
 {
     double gain = fmax(1.0 - 0.8 * n / FADE_FRAMES, 0.2);
     for (size_t i = 0; i < c->luma; i++) {
-        frame[i] = clip_byte(16 + (frame[i] - 16) * gain);
+        frame[i] = clamp_byte(16 + (frame[i] - 16) * gain);
     }
     for (size_t i = c->luma; i < c->frame; i++) {
-        frame[i] = clip_byte(128 + (frame[i] - 128) * gain);
+        frame[i] = clamp_byte(128 + (frame[i] - 128) * gain);
     }
 }
 
@@ -101,15 +94,15 @@ typedef struct lighting {
 static void light(unsigned char *frame, const clip *c, lighting l)
 {
     for (size_t i = 0; i < c->luma; i++) {
-        frame[i] = clip_byte(frame[i] + l.strength * l.t.y * l.weights[i]);
+        frame[i] = clamp_byte(frame[i] + l.strength * l.t.y * l.weights[i]);
     }
     for (int y = 0; y < c->height / 2; y++) {
         for (int x = 0; x < c->width / 2; x++) {
             float w = l.weights[2 * y * c->width + 2 * x];
             unsigned char *u = frame + c->luma + y * (c->width / 2) + x;
             unsigned char *v = u + c->luma / 4;
-            *u = clip_byte(*u + l.strength * l.t.u * w);
-            *v = clip_byte(*v + l.strength * l.t.v * w);
+            *u = clamp_byte(*u + l.strength * l.t.u * w);
+            *v = clamp_byte(*v + l.strength * l.t.v * w);
         }
     }
 }

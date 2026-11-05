@@ -13,7 +13,7 @@ enum { SUBTEXEL_STEPS = 256 };
 bool ref_texture_alloc(ref_texture *texture, const mb_image_desc *desc)
 {
     int channels = mb_texel_channels(desc->format);
-    size_t count = (size_t)desc->width * (size_t)desc->height * (size_t)channels;
+    size_t count = mb_texel_count(*desc);
     float *texels = calloc(count ? count : 1, sizeof(float));
     *texture = (ref_texture){desc->width, desc->height, channels, desc->format, texels};
     return texture->texels != NULL;

@@ -45,7 +45,8 @@ static void put_vector(FILE *file, float x, float y)
 void dump_fields(mb_engine *engine, const char *path, int width, int height)
 {
     FILE *file = fopen(path, "wb");
-    float *vectors = malloc(sizeof(float) * 4 * (size_t)((width + 7) / 8) * (size_t)((height + 7) / 8));
+    float *vectors = malloc(sizeof(float) * 4 * (size_t)((width + MB_BLOCK_SIZE - 1) / MB_BLOCK_SIZE) *
+                                   (size_t)((height + MB_BLOCK_SIZE - 1) / MB_BLOCK_SIZE));
     if (!file || !vectors) {
         fprintf(stderr, "cannot write %s\n", path);
         free(vectors);

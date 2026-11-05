@@ -8,18 +8,12 @@ typedef struct pair_choice {
     int b;
     int c;
     int z;
-    mb_buffer *forward;
-    mb_buffer *backward;
-    mb_buffer *next_forward;
-    mb_buffer *previous_backward;
-    mb_buffer *current_stats;
-    mb_buffer *previous_stats;
-    mb_buffer *next_stats;
-    bool lookahead;
-    bool past;
+    const pair_motion *current;
+    const pair_motion *next;
+    const pair_motion *past;
 } pair_choice;
 
-pair_choice choose_pair(const mb_engine *engine, bool lookahead);
+pair_choice choose_pair(const mb_engine *engine, int end);
 void record_interpolation(mb_engine *engine, const pair_choice *pair, double t);
 
 #endif

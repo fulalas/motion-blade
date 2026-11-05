@@ -36,12 +36,16 @@
 #include "motionblade/schedule.h"
 #include "motionblade/vulkan.h"
 
+#include "vf_motionblade_format.h"
 #include "vf_motionblade_pulldown.h"
 
 #define MAX_QUEUE 24
+#define PUSH_HISTORY 4
 #define DISPLAY_FPS_REFRESH_SECONDS 10
 
 enum { ZEROCOPY_AUTO, ZEROCOPY_DRM, ZEROCOPY_VULKAN, ZEROCOPY_NO };
+
+enum output_path { OUTPUT_HOST, OUTPUT_DMABUF, OUTPUT_VULKAN };
 
 struct opts {
     int factor;
@@ -54,8 +58,14 @@ struct opts {
 struct queued_frame {
     struct mp_frame frame;
     bool on_gpu;
-    bool synced;
+    bool real;
+    enum output_path path;
     mbvk_export_buffer *export_buffer;
+};
+
+struct pushed_frame {
+    struct mp_image *image;
+    uint64_t id;
 };
 
 struct hw_map {
@@ -79,6 +89,8 @@ struct priv {
     int w;
     int h;
     struct hw_map maps[2];
+    struct pushed_frame pushed[PUSH_HISTORY];
+    int push_count;
     struct queued_frame *queue;
     int queued;
     int on_gpu;
@@ -88,6 +100,8 @@ struct priv {
     uint32_t fourcc;
     bool hw_failed;
     bool export_warned;
+    bool skip_warned;
+    enum output_path output;
     struct AVBufferRef *vk_frames;
 };
 
@@ -101,22 +115,40 @@ static bool zerocopy_allows(struct priv *p, int mode)
     return p->opts->zerocopy == ZEROCOPY_AUTO || p->opts->zerocopy == mode;
 }
 
-static mb_host_image host_image(struct mp_image *mpi)
-{
-    mb_host_image image = {{NULL}, {0}};
-    for (int i = 0; i < 3 && i < mpi->num_planes; i++) {
-        image.planes[i] = mpi->planes[i];
-        image.strides[i] = mpi->stride[i];
-    }
-    return image;
-}
-
 static void drop_maps(struct priv *p)
 {
     for (int i = 0; i < 2; i++) {
         mp_image_unrefp(&p->maps[i].image);
         p->maps[i].key = 0;
     }
+}
+
+static void remember_push(struct priv *p, struct mp_image *mpi, uint64_t id)
+{
+    struct pushed_frame *slot = &p->pushed[p->push_count % PUSH_HISTORY];
+    mp_image_unrefp(&slot->image);
+    *slot = (struct pushed_frame){mp_image_new_ref(mpi), id};
+    p->push_count++;
+}
+
+static void forget_pushes(struct priv *p)
+{
+    for (int i = 0; i < PUSH_HISTORY; i++) {
+        mp_image_unrefp(&p->pushed[i].image);
+    }
+    p->push_count = 0;
+}
+
+static bool pushed_id(const struct priv *p, struct mp_image *mpi, uint64_t *id)
+{
+    for (int i = 0; i < PUSH_HISTORY; i++) {
+        const struct pushed_frame *f = &p->pushed[i];
+        if (f->image && f->image->planes[0] == mpi->planes[0]) {
+            *id = f->id;
+            return true;
+        }
+    }
+    return false;
 }
 
 static struct mp_image *download(struct priv *p, struct mp_image *mpi)
@@ -139,7 +171,18 @@ static void enqueue(struct priv *p, struct queued_frame entry)
 
 static void enqueue_plain(struct priv *p, struct mp_frame frame)
 {
-    enqueue(p, (struct queued_frame){frame, false, false, NULL});
+    enqueue(p, (struct queued_frame){frame, false, false, OUTPUT_HOST, NULL});
+}
+
+static void choose_output(struct priv *p)
+{
+    p->output = p->vk_frames && !p->hw_failed ? OUTPUT_VULKAN : p->drm_frames ? OUTPUT_DMABUF : OUTPUT_HOST;
+}
+
+static void mark_hw_failed(struct priv *p)
+{
+    p->hw_failed = true;
+    choose_output(p);
 }
 
 static void warn_export(struct priv *p, const char *what)
@@ -333,7 +376,7 @@ static bool push_vaapi(struct priv *p, struct mp_image *mpi)
     mb_device_frame frame = mbvk_dmabuf_frame(&in);
     if (planes != 2 || mb_engine_push_device(p->engine, &frame) != MB_SUCCESS) {
         talloc_free(mapped);
-        p->hw_failed = true;
+        mark_hw_failed(p);
         return false;
     }
     remember_map(p, mpi, mapped);
@@ -471,8 +514,9 @@ static bool push_vulkan(struct priv *p, struct mp_image *mpi)
     return ok;
 }
 
-static struct mp_image *submit_vulkan(struct priv *p, struct mp_image *ref, double t)
+static struct mp_image *submit_vulkan(struct priv *p, struct mp_image *ref, double t, mbvk_export_buffer **buffer)
 {
+    *buffer = NULL;
     AVFrame *fr = av_frame_alloc();
     struct mp_image *out = NULL;
     if (fr && av_hwframe_get_buffer(p->vk_frames, fr, 0) >= 0) {
@@ -507,6 +551,11 @@ static const char *vulkan_device_name(struct priv *p)
             return *(char **)((char *)p->vk_opts_cache->opts + vulkan_conf.opts[i].offset);
         }
     }
+    return NULL;
+}
+#else
+static struct mp_image *submit_vulkan(struct priv *p, struct mp_image *ref, double t, mbvk_export_buffer **buffer)
+{
     return NULL;
 }
 #endif
@@ -567,43 +616,113 @@ static mb_engine *create_shared_engine(struct mp_filter *f, struct mp_image *mpi
 }
 #endif
 
-static void finish_export(struct priv *p, struct queued_frame *e)
+static struct mp_image *copy_export(struct priv *p, mbvk_export_buffer *buffer, struct mp_image *ref)
 {
-    struct mp_image *ref = e->frame.data;
-    mb_frame_report report;
-    mbvk_dmabuf_output out;
-    struct mp_image *img = NULL;
-    if (mb_engine_finish_device(p->engine, &report) != MB_SUCCESS) {
-        mbvk_export_cancel(p->vk, e->export_buffer);
-    } else if (mbvk_export_describe(p->vk, e->export_buffer, &out) == MB_SUCCESS) {
-        img = drm_image(p, &out, ref);
+    struct mp_image *sw = mp_image_pool_get(p->pool, p->imgfmt, p->w, p->h);
+    if (!sw) {
+        return NULL;
     }
-    e->export_buffer = NULL;
-    if (img) {
-        talloc_free(ref);
-    } else {
-        warn_export(p, "could not export an interpolated frame");
-        img = download(p, ref);
-    }
-    e->frame = img ? MAKE_FRAME(MP_FRAME_VIDEO, img) : MP_NO_FRAME;
+    mb_host_image target = mb_mpv_host_image(sw);
+    mbvk_export_read(p->vk, buffer, &target);
+    mp_image_copy_attributes(sw, ref);
+    return sw;
 }
 
-static void finish_host(struct priv *p, struct queued_frame *e)
+static struct mp_image *shared_image(struct priv *p, mbvk_export_buffer *buffer, struct mp_image *ref)
 {
-    mb_host_image target = host_image(e->frame.data);
-    mb_frame_report report;
-    mb_engine_retrieve(p->engine, &target, &report);
+    mbvk_dmabuf_output out;
+    if (mbvk_export_describe(p->vk, buffer, &out) != MB_SUCCESS) {
+        return NULL;
+    }
+    return drm_image(p, &out, ref);
 }
+
+static struct mp_image *exported_image(struct priv *p, mbvk_export_buffer *buffer, struct mp_image *ref)
+{
+    struct mp_image *img = shared_image(p, buffer, ref);
+    if (!img) {
+        warn_export(p, "could not export an interpolated frame");
+        img = copy_export(p, buffer, ref);
+    }
+    return img;
+}
+
+static bool finish_export(struct priv *p, struct queued_frame *e)
+{
+    mbvk_export_buffer *buffer = e->export_buffer;
+    mb_frame_report report;
+    e->export_buffer = NULL;
+    if (mb_engine_finish_device(p->engine, &report) != MB_SUCCESS) {
+        mbvk_export_cancel(p->vk, buffer);
+        return e->real;
+    }
+    struct mp_image *img = e->real ? shared_image(p, buffer, e->frame.data) : exported_image(p, buffer, e->frame.data);
+    if (!img) {
+        return e->real;
+    }
+    mp_frame_unref(&e->frame);
+    e->frame = MAKE_FRAME(MP_FRAME_VIDEO, img);
+    return true;
+}
+
+static bool finish_host(struct priv *p, struct queued_frame *e)
+{
+    mb_host_image target = mb_mpv_host_image(e->frame.data);
+    mb_frame_report report;
+    return mb_engine_retrieve(p->engine, &target, &report) == MB_SUCCESS;
+}
+
+static bool finish_vulkan(struct priv *p, struct queued_frame *e)
+{
+    mb_frame_report report;
+    return mb_engine_finish_device(p->engine, &report) == MB_SUCCESS;
+}
+
+static struct mp_image *submit_host(struct priv *p, struct mp_image *ref, double t, mbvk_export_buffer **buffer)
+{
+    *buffer = NULL;
+    struct mp_image *out = mp_image_pool_get(p->pool, p->imgfmt, p->w, p->h);
+    if (!out || mb_engine_submit(p->engine, t) != MB_SUCCESS) {
+        talloc_free(out);
+        return NULL;
+    }
+    mp_image_copy_attributes(out, ref);
+    return out;
+}
+
+static struct mp_image *submit_export(struct priv *p, struct mp_image *ref, double t, mbvk_export_buffer **buffer)
+{
+    *buffer = NULL;
+    if (mbvk_export_acquire(p->vk, buffer) != MB_SUCCESS) {
+        return NULL;
+    }
+    struct mp_image *out = mp_image_new_dummy_ref(ref);
+    mb_device_frame target = mbvk_export_target(*buffer);
+    if (!out || mb_engine_submit_device(p->engine, t, &target) != MB_SUCCESS) {
+        mbvk_export_cancel(p->vk, *buffer);
+        *buffer = NULL;
+        talloc_free(out);
+        return NULL;
+    }
+    mp_image_copy_attributes(out, ref);
+    return out;
+}
+
+struct output_ops {
+    struct mp_image *(*submit)(struct priv *p, struct mp_image *ref, double t, mbvk_export_buffer **buffer);
+    bool (*finish)(struct priv *p, struct queued_frame *e);
+};
+
+static const struct output_ops OUTPUTS[] = {
+    [OUTPUT_HOST] = {submit_host, finish_host},
+    [OUTPUT_DMABUF] = {submit_export, finish_export},
+    [OUTPUT_VULKAN] = {submit_vulkan, finish_vulkan},
+};
 
 static void finish_entry(struct priv *p, struct queued_frame *e)
 {
-    mb_frame_report report;
-    if (e->export_buffer) {
-        finish_export(p, e);
-    } else if (e->synced) {
-        mb_engine_finish_device(p->engine, &report);
-    } else {
-        finish_host(p, e);
+    if (!OUTPUTS[e->path].finish(p, e)) {
+        mp_frame_unref(&e->frame);
     }
     e->on_gpu = false;
     p->on_gpu--;
@@ -619,8 +738,16 @@ static void finish_oldest_gpu(struct priv *p)
     }
 }
 
+static void finish_all_gpu(struct priv *p)
+{
+    while (p->on_gpu) {
+        finish_oldest_gpu(p);
+    }
+}
+
 static void teardown(struct priv *p)
 {
+    forget_pushes(p);
     mb_engine_destroy(p->engine);
     p->engine = NULL;
     p->vk = NULL;
@@ -633,34 +760,14 @@ static void stop_engine(struct mp_filter *f)
 {
     struct priv *p = f->priv;
     mb_schedule_stop(p->schedule);
-    while (p->on_gpu) {
-        finish_oldest_gpu(p);
-    }
+    finish_all_gpu(p);
     teardown(p);
 }
 
 static bool describe_format(struct mp_filter *f, struct mp_image *mpi, int swfmt, mb_video_format *format)
 {
-    struct mp_regular_imgfmt reg;
-    if (!mp_get_regular_imgfmt(&reg, swfmt) || reg.component_type != MP_COMPONENT_TYPE_UINT ||
-        reg.component_size > 2 || reg.chroma_xs > 1 || reg.chroma_ys > 1) {
+    if (!mb_mpv_video_format(swfmt, mpi->w, mpi->h, format)) {
         MP_WARN(f, "unsupported format %s, passing through\n", mp_imgfmt_to_name(mpi->imgfmt));
-        return false;
-    }
-    *format = (mb_video_format){
-        .width = mpi->w,
-        .height = mpi->h,
-        .bit_depth = reg.component_size == 1 ? 8 : 16 - (reg.component_pad < 0 ? -reg.component_pad : 0),
-        .chroma_shift_x = reg.chroma_xs,
-        .chroma_shift_y = reg.chroma_ys,
-        .lsb_padding = reg.component_pad > 0 ? reg.component_pad : 0,
-    };
-    bool semi_planar = reg.num_planes == 2 && reg.planes[0].num_components == 1 && reg.planes[1].num_components == 2;
-    bool planar = reg.num_planes == 3 && reg.planes[0].num_components == 1 && reg.planes[1].num_components == 1 &&
-                  reg.planes[2].num_components == 1;
-    format->interleaved_chroma = semi_planar;
-    if (!semi_planar && !planar) {
-        MP_WARN(f, "unsupported plane layout %s, passing through\n", mp_imgfmt_to_name(mpi->imgfmt));
         return false;
     }
     return true;
@@ -687,6 +794,7 @@ static void remember_stream(struct priv *p, struct mp_image *mpi, int swfmt)
 {
     p->hw_failed = false;
     p->export_warned = false;
+    p->skip_warned = false;
     p->imgfmt = swfmt;
     p->hwfmt = mpi->imgfmt;
     p->w = mpi->w;
@@ -728,16 +836,30 @@ static bool setup(struct mp_filter *f, struct mp_image *mpi)
         MP_ERR(f, "could not initialize Vulkan interpolator, passing through\n");
         return false;
     }
+    mb_schedule_set_capacity(p->schedule, mb_engine_capacity(p->engine));
     if (!p->vk_frames) {
         setup_export(f, mpi, swfmt, &format);
     }
+    choose_output(p);
     announce_path(f, mpi, swfmt);
     return true;
 }
 
-static bool vulkan_output(struct priv *p)
+static bool export_on_gpu(struct priv *p, struct mp_image *mpi)
 {
-    return p->vk_frames && !p->hw_failed;
+    uint64_t id;
+    mbvk_export_buffer *buffer;
+    if (!pushed_id(p, mpi, &id) || mbvk_export_acquire(p->vk, &buffer) != MB_SUCCESS) {
+        return false;
+    }
+    mb_host_image source = mb_mpv_host_image(mpi);
+    mb_device_frame target = mbvk_export_target(buffer);
+    if (mb_engine_submit_real(p->engine, id, &source, &target) != MB_SUCCESS) {
+        mbvk_export_cancel(p->vk, buffer);
+        return false;
+    }
+    enqueue(p, (struct queued_frame){MAKE_FRAME(MP_FRAME_VIDEO, mpi), true, true, OUTPUT_DMABUF, buffer});
+    return true;
 }
 
 static struct mp_image *export_frame(struct priv *p, struct mp_image *mpi)
@@ -746,7 +868,7 @@ static struct mp_image *export_frame(struct priv *p, struct mp_image *mpi)
     if (!p->drm_frames || mpi->imgfmt != p->imgfmt) {
         return mpi;
     }
-    mb_host_image source = host_image(mpi);
+    mb_host_image source = mb_mpv_host_image(mpi);
     if (mbvk_export_host_image(p->vk, &source, &buffer) != MB_SUCCESS) {
         warn_export(p, "no free dma-buf output buffer");
         return mpi;
@@ -765,7 +887,7 @@ static struct mp_image *export_frame(struct priv *p, struct mp_image *mpi)
 
 static void enqueue_real(struct priv *p, struct mp_image *r)
 {
-    if (r->imgfmt == IMGFMT_VULKAN && vulkan_output(p)) {
+    if (r->imgfmt == IMGFMT_VULKAN && p->output == OUTPUT_VULKAN) {
         enqueue_plain(p, MAKE_FRAME(MP_FRAME_VIDEO, r));
         return;
     }
@@ -782,6 +904,9 @@ static void enqueue_real(struct priv *p, struct mp_image *r)
         }
     }
     r = download(p, r);
+    if (r && p->drm_frames && r->imgfmt == p->imgfmt && export_on_gpu(p, r)) {
+        return;
+    }
     if (r) {
         enqueue_plain(p, MAKE_FRAME(MP_FRAME_VIDEO, export_frame(p, r)));
     }
@@ -810,56 +935,35 @@ static void drop_entry(struct priv *p, struct queued_frame *e)
     e->on_gpu = false;
 }
 
-static struct mp_image *submit_host_or_export(struct priv *p, struct mp_image *ref, double t,
-                                              mbvk_export_buffer **buffer)
+static struct mp_image *submit_output(struct priv *p, const mb_action *a, enum output_path *path,
+                                      mbvk_export_buffer **buffer)
 {
-    *buffer = NULL;
-    if (p->drm_frames && mbvk_export_acquire(p->vk, buffer) != MB_SUCCESS) {
-        return NULL;
+    struct mp_image *out = OUTPUTS[*path].submit(p, a->frame, a->t, buffer);
+    if (!out && *path != OUTPUT_HOST) {
+        *path = OUTPUT_HOST;
+        out = submit_host(p, a->frame, a->t, buffer);
     }
-    struct mp_image *out = p->drm_frames ? mp_image_new_dummy_ref(ref)
-                                         : mp_image_pool_get(p->pool, p->imgfmt, p->w, p->h);
-    mb_device_frame target = *buffer ? mbvk_export_target(*buffer) : (mb_device_frame){0};
-    mb_status status = MB_ERROR_NO_MEMORY;
-    if (out) {
-        status = *buffer ? mb_engine_submit_device(p->engine, t, &target) : mb_engine_submit(p->engine, t);
-    }
-    if (status != MB_SUCCESS) {
-        if (*buffer) {
-            mbvk_export_cancel(p->vk, *buffer);
-            *buffer = NULL;
-        }
-        talloc_free(out);
-        return NULL;
-    }
-    mp_image_copy_attributes(out, ref);
     return out;
 }
 
 static void emit_interpolated(struct priv *p, const mb_action *a)
 {
-    while (mb_engine_pending(p->engine) >= MB_PENDING_LIMIT && p->on_gpu) {
+    while (mb_engine_pending(p->engine) >= mb_engine_capacity(p->engine) && p->on_gpu) {
         finish_oldest_gpu(p);
     }
-    struct mp_image *ref = a->frame;
+    enum output_path path = p->output;
     mbvk_export_buffer *buffer = NULL;
-    struct mp_image *out = NULL;
-    bool synced = vulkan_output(p);
-#if HAVE_VULKAN
-    if (synced) {
-        out = submit_vulkan(p, ref, a->t);
-    }
-#endif
-    if (!synced) {
-        out = submit_host_or_export(p, ref, a->t, &buffer);
-    }
+    struct mp_image *out = submit_output(p, a, &path, &buffer);
     if (!out) {
-        emit_real(p, a);
+        if (!p->skip_warned) {
+            p->skip_warned = true;
+            mp_warn(p->log, "could not interpolate a frame, skipping it\n");
+        }
         return;
     }
     out->pts = a->pts;
     out->pkt_duration = a->duration;
-    enqueue(p, (struct queued_frame){MAKE_FRAME(MP_FRAME_VIDEO, out), true, synced, buffer});
+    enqueue(p, (struct queued_frame){MAKE_FRAME(MP_FRAME_VIDEO, out), true, false, path, buffer});
 }
 
 static bool push_frame(struct mp_filter *f, mb_action *a)
@@ -874,7 +978,7 @@ static bool push_frame(struct mp_filter *f, mb_action *a)
         if (pushed) {
             return true;
         }
-        p->hw_failed = true;
+        mark_hw_failed(p);
         MP_VERBOSE(f, "cannot import decoder frames, copying them instead\n");
         mpi = download(p, mpi);
         a->frame = mpi;
@@ -882,8 +986,10 @@ static bool push_frame(struct mp_filter *f, mb_action *a)
             return false;
         }
     }
-    mb_host_image source = host_image(mpi);
-    mb_engine_push(p->engine, &source);
+    mb_host_image source = mb_mpv_host_image(mpi);
+    if (mb_engine_push(p->engine, &source) == MB_SUCCESS) {
+        remember_push(p, mpi, mb_engine_newest_frame(p->engine));
+    }
     return true;
 }
 
@@ -905,9 +1011,7 @@ static bool run_action(void *context, mb_action *a)
         enqueue_plain(p, MAKE_FRAME(MP_FRAME_VIDEO, mp_image_new_ref(a->frame)));
         return true;
     case MB_ACTION_DRAIN:
-        while (p->on_gpu) {
-            finish_oldest_gpu(p);
-        }
+        finish_all_gpu(p);
         return true;
     case MB_ACTION_RESET_ENGINE:
         mb_engine_reset(p->engine);
@@ -947,6 +1051,19 @@ static double display_fps(struct mp_filter *f)
     return p->display_fps;
 }
 
+static void abandon_gpu_entry(struct priv *p, struct queued_frame *e)
+{
+    if (!e->real) {
+        drop_entry(p, e);
+        return;
+    }
+    if (e->export_buffer) {
+        mbvk_export_cancel(p->vk, e->export_buffer);
+        e->export_buffer = NULL;
+    }
+    e->on_gpu = false;
+}
+
 static void check_engine(struct mp_filter *f)
 {
     struct priv *p = f->priv;
@@ -956,7 +1073,7 @@ static void check_engine(struct mp_filter *f)
     MP_ERR(f, "Vulkan interpolation failed, passing through\n");
     for (int i = 0; i < p->queued; i++) {
         if (p->queue[i].on_gpu) {
-            drop_entry(p, &p->queue[i]);
+            abandon_gpu_entry(p, &p->queue[i]);
         }
     }
     p->on_gpu = 0;
@@ -1002,7 +1119,7 @@ static bool emit_head(struct mp_filter *f, bool block)
     }
     struct queued_frame *head = &p->queue[0];
     if (head->on_gpu) {
-        if (!block && !head->synced && !mb_engine_output_ready(p->engine)) {
+        if (!block && head->path != OUTPUT_VULKAN && !mb_engine_output_ready(p->engine)) {
             return false;
         }
         finish_entry(p, head);
@@ -1034,6 +1151,11 @@ static void read_input(struct mp_filter *f)
     }
 }
 
+static bool gpu_has_room(struct priv *p)
+{
+    return !p->engine || p->on_gpu < mb_engine_capacity(p->engine);
+}
+
 static void f_process(struct mp_filter *f)
 {
     struct priv *p = f->priv;
@@ -1042,7 +1164,7 @@ static void f_process(struct mp_filter *f)
         mp_filter_internal_mark_progress(f);
         return;
     }
-    if (!eof_queued(p) && p->on_gpu < MB_PENDING_LIMIT && p->queued < MAX_QUEUE &&
+    if (!eof_queued(p) && gpu_has_room(p) && p->queued < MAX_QUEUE &&
         mp_pin_out_request_data(p->in)) {
         read_input(f);
         mp_filter_internal_mark_progress(f);
@@ -1068,10 +1190,12 @@ static void f_reset(struct mp_filter *f)
     mb_schedule_reset(p->schedule);
     drop_maps(p);
     p->hw_failed = false;
+    choose_output(p);
     p->display_fps_time = 0;
     if (p->engine) {
         mb_engine_reset(p->engine);
     }
+    forget_pushes(p);
     clear_queue(p);
 }
 

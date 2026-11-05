@@ -16,10 +16,6 @@ typedef struct candidate_list {
     int count;
 } candidate_list;
 
-static const ivec2 PREVIOUS_ORDER[NEIGHBOURS] = {
-    {0, 0}, {-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-1, -1}, {1, -1}, {-1, 1}, {1, 1},
-};
-
 static void add_candidate(candidate_list *list, vec2 v, float penalty)
 {
     if (v2_listed(list->vectors, list->count, v)) {
@@ -44,7 +40,7 @@ static vec2 previous_vector(const mb_iterate_pass *pass, ivec2 block)
 {
     ivec2 b = iv2(clampi(block.x, 0, pass->grid.blocks_x - 1), clampi(block.y, 0, pass->grid.blocks_y - 1));
     if (pass->previous) {
-        return v4_xy(vec4s(pass->previous)[b.y * pass->grid.blocks_x + b.x]);
+        return v4_xy(vec4s(pass->previous)[block_index(b, pass->grid)]);
     }
     return parent_vector(pass, iv2(b.x >> 1, b.y >> 1));
 }
@@ -81,8 +77,9 @@ static bool previous_pair_was_cut(const mb_iterate_pass *pass)
 static candidate_list gather_candidates(const mb_iterate_pass *pass, int id, ivec2 block)
 {
     candidate_list list = {.count = 0};
-    for (int k = 0; k < NEIGHBOURS; k++) {
-        add_candidate(&list, previous_vector(pass, iv2_add(block, PREVIOUS_ORDER[k])), 0.0f);
+    add_candidate(&list, previous_vector(pass, block), 0.0f);
+    for (int k = 0; k < 8; k++) {
+        add_candidate(&list, previous_vector(pass, iv2_add(block, RING8[k])), 0.0f);
     }
     if (pass->parent && !pass->previous) {
         add_parent_neighbours(&list, pass, block);
@@ -133,8 +130,7 @@ static void random_steps(uint32_t id, uint32_t seed, vec2 steps[2])
 
 static void try_candidate(search_state *state, const mb_iterate_pass *pass, vec2 v, float penalty)
 {
-    sad_result r = search_state_sad_hardware(state, &pass->target->texture, v);
-    search_state_consider(state, v, r, r.sad + penalty + pass->penalties.length * v2_l1(v));
+    search_state_try(state, &pass->target->texture, v, penalty, pass->penalties.length);
 }
 
 static vec4 search_block(const mb_iterate_pass *pass, int id)
@@ -142,7 +138,7 @@ static vec4 search_block(const mb_iterate_pass *pass, int id)
     ivec2 block = block_coord(id, pass->grid);
     search_state state;
     search_state_begin(&state, &pass->origin->texture, block);
-    state.mean_weight = mean_weight(pass->mean_removal.lo, pass->mean_removal.hi, neighbour_dc(pass, block));
+    state.mean_weight = mean_weight(pass->mean_removal, neighbour_dc(pass, block));
     candidate_list list = gather_candidates(pass, id, block);
     float limit = early_exit_limit(&state.origin, pass->early_exit);
     for (int i = 0; i < list.count; i++) {

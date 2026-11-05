@@ -2,7 +2,9 @@
 
 #include <string.h>
 
-enum { BLACK_LUMA_MAX = 24, BLACK_CHROMA_TOLERANCE = 10, SCAN_STEP = 2, RECHECK_STEP = 3, ALIGN = 8 };
+#include "motionblade/layout.h"
+
+enum { SCAN_STEP = 2, RECHECK_STEP = 3, ALIGN = 8 };
 
 static const double MIN_CROPPED_SHARE = 0.96;
 
@@ -16,8 +18,8 @@ static black_levels levels_of(const mb_video_format *format)
 {
     unsigned mid = 1u << (format->bit_depth - 1);
     unsigned scale = mid / 128;
-    return (black_levels){BLACK_LUMA_MAX * scale, mid - BLACK_CHROMA_TOLERANCE * scale,
-                          mid + BLACK_CHROMA_TOLERANCE * scale};
+    return (black_levels){MB_BLACK_LUMA_MAX * scale, mid - MB_BLACK_CHROMA_TOLERANCE * scale,
+                          mid + MB_BLACK_CHROMA_TOLERANCE * scale};
 }
 
 static unsigned sample_at(const bar_source *source, int plane, int x, int y)

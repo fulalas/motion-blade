@@ -7,7 +7,7 @@
 typedef struct cpu_output {
     ref_texture planes[3];
     int plane_count;
-    ivec2 shift;
+    mb_video_format format;
     uint32_t stats[MB_STAT_COUNT];
     bool in_use;
     uint32_t serial;
@@ -15,7 +15,8 @@ typedef struct cpu_output {
 
 void cpu_upload_frame(const mb_upload *upload);
 void cpu_download_planes(const cpu_output *output, const mb_host_image *target, mb_rect area);
-bool cpu_output_capture(cpu_output *output, mb_frame_planes planes, const mb_buffer *stats, ivec2 shift);
+bool cpu_output_capture(cpu_output *output, mb_frame_planes planes, const mb_buffer *stats,
+                        const mb_video_format *format);
 void cpu_output_clear(cpu_output *output);
 
 #endif

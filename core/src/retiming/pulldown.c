@@ -35,33 +35,60 @@ struct mb_pulldown_detector {
     mb_pulldown state;
 };
 
-static int sample_at(const mb_luma_plane *plane, int x, int y)
+static const void *row_of(const mb_host_image *image, int y)
 {
-    const uint8_t *row = (const uint8_t *)plane->data + y * plane->stride;
-    return plane->bytes_per_sample == 1 ? row[x] : ((const uint16_t *)row)[x];
+    return image->planes[0] + y * image->strides[0];
 }
 
-static double field_difference(const mb_luma_plane *a, const mb_luma_plane *b, int parity)
+static long long row_difference_8(const uint8_t *a, const uint8_t *b, int width)
 {
-    double sum = 0.0;
-    long long count = 0;
-    for (int y = parity; y < b->height; y += 2) {
-        for (int x = 0; x < b->width; x += COLUMN_STEP) {
-            sum += abs(sample_at(a, x, y) - sample_at(b, x, y));
-            count++;
-        }
+    long long sum = 0;
+    for (int x = 0; x < width; x += COLUMN_STEP) {
+        sum += abs(a[x] - b[x]);
     }
-    return count ? sum * 255.0 / ((double)b->max_value * count) : 0.0;
+    return sum;
 }
 
-mb_field_motion mb_field_motion_measure(const mb_luma_plane *previous, const mb_luma_plane *current)
+static long long row_difference_16(const uint16_t *a, const uint16_t *b, int width)
 {
-    return (mb_field_motion){field_difference(previous, current, 0), field_difference(previous, current, 1)};
+    long long sum = 0;
+    for (int x = 0; x < width; x += COLUMN_STEP) {
+        sum += abs(a[x] - b[x]);
+    }
+    return sum;
 }
 
-double mb_frame_motion(const mb_luma_plane *previous, const mb_luma_plane *current)
+static long long row_difference(mb_frame_pair pair, int y)
 {
-    mb_field_motion m = mb_field_motion_measure(previous, current);
+    int width = pair.format->width;
+    if (mb_bytes_per_sample(pair.format) == 1) {
+        return row_difference_8(row_of(pair.previous, y), row_of(pair.current, y), width);
+    }
+    return row_difference_16(row_of(pair.previous, y), row_of(pair.current, y), width);
+}
+
+static double field_difference(mb_frame_pair pair, int parity)
+{
+    const mb_video_format *f = pair.format;
+    long long sum = 0;
+    long long rows = 0;
+    for (int y = parity; y < f->height; y += 2) {
+        sum += row_difference(pair, y);
+        rows++;
+    }
+    long long count = rows * ((f->width + COLUMN_STEP - 1) / COLUMN_STEP);
+    double max_value = (double)((1 << f->bit_depth) - 1);
+    return count ? (double)sum * 255.0 / (max_value * count) : 0.0;
+}
+
+mb_field_motion mb_field_motion_measure(mb_frame_pair pair)
+{
+    return (mb_field_motion){field_difference(pair, 0), field_difference(pair, 1)};
+}
+
+double mb_frame_motion(mb_frame_pair pair)
+{
+    mb_field_motion m = mb_field_motion_measure(pair);
     return (m.top + m.bottom) / 2.0;
 }
 
@@ -69,6 +96,33 @@ bool mb_frame_repeats(double motion_before, double motion, double motion_after)
 {
     double neighbours = isnan(motion_before) || motion_after < motion_before ? motion_after : motion_before;
     return neighbours >= MOTION_FLOOR && motion < REPEATED_FRAME_RATIO * neighbours;
+}
+
+void mb_repeat_filter_reset(mb_repeat_filter *filter)
+{
+    *filter = (mb_repeat_filter){false, NAN, NAN};
+}
+
+static double motion_from(mb_motion_source source, mb_motion_origin origin)
+{
+    return source.motion_to_new(source.context, origin);
+}
+
+mb_repeat_decision mb_repeat_filter_push(mb_repeat_filter *filter, mb_motion_source source)
+{
+    if (!filter->has_pending) {
+        filter->has_pending = true;
+        filter->motion_pending = motion_from(source, MB_FROM_SHOWN);
+        return MB_REPEAT_WAIT;
+    }
+    double motion_after = motion_from(source, MB_FROM_PENDING);
+    if (!mb_frame_repeats(filter->motion_shown, filter->motion_pending, motion_after)) {
+        filter->motion_shown = filter->motion_pending;
+        filter->motion_pending = motion_after;
+        return MB_REPEAT_SHOW_PENDING;
+    }
+    filter->motion_pending = motion_from(source, MB_FROM_SHOWN);
+    return MB_REPEAT_DROP_PENDING;
 }
 
 mb_pulldown_detector *mb_pulldown_create(void)

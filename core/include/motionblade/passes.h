@@ -312,29 +312,40 @@ typedef struct mb_extrapolation {
     mb_extrapolation_side next;
 } mb_extrapolation;
 
-typedef struct mb_interpolate_pass {
+typedef struct mb_warp {
     mb_pair_planes frames;
     mb_image *a_level;
     mb_image *b_level;
     mb_frame_planes output;
-    mb_buffer *cells;
-    mb_buffer *forward;
-    mb_buffer *backward;
     mb_buffer *stats;
-    mb_buffer *fallback;
-    mb_buffer *offsets;
-    mb_buffer *panels;
-    mb_buffer *global_motion;
-    mb_extrapolation extrapolation;
     int width;
     int height;
     mb_grid grid;
     mb_chroma_layout chroma;
     int base_level;
     float t;
-    float luma_scale;
     mb_output_range range;
+} mb_warp;
+
+typedef struct mb_interpolate_pass {
+    mb_warp warp;
+    mb_buffer *cells;
+    mb_buffer *forward;
+    mb_buffer *backward;
+    mb_buffer *fallback;
+    mb_buffer *offsets;
+    mb_buffer *panels;
+    mb_buffer *global_motion;
+    float luma_scale;
     mb_blend_costs costs;
 } mb_interpolate_pass;
+
+typedef struct mb_extrapolate_pass {
+    mb_warp warp;
+    mb_extrapolation extrapolation;
+    float softness;
+    float unconfirmed;
+    float consistency;
+} mb_extrapolate_pass;
 
 #endif

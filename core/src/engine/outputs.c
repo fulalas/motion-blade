@@ -37,7 +37,7 @@ static void pop_head(output_queue *q)
 
 static mb_frame_report report_of(const mb_output_stats *stats, int block_count)
 {
-    double mean = (double)stats->error_sum * MB_STAT_SCALE / ((double)block_count * 256);
+    double mean = stat_error_mean((double)stats->error_sum, block_count);
     return (mb_frame_report){stats->valid, stats->scene_cut, stats->valid ? mean : 0.0, stats->gpu_ms};
 }
 
@@ -51,11 +51,6 @@ static mb_status finish_head(mb_engine *engine, mb_frame_report *report)
     return status;
 }
 
-static bool is_full_frame(const mb_engine *engine, mb_rect area)
-{
-    return mb_rect_equal(area, (mb_rect){0, 0, engine->source.width, engine->source.height});
-}
-
 mb_status outputs_retrieve_host(mb_engine *engine, const mb_host_image *target, mb_frame_report *report)
 {
     output_queue *q = &engine->queue;
@@ -64,7 +59,7 @@ mb_status outputs_retrieve_host(mb_engine *engine, const mb_host_image *target, 
     }
     mb_rect area = q->entries[0].area;
     mb_status status = engine->backend.ops->read_output(engine->backend.self, q->entries[0].ticket, target, area);
-    if (status == MB_SUCCESS && !is_full_frame(engine, area)) {
+    if (status == MB_SUCCESS && !mb_rect_equal(area, mb_full_rect(&engine->source))) {
         mb_host_image_copy_outside(target, &engine->framing.border.image, &engine->source, area);
     }
     mb_status finished = finish_head(engine, report);

@@ -27,11 +27,13 @@ static void vk_destroy(void *self)
         }
         jobs_destroy(vk);
         background_destroy(vk);
+        imports_destroy(vk);
         exports_destroy(vk);
         for (int k = 0; k < UPLOAD_RING; k++) {
             buffer_destroy(vk, &vk->uploads[k].buffer);
         }
         buffer_destroy(vk, &vk->dummy);
+        image_destroy(vk, &vk->dummy_image);
         pipelines_destroy(vk);
         if (vk->sampler) {
             vkDestroySampler(vk->device, vk->sampler, NULL);
@@ -39,6 +41,11 @@ static void vk_destroy(void *self)
     }
     device_close(vk);
     free(vk);
+}
+
+static void vk_prepare(void *self, const mb_video_format *format)
+{
+    pipelines_prepare(self, format);
 }
 
 static mb_status vk_create_image(void *self, const mb_image_desc *desc, mb_image **image)
@@ -114,6 +121,7 @@ static mb_status vk_wait_idle(void *self)
 
 static const mb_backend_ops VULKAN_OPS = {
     .destroy = vk_destroy,
+    .prepare = vk_prepare,
     .create_image = vk_create_image,
     .destroy_image = vk_destroy_image,
     .create_buffer = vk_create_buffer,
@@ -157,6 +165,7 @@ static const mb_backend_ops VULKAN_OPS = {
     .panel_spread = vk_panel_spread,
     .split = vk_split,
     .interpolate = vk_interpolate,
+    .extrapolate = vk_extrapolate,
 };
 
 static mb_status create_sampler(mbvk_backend *vk)
@@ -171,6 +180,19 @@ static mb_status create_sampler(mbvk_backend *vk)
     return vkCreateSampler(vk->device, &info, NULL, &vk->sampler) == VK_SUCCESS ? MB_SUCCESS : MB_ERROR_DEVICE;
 }
 
+static mb_status create_dummy_image(mbvk_backend *vk)
+{
+    mb_image_desc desc = {1, 1, MB_TEXELS_R8};
+    mb_status status = jobs_begin(vk);
+    if (status == MB_SUCCESS) {
+        status = image_create(vk, &vk->dummy_image, &desc);
+    }
+    if (status == MB_SUCCESS) {
+        jobs_to_general(vk, &vk->dummy_image);
+    }
+    return status;
+}
+
 static mb_status open_backend(mbvk_backend *vk, const mbvk_config *config)
 {
     mb_status status = device_open(vk, config);
@@ -182,6 +204,9 @@ static mb_status open_backend(mbvk_backend *vk, const mbvk_config *config)
     }
     if (status == MB_SUCCESS) {
         status = buffer_create_device(vk, &vk->dummy, DUMMY_BYTES);
+    }
+    if (status == MB_SUCCESS) {
+        status = create_dummy_image(vk);
     }
     if (status == MB_SUCCESS) {
         status = pipelines_create(vk);

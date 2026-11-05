@@ -16,11 +16,6 @@ typedef struct row_span {
     size_t bytes;
 } row_span;
 
-static int divide_up(int value, int shift)
-{
-    return (value + (1 << shift) - 1) >> shift;
-}
-
 static size_t sample_bytes(const mb_video_format *format, int plane)
 {
     int components = plane > 0 && format->interleaved_chroma ? 2 : 1;
@@ -29,16 +24,14 @@ static size_t sample_bytes(const mb_video_format *format, int plane)
 
 static plane_box box_of(const mb_video_format *format, int plane, mb_rect area)
 {
-    int sx = plane ? format->chroma_shift_x : 0;
-    int sy = plane ? format->chroma_shift_y : 0;
+    mb_rect r = mb_plane_area(format, plane, area);
     size_t sample = sample_bytes(format, plane);
-    return (plane_box){(size_t)(area.x >> sx) * sample, (size_t)divide_up(area.width, sx) * sample, area.y >> sy,
-                       divide_up(area.height, sy)};
+    return (plane_box){(size_t)r.x * sample, (size_t)r.width * sample, r.y, r.height};
 }
 
 static plane_box whole_plane(const mb_video_format *format, int plane)
 {
-    return box_of(format, plane, (mb_rect){0, 0, format->width, format->height});
+    return box_of(format, plane, mb_full_rect(format));
 }
 
 size_t mb_plane_row_bytes(const mb_video_format *format, int plane)

@@ -21,7 +21,7 @@ void ref_project(const mb_project_pass *pass)
         ivec2 target = block_at(landing);
         if (block_inside(target, pass->grid)) {
             uint32_t key = (uint32_t)id * 2u + pass->tag;
-            insert_key(&keys[(target.y * pass->grid.blocks_x + target.x) * MB_KEYS_PER_BLOCK], key);
+            insert_key(&keys[block_index(target, pass->grid) * MB_KEYS_PER_BLOCK], key);
         }
     }
 }

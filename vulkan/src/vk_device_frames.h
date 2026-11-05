@@ -9,5 +9,6 @@ bool vk_poll_bar_flags(void *self, const uint32_t **flags);
 void vk_clear_bar_flags(void *self);
 mb_status vk_record_device_output(void *self, const mb_output_copy *copy, mb_buffer *stats);
 void background_destroy(mbvk_backend *vk);
+void imports_destroy(mbvk_backend *vk);
 
 #endif

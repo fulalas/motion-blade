@@ -3,17 +3,6 @@
 
 #include "vk_internal.h"
 
-typedef struct plane_rows {
-    int count;
-    size_t bytes;
-} plane_rows;
-
-typedef struct plane_origin {
-    mb_rect area;
-    int shift_x;
-    int shift_y;
-} plane_origin;
-
 typedef struct image_region {
     struct mb_image *source;
     int source_x;
@@ -25,20 +14,12 @@ typedef struct image_region {
     int height;
 } image_region;
 
-typedef struct plane_extent {
-    int width;
-    int height;
-    int shift_x;
-    int shift_y;
-} plane_extent;
-
 typedef struct bar_rects {
     mb_rect rects[4];
     int count;
 } bar_rects;
 
-plane_layout layout_of_planes(mb_frame_planes planes);
-bar_rects bars_around(mb_rect area, plane_extent plane);
+bar_rects bars_around(mb_rect inner, const struct mb_image *plane);
 bool area_is_cropped(mb_rect area, const mb_video_format *format);
 void copy_image_region(mbvk_backend *vk, const image_region *region);
 void copy_overlap_images(mbvk_backend *vk, const mb_overlap_copy *copy);

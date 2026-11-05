@@ -2,11 +2,6 @@
 
 static const long HALF_RESOLUTION_PIXELS = 2500000L;
 
-static int divide_up(int value, int shift)
-{
-    return (value + (1 << shift) - 1) >> shift;
-}
-
 static int count_levels(int width, int height)
 {
     int levels = 1;
@@ -27,8 +22,8 @@ static bool wants_half_resolution(const mb_video_format *source, const mb_search
 
 static mb_grid level_grid(int width, int height, int level)
 {
-    int w = divide_up(width, level);
-    int h = divide_up(height, level);
+    int w = mb_shift_up(width, level);
+    int h = mb_shift_up(height, level);
     return (mb_grid){(w + MB_BLOCK_SIZE - 1) / MB_BLOCK_SIZE, (h + MB_BLOCK_SIZE - 1) / MB_BLOCK_SIZE, w, h};
 }
 
@@ -58,9 +53,14 @@ int geometry_base_blocks(const geometry *g)
     return mb_grid_block_count(geometry_base_grid(g));
 }
 
+double stat_error_mean(double sum, int blocks)
+{
+    return sum * MB_STAT_SCALE / ((double)blocks * 256);
+}
+
 bool geometry_is_cropped(const geometry *g, const mb_video_format *source)
 {
-    return !mb_rect_equal(g->active, (mb_rect){0, 0, source->width, source->height});
+    return !mb_rect_equal(g->active, mb_full_rect(source));
 }
 
 float geometry_luma_scale(const geometry *g)

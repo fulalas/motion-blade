@@ -2,6 +2,7 @@
 #define MOTIONBLADE_RESOURCES_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 typedef struct mb_image mb_image;
@@ -43,5 +44,8 @@ typedef struct mb_frame_planes {
 
 int mb_grid_block_count(mb_grid grid);
 int mb_texel_channels(mb_texel_format format);
+int mb_texel_sample_bytes(mb_texel_format format);
+size_t mb_texel_count(mb_image_desc desc);
+mb_image *mb_frame_plane(mb_frame_planes planes, int plane);
 
 #endif

@@ -74,8 +74,7 @@ static mb_engine *new_engine(const mb_engine_config *config)
     engine->params = config->params;
     engine->source = config->format;
     engine->pair.history_stale = true;
-    mb_rect whole = {0, 0, config->format.width, config->format.height};
-    engine->geo = geometry_for(&engine->source, whole, &engine->params.search);
+    engine->geo = geometry_for(&engine->source, mb_full_rect(&engine->source), &engine->params.search);
     return engine;
 }
 
@@ -98,6 +97,7 @@ mb_status mb_engine_create(const mb_engine_config *config, mb_engine **out)
         mb_engine_destroy(engine);
         return status;
     }
+    engine->backend.ops->prepare(engine->backend.self, &engine->source);
     engine->healthy = true;
     *out = engine;
     return MB_SUCCESS;
@@ -106,11 +106,6 @@ mb_status mb_engine_create(const mb_engine_config *config, mb_engine **out)
 bool mb_engine_is_healthy(const mb_engine *engine)
 {
     return engine && engine->healthy;
-}
-
-bool mb_engine_uses_lookahead(const mb_engine *engine)
-{
-    return engine->params.select.lookahead != 0;
 }
 
 mb_status mb_engine_set_param(mb_engine *engine, const char *name, double value)
@@ -131,18 +126,12 @@ static int next_slot(const mb_engine *engine)
 
 static void advance_pairs(mb_engine *engine)
 {
-    pair_state *p = &engine->pair;
-    p->end_of_stream = false;
+    engine->pair.end_of_stream = false;
     engine->framing.push_count++;
-    if (p->frame_count >= 2 && p->motion_ready) {
-        rotate_fields(engine);
-        p->has_older = p->has_previous;
-        p->has_previous = true;
-    } else {
-        p->has_previous = false;
-        p->has_older = false;
+    if (engine->pair.frame_count < 2 || !pair_at(engine, 0)->ready) {
+        motion_forget(engine);
     }
-    p->motion_ready = false;
+    motion_advance(engine);
 }
 
 static mb_status commit_frame(mb_engine *engine)
@@ -157,14 +146,16 @@ static mb_status commit_frame(mb_engine *engine)
         return status;
     }
     engine->pair.newest = next_slot(engine);
+    engine->frames[engine->pair.newest].border_version = engine->framing.border_version;
+    engine->frames[engine->pair.newest].id = ++engine->pair.pushed;
     build_levels(engine, engine->pair.newest);
     if (engine->pair.frame_count < FRAME_RING) {
         engine->pair.frame_count++;
     }
-    if (mb_engine_uses_lookahead(engine) && engine->pair.frame_count >= 2) {
+    if (engine->pair.frame_count >= 2) {
         status = run_motion(engine);
     }
-    return status;
+    return status == MB_SUCCESS ? b->ops->submit_work(b->self) : status;
 }
 
 static mb_status stage_host_frame(mb_engine *engine, const mb_host_image *frame)
@@ -236,13 +227,13 @@ void mb_engine_end_stream(mb_engine *engine)
 void mb_engine_reset(mb_engine *engine)
 {
     release_all(engine);
-    engine->pair = (pair_state){.newest = engine->pair.newest, .history_stale = true};
+    engine->pair = (pair_state){.pushed = engine->pair.pushed, .newest = engine->pair.newest, .history_stale = true};
+    motion_forget(engine);
 }
 
 static bool lookahead_ready(const mb_engine *engine)
 {
-    const pair_state *p = &engine->pair;
-    return mb_engine_uses_lookahead(engine) && !p->end_of_stream && p->has_previous && p->motion_ready;
+    return !engine->pair.end_of_stream && pair_at(engine, 1)->ready && pair_at(engine, 0)->ready;
 }
 
 static mb_status check_submit(const mb_engine *engine)
@@ -253,20 +244,19 @@ static mb_status check_submit(const mb_engine *engine)
     if (engine->pair.frame_count < 2 || outputs_pending(engine) >= engine->backend.max_pending) {
         return MB_ERROR_BUSY;
     }
-    bool waiting_for_lookahead = mb_engine_uses_lookahead(engine) && !engine->pair.end_of_stream;
-    return waiting_for_lookahead && !lookahead_ready(engine) ? MB_ERROR_BUSY : MB_SUCCESS;
+    return !engine->pair.end_of_stream && !lookahead_ready(engine) ? MB_ERROR_BUSY : MB_SUCCESS;
 }
 
 static mb_status record_pair(mb_engine *engine, double t, pair_choice *pair)
 {
     const mb_backend *b = &engine->backend;
-    bool lookahead = lookahead_ready(engine);
+    int end = lookahead_ready(engine) ? 1 : 0;
     mb_status status = b->ops->begin_work(b->self);
-    if (status == MB_SUCCESS && !engine->pair.motion_ready) {
+    if (status == MB_SUCCESS && !pair_at(engine, 0)->ready) {
         status = run_motion(engine);
     }
     if (status == MB_SUCCESS) {
-        *pair = choose_pair(engine, lookahead);
+        *pair = choose_pair(engine, end);
         record_interpolation(engine, pair, t);
     }
     return status;
@@ -289,8 +279,8 @@ static mb_status submit(mb_engine *engine, double t, const mb_device_frame *targ
     }
     const mb_backend *b = &engine->backend;
     mb_output_copy copy = output_copy(engine, target);
-    status = target ? b->ops->record_device_output(b->self, &copy, pair.current_stats)
-                    : b->ops->record_host_output(b->self, &copy, pair.current_stats);
+    status = target ? b->ops->record_device_output(b->self, &copy, pair.current->stats)
+                    : b->ops->record_host_output(b->self, &copy, pair.current->stats);
     if (status == MB_SUCCESS) {
         status = outputs_submit(engine, target ? OUTPUT_DEVICE : OUTPUT_HOST);
     }
@@ -307,9 +297,61 @@ mb_status mb_engine_submit_device(mb_engine *engine, double t, const mb_device_f
     return submit(engine, t, target);
 }
 
+uint64_t mb_engine_newest_frame(const mb_engine *engine)
+{
+    return engine->pair.pushed;
+}
+
+static const frame_slot *slot_with_id(const mb_engine *engine, uint64_t id)
+{
+    for (int back = 0; back < engine->pair.frame_count; back++) {
+        const frame_slot *slot = &engine->frames[ring_index(engine, back)];
+        if (slot->id == id) {
+            return slot->border_version == engine->framing.border_version ? slot : NULL;
+        }
+    }
+    return NULL;
+}
+
+static mb_status check_real(const mb_engine *engine, const frame_slot *slot)
+{
+    if (!engine->healthy) {
+        return MB_ERROR_DEVICE;
+    }
+    if (!slot) {
+        return MB_ERROR_UNSUPPORTED;
+    }
+    return outputs_pending(engine) >= engine->backend.max_pending ? MB_ERROR_BUSY : MB_SUCCESS;
+}
+
+mb_status mb_engine_submit_real(mb_engine *engine, uint64_t id, const mb_host_image *frame,
+                                const mb_device_frame *target)
+{
+    const frame_slot *slot = slot_with_id(engine, id);
+    mb_status status = check_real(engine, slot);
+    const mb_backend *b = &engine->backend;
+    if (status == MB_SUCCESS) {
+        status = b->ops->begin_work(b->self);
+    }
+    if (status == MB_SUCCESS) {
+        mb_border border = {frame, MB_BORDER_FROM_FRAME};
+        mb_output_copy copy = {slot->planes, engine->geo.active, &engine->source, target, border};
+        status = b->ops->record_device_output(b->self, &copy, pair_at(engine, 0)->stats);
+    }
+    if (status == MB_SUCCESS) {
+        status = outputs_submit(engine, OUTPUT_DEVICE);
+    }
+    return status == MB_ERROR_UNSUPPORTED || status == MB_ERROR_BUSY ? status : fail(engine, status);
+}
+
 int mb_engine_pending(const mb_engine *engine)
 {
     return outputs_pending(engine);
+}
+
+int mb_engine_capacity(const mb_engine *engine)
+{
+    return engine->backend.max_pending;
 }
 
 bool mb_engine_output_ready(const mb_engine *engine)

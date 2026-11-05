@@ -20,6 +20,8 @@ typedef struct mb_device_frame {
     void *payload;
 } mb_device_frame;
 
+enum { MB_BORDER_FROM_FRAME = -2 };
+
 typedef struct mb_border {
     const mb_host_image *host_template;
     int version;
@@ -67,6 +69,7 @@ typedef struct mb_output_stats {
 
 typedef struct mb_backend_ops {
     void (*destroy)(void *self);
+    void (*prepare)(void *self, const mb_video_format *format);
     mb_status (*create_image)(void *self, const mb_image_desc *desc, mb_image **image);
     void (*destroy_image)(void *self, mb_image *image);
     mb_status (*create_buffer)(void *self, size_t bytes, mb_buffer **buffer);
@@ -113,6 +116,7 @@ typedef struct mb_backend_ops {
     void (*panel_spread)(void *self, const mb_panel_spread_pass *pass);
     void (*split)(void *self, const mb_split_pass *pass);
     void (*interpolate)(void *self, const mb_interpolate_pass *pass);
+    void (*extrapolate)(void *self, const mb_extrapolate_pass *pass);
 } mb_backend_ops;
 
 typedef struct mb_backend {

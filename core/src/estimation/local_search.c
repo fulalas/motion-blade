@@ -18,7 +18,7 @@ typedef struct local_block {
 static float repair_threshold(const mb_local_search_pass *pass)
 {
     float blocks = (float)mb_grid_block_count(pass->grid);
-    float noise = pass->noise_factor * (float)words(pass->stats)[MB_STAT_ERROR] * 16.0f / blocks;
+    float noise = pass->noise_factor * (float)words(pass->stats)[MB_STAT_ERROR] * (float)MB_STAT_SCALE / blocks;
     return fmaxf(pass->min_cost, noise);
 }
 
@@ -46,8 +46,7 @@ static bool seen_before(const local_block *lb, int k, vec2 u)
 
 static void try_vector(local_block *lb, vec2 u)
 {
-    sad_result r = search_state_sad_hardware(&lb->state, &lb->pass->target->texture, u);
-    search_state_consider(&lb->state, u, r, r.sad + lb->pass->length_penalty * v2_l1(u));
+    search_state_try(&lb->state, &lb->pass->target->texture, u, 0.0f, lb->pass->length_penalty);
 }
 
 static void try_neighbours(local_block *lb, vec2 current)
@@ -88,11 +87,11 @@ static void try_ring(local_block *lb)
 static bool supported_in_time(const local_block *lb, vec2 u)
 {
     const mb_local_search_pass *pass = lb->pass;
-    int index = block_index(lb->block, pass->grid);
+    vec2 position = block_center(lb->block);
     if (pass->reference_at_landing) {
-        index = block_index(block_at(v2_add(block_center(lb->block), u)), pass->grid);
+        position = v2_add(position, u);
     }
-    vec2 reference = v4_xy(vec4s(pass->reference)[index]);
+    vec2 reference = field_at_position(vec4s(pass->reference), position, pass->grid);
     return v2_l1(v2_add(reference, u)) <= pass->support.rel * v2_l1(u) + pass->support.abs;
 }
 
@@ -106,7 +105,7 @@ static vec4 repair_block(const mb_local_search_pass *pass, int id)
     vec4 current = vec4s(pass->field)[id];
     vec2 v = v4_xy(current);
     sad_result original = search_state_sad_hardware(&lb.state, &pass->target->texture, v);
-    lb.state.best = (best_match){original.sad + pass->length_penalty * v2_l1(v), original.sad, original.diff_sum, v};
+    search_state_seed(&lb.state, v, original, pass->length_penalty);
     try_neighbours(&lb, v);
     try_grid(&lb);
     try_ring(&lb);

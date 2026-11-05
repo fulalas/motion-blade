@@ -22,5 +22,6 @@ void ref_panels(const mb_panel_pass *pass);
 void ref_panel_spread(const mb_panel_spread_pass *pass);
 void ref_split(const mb_split_pass *pass);
 void ref_interpolate(const mb_interpolate_pass *pass);
+void ref_extrapolate(const mb_extrapolate_pass *pass);
 
 #endif

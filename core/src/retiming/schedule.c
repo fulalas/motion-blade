@@ -226,6 +226,14 @@ void mb_schedule_stop(mb_schedule *s)
     s->has_grid = false;
 }
 
+void mb_schedule_set_capacity(mb_schedule *s, int max_pending)
+{
+    if (max_pending != s->config.max_pending) {
+        s->config.max_pending = max_pending;
+        s->has_grid = false;
+    }
+}
+
 void mb_schedule_set_factor(mb_schedule *s, int factor)
 {
     if (factor == s->config.factor) {

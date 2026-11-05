@@ -110,8 +110,7 @@ static void push_frame(evaluation *ev, uint8_t *frame)
 static void feed_pair(evaluation *ev, int k)
 {
     int step = ev->options->step;
-    int ahead = mb_engine_uses_lookahead(ev->engine) ? 1 : 0;
-    for (int j = k == 0 ? 0 : k + 1 + ahead; j <= k + 1 + ahead; j++) {
+    for (int j = k == 0 ? 0 : k + 2; j <= k + 2; j++) {
         if (j * step >= ev->frames->count) {
             mb_engine_end_stream(ev->engine);
             continue;

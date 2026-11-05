@@ -13,11 +13,6 @@
 
 enum { MIN_BUFFERS = 4, GROW_LIMIT = 8, IDLE_RECLAIM = 64, PITCH_ALIGN = 256, PLANE_ALIGN = 4096 };
 
-static size_t align_up(size_t value, size_t alignment)
-{
-    return (value + alignment - 1) & ~(alignment - 1);
-}
-
 static void release_index(export_pool *pool, int index)
 {
     atomic_store(&pool->released_at[index], atomic_fetch_add(&pool->clock, 1) + 1);
@@ -142,8 +137,7 @@ static int add_buffer(mbvk_backend *vk, int index)
 static void plan_layout(exports *out, const mb_video_format *format)
 {
     size_t offset = 0;
-    out->plane_count = mb_plane_count(format);
-    for (int i = 0; i < out->plane_count; i++) {
+    for (int i = 0; i < mb_plane_count(format); i++) {
         out->pitches[i] = align_up(mb_plane_row_bytes(format, i), PITCH_ALIGN);
         out->offsets[i] = offset;
         offset += align_up(out->pitches[i] * (size_t)mb_plane_rows(format, i), PLANE_ALIGN);
@@ -239,7 +233,7 @@ mb_status mbvk_export_acquire(mbvk_backend *vk, mbvk_export_buffer **buffer)
 static mb_host_image mapped_image(const exports *out, const struct mbvk_export_buffer *x)
 {
     mb_host_image image = {{NULL}, {0}};
-    for (int i = 0; i < out->plane_count; i++) {
+    for (int i = 0; i < mb_plane_count(&out->format); i++) {
         image.planes[i] = (uint8_t *)x->memory.mapped + out->offsets[i];
         image.strides[i] = (ptrdiff_t)out->pitches[i];
     }
@@ -258,6 +252,12 @@ mb_status mbvk_export_host_image(mbvk_backend *vk, const mb_host_image *source, 
     return MB_SUCCESS;
 }
 
+void mbvk_export_read(mbvk_backend *vk, const mbvk_export_buffer *buffer, const mb_host_image *target)
+{
+    mb_host_image source = mapped_image(&vk->out, buffer);
+    mb_host_image_copy(target, &source, &vk->out.format);
+}
+
 mb_device_frame mbvk_export_target(mbvk_export_buffer *buffer)
 {
     return (mb_device_frame){MBVK_FRAME_EXPORT, buffer};
@@ -271,8 +271,8 @@ mb_status mbvk_export_describe(mbvk_backend *vk, mbvk_export_buffer *buffer, mbv
         release_index(vk->out.pool, buffer->index);
         return MB_ERROR_DEVICE;
     }
-    output->plane_count = vk->out.plane_count;
-    for (int k = 0; k < vk->out.plane_count; k++) {
+    output->plane_count = mb_plane_count(&vk->out.format);
+    for (int k = 0; k < output->plane_count; k++) {
         output->offsets[k] = (uint32_t)vk->out.offsets[k];
         output->pitches[k] = (uint32_t)vk->out.pitches[k];
     }
@@ -305,6 +305,16 @@ void exports_destroy(mbvk_backend *vk)
     vk->out.pool = NULL;
 }
 
+typedef struct export_rect {
+    int plane;
+    int source_x;
+    int source_y;
+    int target_x;
+    int target_y;
+    int width;
+    int height;
+} export_rect;
+
 static void copy_rect_to_buffer(mbvk_backend *vk, struct mb_image *image, const struct mbvk_export_buffer *x,
                                 const export_rect *r)
 {
@@ -322,9 +332,7 @@ static void fill_bars_from_device(mbvk_backend *vk, const mb_output_copy *copy, 
 {
     struct mb_image *images[2] = {&vk->bg.luma, &vk->bg.chroma};
     for (int i = 0; i < 2; i++) {
-        int sx = i ? copy->format->chroma_shift_x : 0;
-        int sy = i ? copy->format->chroma_shift_y : 0;
-        bar_rects bars = bars_around(copy->area, (plane_extent){images[i]->width, images[i]->height, sx, sy});
+        bar_rects bars = bars_around(mb_plane_area(copy->format, i, copy->area), images[i]);
         for (int k = 0; k < bars.count; k++) {
             mb_rect b = bars.rects[k];
             export_rect r = {i, b.x, b.y, b.x, b.y, b.width, b.height};
@@ -335,7 +343,7 @@ static void fill_bars_from_device(mbvk_backend *vk, const mb_output_copy *copy, 
 
 static void fill_bars(mbvk_backend *vk, const mb_output_copy *copy, struct mbvk_export_buffer *x)
 {
-    if (x->border_version == copy->border.version) {
+    if (copy->border.version != MB_BORDER_FROM_FRAME && x->border_version == copy->border.version) {
         return;
     }
     if (!copy->border.host_template) {
@@ -350,16 +358,17 @@ static void fill_bars(mbvk_backend *vk, const mb_output_copy *copy, struct mbvk_
 mb_status export_record_output(mbvk_backend *vk, const mb_output_copy *copy)
 {
     struct mbvk_export_buffer *x = copy->target->payload;
-    vk->out.border_version = copy->border.version;
+    if (copy->border.version != MB_BORDER_FROM_FRAME) {
+        vk->out.border_version = copy->border.version;
+    }
     if (area_is_cropped(copy->area, copy->format)) {
         fill_bars(vk, copy, x);
     }
-    struct mb_image *images[3] = {copy->planes.luma, copy->planes.chroma[0], copy->planes.chroma[1]};
-    for (int i = 0; i < vk->out.plane_count; i++) {
-        int sx = i ? copy->format->chroma_shift_x : 0;
-        int sy = i ? copy->format->chroma_shift_y : 0;
-        export_rect r = {i, 0, 0, copy->area.x >> sx, copy->area.y >> sy, images[i]->width, images[i]->height};
-        copy_rect_to_buffer(vk, images[i], x, &r);
+    for (int i = 0; i < mb_plane_count(&vk->out.format); i++) {
+        struct mb_image *image = mb_frame_plane(copy->planes, i);
+        mb_rect area = mb_plane_area(copy->format, i, copy->area);
+        export_rect r = {i, 0, 0, area.x, area.y, image->width, image->height};
+        copy_rect_to_buffer(vk, image, x, &r);
     }
     return MB_SUCCESS;
 }
