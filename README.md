@@ -75,7 +75,7 @@ the video stays on the GPU, so the interpolation uses about 25% less CPU.
 The output never goes above your screen's refresh rate. On a 60 Hz screen, a 30 fps video at 4x plays
 at 60 fps, and a 60 fps video plays as it is.
 
-`Ctrl+M` switches between interpolation 2x, 4x, 8x, auto and off.
+`Alt+m` switches between interpolation 2x, 4x, 8x, auto and off.
 
 ## Stutter and high GPU usage
 

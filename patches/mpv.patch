@@ -1,50 +1,8 @@
---- a/meson.build
-+++ b/meson.build
-@@ -1311,7 +1311,11 @@
-     sources += files('video/out/hwdec/hwdec_vulkan.c',
-                      'video/out/vulkan/context.c',
-                      'video/out/vulkan/utils.c',
--                     'video/filter/vf_gpu_vulkan.c')
-+                     'video/filter/vf_gpu_vulkan.c',
-+                     'video/filter/vf_motionblade.c',
-+                     'video/filter/vf_motionblade_format.c',
-+                     'video/filter/vf_motionblade_pulldown.c')
-+    dependencies += subproject('motionblade').get_variable('motionblade_dep')
- endif
- 
- if features['vulkan'] and features['android']
---- a/filters/user_filters.c
-+++ b/filters/user_filters.c
-@@ -103,6 +103,9 @@
- #if (HAVE_GL && HAVE_EGL) || HAVE_VULKAN
-     &vf_gpu,
- #endif
-+#if HAVE_VULKAN
-+    &vf_motionblade,
-+#endif
- };
- 
- static bool get_vf_desc(struct m_obj_desc *dst, int index)
---- a/filters/user_filters.h
-+++ b/filters/user_filters.h
-@@ -37,3 +37,4 @@
- extern const struct mp_user_filter_entry vf_d3d11vpp;
- extern const struct mp_user_filter_entry vf_fingerprint;
- extern const struct mp_user_filter_entry vf_gpu;
-+extern const struct mp_user_filter_entry vf_motionblade;
---- a/etc/input.conf
-+++ b/etc/input.conf
-@@ -178,6 +178,7 @@
- #Ctrl+v loadfile ${clipboard/text} append-play; show-text '+ ${clipboard/text}' # append the copied path
- #DEL script-binding osc/visibility      # cycle OSC visibility between never, auto (mouse-move) and always
- #ctrl+h cycle-values hwdec "no" "auto"  # toggle hardware decoding
-+#Ctrl+m vf-command all factor cycle; show-text "Interpolation: ${vf-metadata/motionblade.00/factor:off}" # cycle motion interpolation
- #F8 show-text ${playlist}               # show the playlist
- #F9 show-text ${track-list}             # show the list of video, audio and sub tracks
- #g ignore
+diff --git a/DOCS/man/vf.rst b/DOCS/man/vf.rst
+index a1f036a..14167ef 100644
 --- a/DOCS/man/vf.rst
 +++ b/DOCS/man/vf.rst
-@@ -865,3 +865,56 @@
+@@ -937,3 +937,56 @@ Available mpv-only filters are:
          Do not use this with ``--vo=gpu``. It will apply filtering twice, since
          most ``--vo=gpu`` options are unconditionally applied to the ``gpu``
          filter. There is no mechanism in mpv to prevent this.
@@ -101,28 +59,71 @@
 +    ``vf-metadata/<label>/factor``.
 +
 +    Example: ``--vf=motionblade --hwdec=auto``
+diff --git a/etc/input.conf b/etc/input.conf
+index 315b5b6..41657e3 100644
+--- a/etc/input.conf
++++ b/etc/input.conf
+@@ -179,6 +179,7 @@
+ #Ctrl+r set file-local-options/start ${=time-pos}; playlist-play-index current yes; show-text "Reloading current file..." # reload the current file
+ #DEL script-binding osc/visibility      # cycle OSC visibility between never, auto (mouse-move) and always
+ #ctrl+h cycle-values hwdec no auto      # toggle hardware decoding
++#Alt+m vf-command all factor cycle; show-text "Interpolation: ${vf-metadata/motionblade.00/factor:off}" # cycle motion interpolation
+ #F8 show-text ${playlist}               # show the playlist
+ #F9 show-text ${track-list}             # show the list of video, audio and sub tracks
+ #g ignore
+diff --git a/filters/user_filters.c b/filters/user_filters.c
+index ea7b69c..53eef20 100644
+--- a/filters/user_filters.c
++++ b/filters/user_filters.c
+@@ -107,6 +107,9 @@ const struct mp_user_filter_entry *vf_list[] = {
+ #if (HAVE_GL && HAVE_EGL) || HAVE_VULKAN
+     &vf_gpu,
+ #endif
++#if HAVE_VULKAN
++    &vf_motionblade,
++#endif
+ };
+ 
+ static bool get_vf_desc(struct m_obj_desc *dst, int index)
+diff --git a/filters/user_filters.h b/filters/user_filters.h
+index f2c31ef..c3b17a2 100644
+--- a/filters/user_filters.h
++++ b/filters/user_filters.h
+@@ -39,3 +39,4 @@ extern const struct mp_user_filter_entry vf_d3d11vpp;
+ extern const struct mp_user_filter_entry vf_amf_frc;
+ extern const struct mp_user_filter_entry vf_fingerprint;
+ extern const struct mp_user_filter_entry vf_gpu;
++extern const struct mp_user_filter_entry vf_motionblade;
+diff --git a/meson.build b/meson.build
+index b15f310..d955400 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1356,7 +1356,11 @@ if features['vulkan']
+     sources += files('video/out/hwdec/hwdec_vulkan.c',
+                      'video/out/vulkan/context.c',
+                      'video/out/vulkan/utils.c',
+-                     'video/filter/vf_gpu_vulkan.c')
++                     'video/filter/vf_gpu_vulkan.c',
++                     'video/filter/vf_motionblade.c',
++                     'video/filter/vf_motionblade_format.c',
++                     'video/filter/vf_motionblade_pulldown.c')
++    dependencies += subproject('motionblade').get_variable('motionblade_dep')
+ endif
+ 
+ if features['vulkan'] and features['android']
 diff --git a/video/out/vulkan/context.c b/video/out/vulkan/context.c
+index 892396f..3f51535 100644
 --- a/video/out/vulkan/context.c
 +++ b/video/out/vulkan/context.c
-@@ -347,9 +347,16 @@
-         .uniformBufferStandardLayout = true,
+@@ -413,6 +413,7 @@ pl_vulkan mppl_create_vulkan(struct vulkan_opts *opts,
+         .pNext = &atomic_float_feature,
+         .dynamicRendering = true,
+         .subgroupSizeControl = true,
++        .computeFullSubgroups = true,
      };
  
-+    VkPhysicalDeviceVulkan13Features recommended_vk13 = {
-+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-+        .pNext = &recommended_vk12,
-+        .subgroupSizeControl = true,
-+        .computeFullSubgroups = true,
-+    };
-+
-     VkPhysicalDeviceVulkan11Features recommended_vk11 = {
-         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
--        .pNext = &recommended_vk12,
-+        .pNext = &recommended_vk13,
-         .storageBuffer16BitAccess = true,
-         .uniformAndStorageBuffer16BitAccess = true,
-     };
-@@ -360,6 +366,7 @@
+     VkPhysicalDeviceVulkan12Features recommended_vk12 = {
+@@ -443,6 +444,7 @@ pl_vulkan mppl_create_vulkan(struct vulkan_opts *opts,
          .features = {
              .shaderInt16 = true,
              .shaderFloat64 = true,
