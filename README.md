@@ -79,7 +79,7 @@ at 60 fps, and a 60 fps video plays as it is.
 
 ## Stutter and high GPU usage
 
-If playback stutters, set the GPU power mode to maximum performance: power saving can keep its clocks
+If playback stutters, set the GPU power mode to maximum performance as power saving can keep its clocks
 too low.
 
 | | Windows | Linux (as root) |
