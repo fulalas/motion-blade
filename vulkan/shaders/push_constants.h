@@ -241,6 +241,10 @@ struct interpolate_push {
     float nearest_lo;
     float nearest_hi;
     float panel_switch;
+    float unsure_spread_lo;
+    float unsure_spread_hi;
+    float unsure_margin_lo;
+    float unsure_margin_hi;
 };
 
 struct extrapolate_push {

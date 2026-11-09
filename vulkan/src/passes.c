@@ -283,7 +283,8 @@ static struct interpolate_push interpolate_constants(const mb_interpolate_pass *
         w->width, w->height, w->grid.blocks_x, w->grid.blocks_y, c->width, c->height, c->shift_x, c->shift_y,
         w->base_level, w->t, k->softness, k->one_sided, k->unconfirmed, k->fallback, k->candidate_prior,
         k->consistency, k->fallback_uncover, pass->luma_scale, w->range.max_value, w->range.step, k->foreground_bonus,
-        k->nearest_side_lo, k->nearest_side_hi, k->panel_switch,
+        k->nearest_side_lo, k->nearest_side_hi, k->panel_switch, k->unsure_spread_lo, k->unsure_spread_hi,
+        k->unsure_margin_lo, k->unsure_margin_hi,
     };
 }
 

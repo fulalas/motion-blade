@@ -227,6 +227,10 @@ static mb_blend_costs blend_costs(const mb_engine *e)
         .nearest_side_lo = b->nearest_side_lo,
         .nearest_side_hi = b->nearest_side_hi,
         .panel_switch = e->params.panel.switch_level,
+        .unsure_spread_lo = b->unsure_spread_lo,
+        .unsure_spread_hi = b->unsure_spread_hi,
+        .unsure_margin_lo = b->unsure_margin_lo,
+        .unsure_margin_hi = b->unsure_margin_hi,
     };
 }
 

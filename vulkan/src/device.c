@@ -3,7 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { MAX_DEVICES = 16, MAX_FAMILIES = 16, MAX_EXTENSIONS = 8, PREFERRED_SUBGROUP = 32, NARROW_SUBGROUP = 16 };
+enum { MAX_DEVICES = 16, MAX_FAMILIES = 16, MAX_EXTENSIONS = 8, PREFERRED_SUBGROUP = 32, NARROW_SUBGROUP = 16,
+       NVIDIA_VENDOR_ID = 0x10DE };
 
 typedef struct extension_support {
     bool push_descriptors;
@@ -343,6 +344,17 @@ static mb_status prepare_device(mbvk_backend *vk, const VkPhysicalDeviceProperti
     return status;
 }
 
+static bool nvidia_proprietary(VkPhysicalDevice device, const VkPhysicalDeviceProperties *p)
+{
+    if (p->apiVersion < VK_API_VERSION_1_2) {
+        return p->vendorID == NVIDIA_VENDOR_ID;
+    }
+    VkPhysicalDeviceDriverProperties driver = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+    VkPhysicalDeviceProperties2 properties = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &driver};
+    vkGetPhysicalDeviceProperties2(device, &properties);
+    return driver.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY;
+}
+
 mb_status device_open(mbvk_backend *vk, const mbvk_config *config)
 {
     vk->uses_shared = config->shared != NULL;
@@ -365,6 +377,7 @@ mb_status device_open(mbvk_backend *vk, const mbvk_config *config)
     }
     vkGetDeviceQueue(vk->device, vk->queue_family, 0, &vk->queue);
     load_functions(vk);
+    vk->features.nvidia_proprietary = nvidia_proprietary(vk->physical_device, &p);
     if (!vk->push_descriptor_set) {
         mb_log(&vk->logger, MB_LOG_WARNING, "the Vulkan device lacks push descriptors");
         return MB_ERROR_UNSUPPORTED;

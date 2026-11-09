@@ -202,6 +202,7 @@ typedef struct import_cache {
 
 typedef struct device_features {
     bool dmabuf;
+    bool nvidia_proprietary;
     bool modifiers;
     bool foreign_queue;
     bool push_descriptors;

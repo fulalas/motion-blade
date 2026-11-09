@@ -83,6 +83,10 @@ typedef struct mb_blend_params {
     float foreground_bonus;
     float nearest_side_lo;
     float nearest_side_hi;
+    float unsure_spread_lo;
+    float unsure_spread_hi;
+    float unsure_margin_lo;
+    float unsure_margin_hi;
 } mb_blend_params;
 
 typedef struct mb_panel_params {

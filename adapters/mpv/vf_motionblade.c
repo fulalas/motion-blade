@@ -262,6 +262,10 @@ static void setup_export(struct mp_filter *f, struct mp_image *mpi, int swfmt, c
     if (!p->fourcc || !zerocopy_allows(p, ZEROCOPY_DRM) || !p->vk) {
         return;
     }
+    if (p->opts->zerocopy == ZEROCOPY_AUTO && !mbvk_export_trusted(p->vk)) {
+        MP_VERBOSE(f, "dma-buf output is off on this driver, zerocopy=drm forces it\n");
+        return;
+    }
     struct mp_hwdec_ctx *hw = mp_filter_load_hwdec_device(f, IMGFMT_DRMPRIME, AV_HWDEVICE_TYPE_DRM);
     if (!hw) {
         MP_VERBOSE(f, "the video output takes no dma-buf frames\n");

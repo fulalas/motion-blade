@@ -293,6 +293,10 @@ typedef struct mb_blend_costs {
     float nearest_side_lo;
     float nearest_side_hi;
     float panel_switch;
+    float unsure_spread_lo;
+    float unsure_spread_hi;
+    float unsure_margin_lo;
+    float unsure_margin_hi;
 } mb_blend_costs;
 
 typedef struct mb_output_range {

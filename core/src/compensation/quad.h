@@ -10,6 +10,7 @@ typedef struct quad_candidate {
     vec2 vector;
     int mode;
     float coverage[QUAD_PIXELS];
+    float coverage_wide[QUAD_PIXELS];
     float cost[QUAD_PIXELS];
     unsigned sides[QUAD_PIXELS];
     float weight_a[QUAD_PIXELS];
@@ -30,6 +31,8 @@ typedef struct quad_state {
     int count;
     int fallback_index;
     bool has_uncover;
+    float spread_weight;
+    float unsure;
     float fallback_sum[QUAD_PIXELS];
     float panel_sum[QUAD_PIXELS];
     float coverage_sum[QUAD_PIXELS];
@@ -64,8 +67,10 @@ typedef struct field_probe {
 covered_pixels quad_covered_pixels(const mb_chroma_layout *chroma, ivec2 chroma_index);
 void quad_begin(quad_state *q, const mb_interpolate_pass *pass, ivec2 q0);
 void quad_gather_blocks(quad_state *q);
+void quad_gather_wide(quad_state *q);
 void quad_add_fallback(quad_state *q);
 void quad_score(quad_state *q);
+void quad_measure_unsure(quad_state *q);
 void quad_weigh(quad_state *q);
 quad_values quad_blend_luma(const quad_state *q);
 void quad_measure_panels(quad_state *q);

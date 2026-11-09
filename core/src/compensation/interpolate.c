@@ -14,8 +14,10 @@ static void blend_quad(const mb_interpolate_pass *pass, ivec2 q0)
     quad_state q;
     quad_begin(&q, pass, q0);
     quad_gather_blocks(&q);
+    quad_gather_wide(&q);
     quad_add_fallback(&q);
     quad_score(&q);
+    quad_measure_unsure(&q);
     quad_weigh(&q);
     quad_values blended = quad_blend_luma(&q);
     quad_measure_panels(&q);

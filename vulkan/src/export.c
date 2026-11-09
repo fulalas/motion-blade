@@ -217,6 +217,11 @@ static int acquire_index(mbvk_backend *vk)
     return scan.best;
 }
 
+bool mbvk_export_trusted(const mbvk_backend *vk)
+{
+    return !vk->features.nvidia_proprietary;
+}
+
 mb_status mbvk_export_acquire(mbvk_backend *vk, mbvk_export_buffer **buffer)
 {
     if (!vk->out.pool) {

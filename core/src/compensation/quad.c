@@ -6,6 +6,8 @@
 #include "reference/cpu_resources.h"
 
 static const float SIDE_LEVELS = 7.0f;
+static const float WIDE_MERGE = 2.0f;
+static const float WIDE_REACH = 16.0f;
 static const unsigned SIDE_BITS = 3;
 static const unsigned SIDE_MASK = 7;
 
@@ -31,6 +33,13 @@ static int shift_down(int value, int bits)
     return value >= 0 ? value >> bits : -((-value + (1 << bits) - 1) >> bits);
 }
 
+static int append_candidate(quad_state *q, vec2 u, int mode)
+{
+    int slot = q->count++;
+    q->candidates[slot] = (quad_candidate){.vector = u, .mode = mode};
+    return slot;
+}
+
 static int candidate_slot(quad_state *q, vec2 u, int mode)
 {
     for (int i = 0; i < q->count; i++) {
@@ -38,10 +47,25 @@ static int candidate_slot(quad_state *q, vec2 u, int mode)
             return i;
         }
     }
-    int slot = q->count++;
-    q->candidates[slot] = (quad_candidate){.vector = u, .mode = mode};
     q->has_uncover = q->has_uncover || mode == MB_MODE_UNCOVER;
-    return slot;
+    return append_candidate(q, u, mode);
+}
+
+static int wide_slot(quad_state *q, vec2 u, int mode)
+{
+    int nearest = -1;
+    float distance = WIDE_MERGE;
+    for (int i = 0; i < q->count; i++) {
+        float d = v2_l1(v2_sub(q->candidates[i].vector, u));
+        if (d <= distance) {
+            nearest = i;
+            distance = d;
+        }
+    }
+    if (nearest >= 0) {
+        return nearest;
+    }
+    return q->count < QUAD_MAX_CANDIDATES - 1 ? append_candidate(q, u, mode) : -1;
 }
 
 static vec4 cell_of(const quad_state *q, ivec2 block, ivec2 qm)
@@ -54,16 +78,21 @@ static vec4 cell_of(const quad_state *q, ivec2 block, ivec2 qm)
     return vec4s(pass->cells)[sy * pass->warp.grid.blocks_x * 2 + sx];
 }
 
+static float tent(const quad_state *q, int j, ivec2 block, float reach)
+{
+    vec2 p = at_level(q, pixel_of(q, j));
+    vec2 center = v2((float)(block.x * MB_BLOCK_SIZE) + 3.5f, (float)(block.y * MB_BLOCK_SIZE) + 3.5f);
+    float wx = fmaxf(0.0f, 1.0f - fabsf(p.x - center.x) / reach);
+    float wy = fmaxf(0.0f, 1.0f - fabsf(p.y - center.y) / reach);
+    return wx * wy;
+}
+
 static void add_block_coverage(quad_state *q, int slot, ivec2 block, int index)
 {
     const mb_interpolate_pass *pass = q->pass;
-    vec2 center = v2((float)(block.x * MB_BLOCK_SIZE) + 3.5f, (float)(block.y * MB_BLOCK_SIZE) + 3.5f);
     vec4 offset = vec4s(pass->offsets)[index];
     for (int j = 0; j < QUAD_PIXELS; j++) {
-        vec2 p = at_level(q, pixel_of(q, j));
-        float wx = fmaxf(0.0f, 1.0f - fabsf(p.x - center.x) / 8.0f);
-        float wy = fmaxf(0.0f, 1.0f - fabsf(p.y - center.y) / 8.0f);
-        float w = wx * wy;
+        float w = tent(q, j, block, 8.0f);
         q->candidates[slot].coverage[j] += w;
         q->fallback_sum[j] += w * floats(pass->fallback)[index];
         q->panel_sum[j] += w * floats(pass->panels)[index];
@@ -73,16 +102,25 @@ static void add_block_coverage(quad_state *q, int slot, ivec2 block, int index)
     }
 }
 
+static ivec2 level_quad(const quad_state *q)
+{
+    return iv2(q->q0.x >> q->pass->warp.base_level, q->q0.y >> q->pass->warp.base_level);
+}
+
+static ivec2 block_origin(ivec2 qm)
+{
+    int qx = qm.x >> 2;
+    int qy = qm.y >> 2;
+    return iv2((qx & 1) ? qx / 2 : qx / 2 - 1, (qy & 1) ? qy / 2 : qy / 2 - 1);
+}
+
 void quad_gather_blocks(quad_state *q)
 {
     const mb_interpolate_pass *pass = q->pass;
-    ivec2 qm = iv2(q->q0.x >> pass->warp.base_level, q->q0.y >> pass->warp.base_level);
-    int qx = qm.x >> 2;
-    int qy = qm.y >> 2;
-    int bx = (qx & 1) ? qx / 2 : qx / 2 - 1;
-    int by = (qy & 1) ? qy / 2 : qy / 2 - 1;
+    ivec2 qm = level_quad(q);
+    ivec2 origin = block_origin(qm);
     for (int k = 0; k < 4; k++) {
-        ivec2 block = iv2(bx + (k & 1), by + (k >> 1));
+        ivec2 block = iv2(origin.x + (k & 1), origin.y + (k >> 1));
         vec4 cell = cell_of(q, block, qm);
         int slot = candidate_slot(q, v2_scale(v4_xy(cell), q->scale), (int)cell.z);
         add_block_coverage(q, slot, block, block_index(block, pass->warp.grid));
@@ -90,6 +128,46 @@ void quad_gather_blocks(quad_state *q)
     float norm = fmaxf(q->offset.w, 1e-6f);
     q->offset = (vec4){q->offset.x / norm, q->offset.y / norm, q->offset.z / norm, q->offset.w / norm};
     q->luma_offset = q->offset.x * 255.0f * pass->luma_scale;
+}
+
+static ivec2 wide_block(ivec2 origin, int k)
+{
+    return iv2(origin.x + (k & 3), origin.y + (k >> 2));
+}
+
+static float vector_spread(const quad_state *q, ivec2 origin, ivec2 qm)
+{
+    vec2 lo = v2(1e30f, 1e30f);
+    vec2 hi = v2(-1e30f, -1e30f);
+    for (int k = 0; k < 16; k++) {
+        vec2 u = v2_scale(v4_xy(cell_of(q, wide_block(origin, k), qm)), q->scale);
+        lo = v2(fminf(lo.x, u.x), fminf(lo.y, u.y));
+        hi = v2(fmaxf(hi.x, u.x), fmaxf(hi.y, u.y));
+    }
+    return (hi.x - lo.x) + (hi.y - lo.y);
+}
+
+void quad_gather_wide(quad_state *q)
+{
+    const mb_blend_costs *costs = &q->pass->costs;
+    if (costs->unsure_spread_hi <= 0.0f) {
+        return;
+    }
+    ivec2 qm = level_quad(q);
+    ivec2 near = block_origin(qm);
+    ivec2 origin = iv2(near.x - 1, near.y - 1);
+    q->spread_weight = smoothstepf(costs->unsure_spread_lo, costs->unsure_spread_hi, vector_spread(q, origin, qm));
+    if (q->spread_weight <= 0.0f) {
+        return;
+    }
+    for (int k = 0; k < 16; k++) {
+        ivec2 block = wide_block(origin, k);
+        vec4 cell = cell_of(q, block, qm);
+        int slot = wide_slot(q, v2_scale(v4_xy(cell), q->scale), (int)cell.z);
+        for (int j = 0; slot >= 0 && j < QUAD_PIXELS; j++) {
+            q->candidates[slot].coverage_wide[j] += tent(q, j, block, WIDE_REACH);
+        }
+    }
 }
 
 void quad_add_fallback(quad_state *q)
@@ -259,6 +337,40 @@ void quad_score(quad_state *q)
     }
 }
 
+static float pixel_ambiguity(const quad_state *q, int j)
+{
+    const mb_blend_costs *costs = &q->pass->costs;
+    float best_cost = 1e30f;
+    vec2 best_vector = v2(0.0f, 0.0f);
+    for (int i = 0; i < q->count; i++) {
+        if (i != q->fallback_index && q->candidates[i].cost[j] < best_cost) {
+            best_cost = q->candidates[i].cost[j];
+            best_vector = q->candidates[i].vector;
+        }
+    }
+    float rival = 1e30f;
+    for (int i = 0; i < q->count; i++) {
+        vec2 d = v2_sub(q->candidates[i].vector, best_vector);
+        if (i != q->fallback_index && v2_l1(d) > costs->unsure_spread_lo) {
+            rival = fminf(rival, q->candidates[i].cost[j]);
+        }
+    }
+    return 1.0f - smoothstepf(costs->unsure_margin_lo, costs->unsure_margin_hi, rival - best_cost);
+}
+
+void quad_measure_unsure(quad_state *q)
+{
+    q->unsure = 0.0f;
+    if (q->spread_weight <= 0.0f) {
+        return;
+    }
+    float ambiguity = 0.0f;
+    for (int j = 0; j < QUAD_PIXELS; j++) {
+        ambiguity += 0.25f * pixel_ambiguity(q, j);
+    }
+    q->unsure = q->spread_weight * ambiguity;
+}
+
 void quad_soft_scores(const float *cost, int count, float softness, float *score)
 {
     float lowest = 1e30f;
@@ -271,18 +383,33 @@ void quad_soft_scores(const float *cost, int count, float softness, float *score
     }
 }
 
-static void weigh_pixel(quad_state *q, int j)
+static void blend_scores(const quad_state *q, int j, float *raw)
 {
     const mb_blend_costs *costs = &q->pass->costs;
     float cost[QUAD_MAX_CANDIDATES];
     for (int i = 0; i < q->count; i++) {
         cost[i] = q->candidates[i].cost[j];
     }
-    float raw[QUAD_MAX_CANDIDATES];
     quad_soft_scores(cost, q->count, costs->softness, raw);
-    float total = 0.0f;
+    float sharp_total = 0.0f;
+    float soft_total = 0.0f;
     for (int i = 0; i < q->count; i++) {
         raw[i] *= costs->candidate_prior + q->candidates[i].coverage[j];
+        sharp_total += raw[i];
+        soft_total += q->candidates[i].coverage_wide[j];
+    }
+    float soft_scale = soft_total > 0.0f ? sharp_total / soft_total : 0.0f;
+    for (int i = 0; i < q->count; i++) {
+        raw[i] = mixf(raw[i], q->candidates[i].coverage_wide[j] * soft_scale, q->unsure);
+    }
+}
+
+static void weigh_pixel(quad_state *q, int j)
+{
+    float raw[QUAD_MAX_CANDIDATES];
+    blend_scores(q, j, raw);
+    float total = 0.0f;
+    for (int i = 0; i < q->count; i++) {
         total += raw[i];
     }
     float fallback = q->coverage_sum[j] > 0.0f ? q->fallback_sum[j] / q->coverage_sum[j] : 0.0f;
@@ -292,6 +419,9 @@ static void weigh_pixel(quad_state *q, int j)
         float a = (float)(c->sides[j] & SIDE_MASK) / SIDE_LEVELS;
         float b = (float)(c->sides[j] >> SIDE_BITS) / SIDE_LEVELS;
         float toward_b = q->t * (1.0f - a - b) + b;
+        if (c->mode == MB_MODE_TWO_SIDED) {
+            toward_b = mixf(toward_b, q->t, q->unsure);
+        }
         c->weight_a[j] = w * (1.0f - toward_b);
         c->weight_b[j] = w * toward_b;
     }

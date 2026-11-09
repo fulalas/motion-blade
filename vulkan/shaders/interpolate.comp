@@ -43,6 +43,24 @@ int candidate_count = 0;
 bool has_uncover = false;
 vec4 light = vec4(0.0);
 
+#define WIDE_MERGE 2.0
+#define WIDE_REACH 16.0
+
+float coverage_wide[MAX_CANDIDATES][4];
+float spread_weight = 0.0;
+
+int append_candidate(vec2 u, int mode)
+{
+    int ci = candidate_count++;
+    candidate_vectors[ci] = u;
+    candidate_modes[ci] = mode;
+    for (int j = 0; j < 4; j++) {
+        coverage[ci][j] = 0.0;
+        coverage_wide[ci][j] = 0.0;
+    }
+    return ci;
+}
+
 int candidate_slot(vec2 u, int mode)
 {
     int ci = -1;
@@ -54,43 +72,98 @@ int candidate_slot(vec2 u, int mode)
     if (ci >= 0) {
         return ci;
     }
-    ci = candidate_count++;
-    candidate_vectors[ci] = u;
-    candidate_modes[ci] = mode;
     has_uncover = has_uncover || mode == MB_MODE_UNCOVER;
-    for (int j = 0; j < 4; j++) {
-        coverage[ci][j] = 0.0;
+    return append_candidate(u, mode);
+}
+
+int wide_slot(vec2 u, int mode)
+{
+    int nearest = -1;
+    float distance = WIDE_MERGE;
+    for (int i = 0; i < candidate_count; i++) {
+        float d = l1(candidate_vectors[i] - u);
+        if (d <= distance) {
+            nearest = i;
+            distance = d;
+        }
     }
-    return ci;
+    if (nearest >= 0) {
+        return nearest;
+    }
+    return candidate_count < MAX_CANDIDATES - 1 ? append_candidate(u, mode) : -1;
+}
+
+float tent(ivec2 q0, int j, ivec2 b, float reach)
+{
+    vec2 p = at_level(vec2(q0 + ivec2(j & 1, j >> 1)));
+    vec2 w2 = max(vec2(0.0), 1.0 - abs(p - (vec2(b * 8) + 3.5)) / reach);
+    return w2.x * w2.y;
 }
 
 void add_coverage(int ci, ivec2 b, int bi, ivec2 q0)
 {
-    vec2 cb = vec2(b * 8) + 3.5;
     for (int j = 0; j < 4; j++) {
-        vec2 p = at_level(vec2(q0 + ivec2(j & 1, j >> 1)));
-        vec2 w2 = max(vec2(0.0), 1.0 - abs(p - cb) / 8.0);
-        coverage[ci][j] += w2.x * w2.y;
-        fallback_sum[j] += w2.x * w2.y * fallback_weights[bi];
-        panel_sum[j] += w2.x * w2.y * panel_weights[bi];
-        coverage_sum[j] += w2.x * w2.y;
-        light += w2.x * w2.y * vec4(offsets[bi].xyz, 1.0);
+        float w = tent(q0, j, b, 8.0);
+        coverage[ci][j] += w;
+        fallback_sum[j] += w * fallback_weights[bi];
+        panel_sum[j] += w * panel_weights[bi];
+        coverage_sum[j] += w;
+        light += w * vec4(offsets[bi].xyz, 1.0);
+    }
+}
+
+ivec2 block_origin(ivec2 qm)
+{
+    int qx = qm.x >> 2, qy = qm.y >> 2;
+    return ivec2((qx & 1) != 0 ? qx / 2 : qx / 2 - 1, (qy & 1) != 0 ? qy / 2 : qy / 2 - 1);
+}
+
+vec4 cell_at(ivec2 b, ivec2 qm)
+{
+    ivec2 cell = clamp(b * 2 + clamp((qm - b * 8) >> 2, ivec2(0), ivec2(1)), ivec2(0), blocks() * 2 - 1);
+    return cells[cell.y * push.blocks_x * 2 + cell.x];
+}
+
+float vector_spread(ivec2 origin, ivec2 qm)
+{
+    vec2 lo = vec2(1e30), hi = vec2(-1e30);
+    for (int k = 0; k < 16; k++) {
+        vec2 u = cell_at(origin + ivec2(k & 3, k >> 2), qm).xy * level_scale;
+        lo = min(lo, u);
+        hi = max(hi, u);
+    }
+    return (hi.x - lo.x) + (hi.y - lo.y);
+}
+
+void gather_wide(ivec2 q0)
+{
+    if (push.unsure_spread_hi <= 0.0) {
+        return;
+    }
+    ivec2 qm = q0 >> push.base_level;
+    ivec2 origin = block_origin(qm) - 1;
+    spread_weight = smoothstep(push.unsure_spread_lo, push.unsure_spread_hi, vector_spread(origin, qm));
+    if (spread_weight <= 0.0) {
+        return;
+    }
+    for (int k = 0; k < 16; k++) {
+        ivec2 b = origin + ivec2(k & 3, k >> 2);
+        vec4 tv = cell_at(b, qm);
+        int ci = wide_slot(tv.xy * level_scale, int(tv.z));
+        for (int j = 0; ci >= 0 && j < 4; j++) {
+            coverage_wide[ci][j] += tent(q0, j, b, WIDE_REACH);
+        }
     }
 }
 
 void gather_blocks(ivec2 q0)
 {
     ivec2 qm = q0 >> push.base_level;
-    int qx = qm.x >> 2, qy = qm.y >> 2;
-    int bx = (qx & 1) != 0 ? qx / 2 : qx / 2 - 1;
-    int by = (qy & 1) != 0 ? qy / 2 : qy / 2 - 1;
+    ivec2 origin = block_origin(qm);
     for (int k = 0; k < 4; k++) {
-        ivec2 b = ivec2(bx + (k & 1), by + (k >> 1));
-        int bi = block_index(b, blocks());
-        ivec2 cell = clamp(b * 2 + clamp((qm - b * 8) >> 2, ivec2(0), ivec2(1)), ivec2(0), blocks() * 2 - 1);
-        vec4 tv = cells[cell.y * push.blocks_x * 2 + cell.x];
-        int ci = candidate_slot(tv.xy * level_scale, int(tv.z));
-        add_coverage(ci, b, bi, q0);
+        ivec2 b = origin + ivec2(k & 1, k >> 1);
+        vec4 tv = cell_at(b, qm);
+        add_coverage(candidate_slot(tv.xy * level_scale, int(tv.z)), b, block_index(b, blocks()), q0);
     }
     light /= max(light.w, 1e-6);
 }
@@ -114,6 +187,7 @@ void add_fallback()
     candidate_modes[fallback_index] = MB_MODE_TWO_SIDED;
     for (int j = 0; j < 4; j++) {
         coverage[fallback_index][j] = 1.0 - push.candidate_prior;
+        coverage_wide[fallback_index][j] = 0.0;
     }
 }
 
@@ -186,15 +260,49 @@ void score_candidates(ivec2 q0, float luma_offset)
     }
 }
 
+float unsure = 0.0;
+
+void measure_unsure()
+{
+    if (spread_weight <= 0.0) {
+        return;
+    }
+    float ambiguity = 0.0;
+    for (int j = 0; j < 4; j++) {
+        float best_cost = 1e30;
+        vec2 best_vector = vec2(0.0);
+        for (int i = 0; i < candidate_count; i++) {
+            if (i != fallback_index && cost[i][j] < best_cost) {
+                best_cost = cost[i][j];
+                best_vector = candidate_vectors[i];
+            }
+        }
+        float rival = 1e30;
+        for (int i = 0; i < candidate_count; i++) {
+            if (i != fallback_index && l1(candidate_vectors[i] - best_vector) > push.unsure_spread_lo) {
+                rival = min(rival, cost[i][j]);
+            }
+        }
+        ambiguity += 0.25 * (1.0 - smoothstep(push.unsure_margin_lo, push.unsure_margin_hi, rival - best_cost));
+    }
+    unsure = spread_weight * ambiguity;
+}
+
 void weigh_pixel(int j)
 {
     float lowest = 1e30;
     for (int i = 0; i < candidate_count; i++) {
         lowest = min(lowest, cost[i][j]);
     }
-    float total = 0.0, raw[MAX_CANDIDATES];
+    float total = 0.0, sharp_total = 0.0, soft_total = 0.0, raw[MAX_CANDIDATES];
     for (int i = 0; i < candidate_count; i++) {
         raw[i] = (push.candidate_prior + coverage[i][j]) * soft_score(cost[i][j], lowest);
+        sharp_total += raw[i];
+        soft_total += coverage_wide[i][j];
+    }
+    float soft_scale = soft_total > 0.0 ? sharp_total / soft_total : 0.0;
+    for (int i = 0; i < candidate_count; i++) {
+        raw[i] = mix(raw[i], coverage_wide[i][j] * soft_scale, unsure);
         total += raw[i];
     }
     float fallback = coverage_sum[j] > 0.0 ? fallback_sum[j] / coverage_sum[j] : 0.0;
@@ -203,6 +311,9 @@ void weigh_pixel(int j)
         uint code = (sides[j] >> (6 * i)) & 63u;
         float qa = float(code & 7u) / SIDE_LEVELS, qb = float(code >> 3) / SIDE_LEVELS;
         float toward_b = t * (1.0 - qa - qb) + qb;
+        if (candidate_modes[i] == MB_MODE_TWO_SIDED) {
+            toward_b = mix(toward_b, t, unsure);
+        }
         weight_a[i][j] = w * (1.0 - toward_b);
         weight_b[i][j] = w * toward_b;
     }
@@ -348,8 +459,10 @@ void main()
     texel_size = 1.0 / vec2(push.width, push.height);
     t = push.t;
     gather_blocks(q0);
+    gather_wide(q0);
     add_fallback();
     score_candidates(q0, light.x * 255.0 * push.luma_scale);
+    measure_unsure();
     for (int j = 0; j < 4; j++) {
         weigh_pixel(j);
     }

@@ -70,6 +70,7 @@ mb_device_frame mbvk_dmabuf_frame(mbvk_dmabuf_input *input);
 mb_device_frame mbvk_vulkan_frame_ref(mbvk_vulkan_frame *frame);
 
 mb_status mbvk_export_enable(mbvk_backend *vk, const mb_video_format *format);
+bool mbvk_export_trusted(const mbvk_backend *vk);
 mb_status mbvk_export_acquire(mbvk_backend *vk, mbvk_export_buffer **buffer);
 mb_status mbvk_export_host_image(mbvk_backend *vk, const mb_host_image *source, mbvk_export_buffer **buffer);
 mb_device_frame mbvk_export_target(mbvk_export_buffer *buffer);
