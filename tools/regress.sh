@@ -63,6 +63,7 @@ cuts() {
     cut_list cuts_concert -i "$D/film/concert_cut_backlit_422_1080p30.mp4" -vf fps=60000/1001
     cut_list cuts_concert_native -i "$D/film/concert_cut_backlit_422_1080p30.mp4"
     cut_list cuts_concert_480i -i "$D/film/concert_pulldown_cut_480i30.mkv"
+    cut_list cuts_squirrel -i "$D/film/bbb_squirrel_branch_1080p30.mp4"
     set -- "$D"/light/flash_*.mkv
     [ -f "$1" ] || { echo "no $D/light/flash_*.mkv, run LIGHT=flash tools/light.sh" >&2; exit 1; }
     local n=0 f

@@ -5,7 +5,7 @@
 #include "reference/cpu_resources.h"
 #include "reference/kernels.h"
 
-static const float MIN_ERROR_FLOOR = 10.0f;
+static const float MIN_ERROR_FLOOR = 14.0f;
 static const float ERROR_OFFSET = 4.0f;
 static const float MIN_RECORDED_ERROR = 0.1f;
 

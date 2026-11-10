@@ -9,7 +9,7 @@ layout(push_constant) uniform Push { cut_push push; };
 layout(std430, binding = 0) buffer Stats { uint stats[]; };
 layout(std430, binding = 1) buffer History { float history[]; };
 
-#define MIN_ERROR_FLOOR 10.0
+#define MIN_ERROR_FLOOR 14.0
 #define ERROR_OFFSET 4.0
 #define MIN_RECORDED_ERROR 0.1
 
