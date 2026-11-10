@@ -8,6 +8,8 @@ rate from 2x to 8x, or to your display's refresh rate.
 Motion Blade is free, open source and runs on GPUs from any vendor. Even an integrated GPU like the
 AMD 780M interpolates 4K 24 fps video to 48 fps in real time.
 
+The table below (generated with `tools/compare/run.sh`) compares Motion Blade against other solutions:
+
 | | License | OS | GPU | Performance cost (lower is better) | Fidelity (higher is better) | Detail (higher is better) |
 |---|---|---|---|---|---|---|
 | Motion Blade 4.5.0 | open source | Linux, Windows | any with Vulkan | 16.6 ms | 100% | 100% |
@@ -81,12 +83,13 @@ too low.
 
 ## Tests
 
-`make` builds `eval` and the tests, `make test` runs them. `build/local/tools/eval/eval clip.mkv` drops
-every other frame of a video, rebuilds it and scores it against the real one (`-backend cpu` uses the C
-reference instead of the GPU). `tools/regress.sh` checks quality, scene cuts and speed against
-`tools/baseline.txt`; `tools/fetch-data.sh` downloads the test clips. `MOTIONBLADE_PROFILE=1` prints the
-GPU time of each step. `tools/compare/run.sh` produces the comparison table above (see
-`tools/compare/README.md`).
+- `make` builds `eval` and the tests; `make test` runs them.
+- `build/local/tools/eval/eval clip.mkv` drops every other frame of a video, rebuilds it and scores
+  it against the real one. `-backend cpu` uses the C reference instead of the GPU.
+- `tools/fetch-data.sh` downloads the test clips.
+- `tools/regress.sh` checks quality, scene cuts and speed against `tools/baseline.txt`.
+- `MOTIONBLADE_PROFILE=1` prints the GPU time of each step.
+- `tools/compare/run.sh` compares Motion Blade with the other tools (see `tools/compare/README.md`).
 
 ## License
 
