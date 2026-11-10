@@ -143,14 +143,14 @@ static vec4 search_block(const mb_iterate_pass *pass, int id)
     float limit = early_exit_limit(&state.origin, pass->early_exit);
     for (int i = 0; i < list.count; i++) {
         try_candidate(&state, pass, list.vectors[i], list.penalties[i]);
-        if (state.best.sad < limit) {
+        if (search_state_best_below(&state, &pass->target->texture, limit)) {
             break;
         }
     }
     vec2 steps[2];
     random_steps((uint32_t)id, pass->seed, steps);
     vec2 base = state.best.vector;
-    for (int k = 0; k < 2 && state.best.sad >= limit; k++) {
+    for (int k = 0; k < 2 && !search_state_best_below(&state, &pass->target->texture, limit); k++) {
         try_candidate(&state, pass, v2_add(base, steps[k]), pass->penalties.random);
     }
     search_state_measure_best(&state, &pass->target->texture);

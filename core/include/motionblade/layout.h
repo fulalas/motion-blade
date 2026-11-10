@@ -6,6 +6,10 @@
 #define MB_WINDOW_MARGIN 4
 #define MB_ITERATE_STRIDE 4
 #define MB_LOCAL_STRIDE 2
+#if MB_ITERATE_STRIDE < 1 || MB_WINDOW_SIZE % MB_ITERATE_STRIDE != 0 || MB_LOCAL_STRIDE < 1 || \
+    MB_WINDOW_SIZE % MB_LOCAL_STRIDE != 0 || (MB_WINDOW_SIZE & (MB_WINDOW_SIZE - 1)) != 0
+#error the search strides must divide MB_WINDOW_SIZE, a power of two
+#endif
 #define MB_CELL_SIZE 4
 #define MB_MAX_LEVELS 6
 #define MB_MIN_LEVEL_SIZE 48

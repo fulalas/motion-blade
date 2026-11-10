@@ -130,7 +130,40 @@ build_glslang() {
     step glslang glslang_build && mark glslang "${GLSLANG[*]}" && tidy glslang
 }
 
+afmf_probe() {
+    AFMF_WSI=$1 afmf_run 128 128 /dev/null 2 0 timeout 60 env -u AFMF_TEST_SOURCE 2>&1 | sed -n 's/^using //p'
+}
+
+is_cpu_device() {
+    case $1 in *" (cpu)") return 0 ;; esac
+    return 1
+}
+
+afmf_device() {
+    local dev
+    if [ -n "${AFMF_WSI:-}" ]; then
+        dev=$(afmf_probe "$AFMF_WSI")
+    else
+        AFMF_WSI=headless
+        dev=$(afmf_probe headless)
+        if { [ -z "$dev" ] || is_cpu_device "$dev"; } && [ -n "${WAYLAND_DISPLAY:-}" ]; then
+            local on_wayland=$(afmf_probe wayland)
+            [ -n "$on_wayland" ] && { AFMF_WSI=wayland; dev=$on_wayland; }
+        fi
+    fi
+    [ -n "$dev" ] || { log "afmf: the test program found no device (AFMF_WSI=$AFMF_WSI)"; return 1; }
+    log "afmf: $dev ($AFMF_WSI surface)"
+    is_cpu_device "$dev" || return 0
+    [ "${AFMF_ALLOW_CPU:-0}" = 1 ] && return 0
+    log "afmf: that is the CPU, not the GPU (set AFMF_ALLOW_CPU=1 to run it anyway)"
+    return 1
+}
+
 build_afmf() {
+    afmf_build && afmf_device
+}
+
+afmf_build() {
     built afmf "${AFMF[*]}" "bin/afmf_headless layer/afmf-linux.json" "$K/patches/afmf-linux.patch" && return 0
     build_glslang || return 1
     fetch afmf "${AFMF[@]}" || return 1
@@ -140,8 +173,7 @@ build_afmf() {
     PATH=$GLPATH$PATH step afmf cm "$s" "$b" -DAFMF_WERROR=OFF || return 1
     mkdir -p "$L/layer"
     cp "$b/afmf_headless" "$L/bin/" && cp "$b/layer/libafmf-linux.so" "$L/layer/" &&
-        sed "s#\"library_path\": \".*\"#\"library_path\": \"$L/layer/libafmf-linux.so\"#" \
-            "$b/layer/afmf-linux.json" > "$L/layer/afmf-linux.json" &&
+        sed 's#"library_path": ".*"#"library_path": "./libafmf-linux.so"#' "$b/layer/afmf-linux.json" > "$L/layer/afmf-linux.json" &&
         mark afmf "${AFMF[*]}" "$K/patches/afmf-linux.patch" && tidy afmf
 }
 
@@ -295,7 +327,7 @@ gen_svp() { "$L/venv/bin/python" -I "$K/scripts/svp_gen.py" "$L/lib/svp" "$@" 2>
 afmf_run() {
     local w=$1 h=$2 src=$3 frames=$4 ms=$5
     shift 5
-    env VK_ADD_LAYER_PATH="$L/layer" AFMF_ENABLE=1 AFMF_MIN_FPS=0 AFMF_GOVERNOR=0 AFMF_TEST_EXTENT="${w}x$h" \
+    env VK_ADD_LAYER_PATH="$L/layer" AFMF_TEST_WSI="${AFMF_WSI:-headless}" AFMF_ENABLE=1 AFMF_MIN_FPS=0 AFMF_GOVERNOR=0 AFMF_TEST_EXTENT="${w}x$h" \
         AFMF_TEST_SOURCE="$src" AFMF_TEST_FRAMES="$frames" AFMF_TEST_FRAME_MS="$ms" "$@" "$L/bin/afmf_headless"
 }
 

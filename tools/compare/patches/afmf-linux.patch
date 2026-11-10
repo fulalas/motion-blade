@@ -1,3 +1,22 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 46500c1..ed4564e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -198,6 +198,14 @@ add_executable(afmf_headless
+     tests/headless_swapchain.c
+ )
+ target_link_libraries(afmf_headless PRIVATE Vulkan::Vulkan)
++find_package(PkgConfig QUIET)
++if(PKG_CONFIG_FOUND)
++    pkg_check_modules(WAYLAND_CLIENT QUIET IMPORTED_TARGET wayland-client)
++endif()
++if(WAYLAND_CLIENT_FOUND)
++    target_link_libraries(afmf_headless PRIVATE PkgConfig::WAYLAND_CLIENT)
++    target_compile_definitions(afmf_headless PRIVATE AFMF_TEST_WAYLAND)
++endif()
+ target_compile_definitions(afmf_headless PRIVATE _POSIX_C_SOURCE=200809L)
+ target_compile_options(afmf_headless PRIVATE ${AFMF_WARNINGS})
+ 
 diff --git a/src/framegen_internal.h b/src/framegen_internal.h
 index 7b3130b..de0a962 100644
 --- a/src/framegen_internal.h
@@ -11,8 +30,72 @@ index 7b3130b..de0a962 100644
  /* The SDK's scene change detector reports a change for its first six frames and the search stores
   * zero vectors while it does: dumps start after that, or they show a plain blend. */
  #define AFMF_DUMP_FIRST 8u
+diff --git a/tests/headless.c b/tests/headless.c
+index 03e7993..c3c7b65 100644
+--- a/tests/headless.c
++++ b/tests/headless.c
+@@ -82,8 +82,8 @@ int main(void)
+         (void)fprintf(stderr, LAYER_NAME " not found: set VK_ADD_LAYER_PATH to the build's layer/ dir\n");
+         return EXIT_FAILURE;
+     }
+-    if (!instance_extension_available(VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME)) {
+-        (void)fprintf(stderr, "skipped: " VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME " unavailable\n");
++    if (!instance_extension_available(surface_extension_name())) {
++        (void)fprintf(stderr, "skipped: %s unavailable\n", surface_extension_name());
+         return EXIT_SKIP;
+     }
+ 
+diff --git a/tests/headless.h b/tests/headless.h
+index 5037ea9..01eb2e2 100644
+--- a/tests/headless.h
++++ b/tests/headless.h
+@@ -68,6 +68,8 @@ struct ctx {
+     uint32_t frames; /* what the run actually presented, which AFMF_TEST_FRAMES may have changed */
+     int present_id; /* AFMF_TEST_PRESENT_ID: 0 none, 1 VK_KHR_present_id, 2 VK_KHR_present_id2 */
+     bool present_modes; /* AFMF_TEST_PRESENT_MODES=1: VK_EXT_swapchain_maintenance1 mode list and per-present mode, FIFO */
++    void *wl_display, *wl_compositor, *wl_surface;
++    VkPresentModeKHR present_mode; /* FIFO, or on Wayland what create_swapchain picked */
+ };
+ 
+ static inline bool env_is_1(const char *name)
+@@ -99,6 +101,14 @@ static inline bool wanted_fog(void) { return env_is_1("AFMF_TEST_FOG"); }
+  * queued to the work thread or held by the presentation thread, and its destruction has to
+  * drain both itself. */
+ static inline bool wanted_no_idle(void) { return env_is_1("AFMF_TEST_NO_IDLE"); }
++/* AFMF_TEST_WSI=wayland: present to a wl_surface that is never given a role, so nothing shows
++ * on screen. For drivers with no VK_EXT_headless_surface (NVIDIA), where the headless run would
++ * land on a software device instead of the GPU. */
++static inline bool wanted_wayland(void)
++{
++    const char *v = getenv("AFMF_TEST_WSI");
++    return v != NULL && strcmp(v, "wayland") == 0;
++}
+ 
+ /* headless_instance.c */
+ bool instance_layer_available(const char *name);
+@@ -106,6 +116,8 @@ bool instance_extension_available(const char *name);
+ bool device_extension_available(VkPhysicalDevice device, const char *name);
+ bool create_instance(struct ctx *ctx, bool with_validation);
+ bool pick_physical_device(struct ctx *ctx);
++const char *surface_extension_name(void);
++void destroy_window(struct ctx *ctx);
+ 
+ /* headless_device.c */
+ bool create_device_and_swapchain(struct ctx *ctx);
+diff --git a/tests/headless_device.c b/tests/headless_device.c
+index 1f04d95..3cd83a2 100644
+--- a/tests/headless_device.c
++++ b/tests/headless_device.c
+@@ -182,6 +182,7 @@ void destroy(struct ctx *ctx)
+     if (ctx->instance != VK_NULL_HANDLE) {
+         if (ctx->surface != VK_NULL_HANDLE)
+             vkDestroySurfaceKHR(ctx->instance, ctx->surface, NULL);
++        destroy_window(ctx);
+         if (ctx->messenger != VK_NULL_HANDLE) {
+             PFN_vkDestroyDebugUtilsMessengerEXT destroy_messenger =
+                 (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
 diff --git a/tests/headless_frame.c b/tests/headless_frame.c
-index ab7fd70..c7fedfa 100644
+index ab7fd70..7f1ecb3 100644
 --- a/tests/headless_frame.c
 +++ b/tests/headless_frame.c
 @@ -32,9 +32,34 @@ static void paint_scroll(struct ctx *ctx, uint32_t frame, bool fog)
@@ -50,3 +133,204 @@ index ab7fd70..c7fedfa 100644
      if (wanted_fog() || wanted_pan()) {
          paint_scroll(ctx, frame, wanted_fog());
          return;
+@@ -167,12 +192,11 @@ bool present_frame(struct ctx *ctx, uint32_t frame)
+     if (ctx->present_id == 2)
+         present.pNext = &id2;
+ #endif
+-    static const VkPresentModeKHR fifo = VK_PRESENT_MODE_FIFO_KHR;
+     VkSwapchainPresentModeInfoEXT mode = {
+         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_EXT,
+         .pNext = present.pNext,
+         .swapchainCount = 1,
+-        .pPresentModes = &fifo,
++        .pPresentModes = &ctx->present_mode,
+     };
+     if (ctx->present_modes)
+         present.pNext = &mode;
+diff --git a/tests/headless_instance.c b/tests/headless_instance.c
+index ece0b15..b9d64ca 100644
+--- a/tests/headless_instance.c
++++ b/tests/headless_instance.c
+@@ -3,6 +3,85 @@
+ 
+ #include "headless.h"
+ 
++#ifdef AFMF_TEST_WAYLAND
++#include <wayland-client.h>
++#include <vulkan/vulkan_wayland.h>
++#endif
++
++const char *surface_extension_name(void)
++{
++    return wanted_wayland() ? "VK_KHR_wayland_surface" : VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME;
++}
++
++#ifdef AFMF_TEST_WAYLAND
++static void on_global(void *data, struct wl_registry *registry, uint32_t name, const char *interface,
++                      uint32_t version)
++{
++    struct ctx *ctx = data;
++    (void)version;
++    if (strcmp(interface, wl_compositor_interface.name) == 0 && ctx->wl_compositor == NULL)
++        ctx->wl_compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 1);
++}
++
++static void on_global_remove(void *data, struct wl_registry *registry, uint32_t name)
++{
++    (void)data, (void)registry, (void)name;
++}
++
++static const struct wl_registry_listener registry_listener = {on_global, on_global_remove};
++
++/* A wl_surface with no role: the driver attaches and commits to it, the compositor never shows
++ * it, so the run stays as invisible as on the headless surface. */
++static bool create_wayland_surface(struct ctx *ctx)
++{
++    struct wl_display *display = wl_display_connect(NULL);
++    if (display == NULL) {
++        (void)fprintf(stderr, "AFMF_TEST_WSI=wayland: cannot connect to a Wayland compositor\n");
++        return false;
++    }
++    ctx->wl_display = display;
++    struct wl_registry *registry = wl_display_get_registry(display);
++    (void)wl_registry_add_listener(registry, &registry_listener, ctx);
++    (void)wl_display_roundtrip(display);
++    wl_registry_destroy(registry);
++    if (ctx->wl_compositor == NULL) {
++        (void)fprintf(stderr, "AFMF_TEST_WSI=wayland: no wl_compositor\n");
++        return false;
++    }
++    ctx->wl_surface = wl_compositor_create_surface(ctx->wl_compositor);
++    VkWaylandSurfaceCreateInfoKHR info = {
++        .sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR,
++        .display = display,
++        .surface = ctx->wl_surface,
++    };
++    CHECK(vkCreateWaylandSurfaceKHR(ctx->instance, &info, NULL, &ctx->surface));
++    return true;
++}
++
++void destroy_window(struct ctx *ctx)
++{
++    if (ctx->wl_surface != NULL)
++        wl_surface_destroy(ctx->wl_surface);
++    if (ctx->wl_compositor != NULL)
++        wl_compositor_destroy(ctx->wl_compositor);
++    if (ctx->wl_display != NULL)
++        wl_display_disconnect(ctx->wl_display);
++    ctx->wl_surface = ctx->wl_compositor = ctx->wl_display = NULL;
++}
++#else
++static bool create_wayland_surface(struct ctx *ctx)
++{
++    (void)ctx;
++    (void)fprintf(stderr, "AFMF_TEST_WSI=wayland: built without wayland-client\n");
++    return false;
++}
++
++void destroy_window(struct ctx *ctx)
++{
++    (void)ctx;
++}
++#endif
++
+ bool device_extension_available(VkPhysicalDevice device, const char *name)
+ {
+     uint32_t n = 0;
+@@ -68,8 +147,7 @@ bool create_instance(struct ctx *ctx, bool with_validation)
+ {
+     /* Index 0 is closest to the application: the layer under test first, validation below it. */
+     const char *layers[2] = {LAYER_NAME, VALIDATION_LAYER_NAME};
+-    const char *extensions[5] = {VK_KHR_SURFACE_EXTENSION_NAME,
+-                                 VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME};
++    const char *extensions[5] = {VK_KHR_SURFACE_EXTENSION_NAME, surface_extension_name()};
+     uint32_t extension_count = 2;
+     if (with_validation)
+         extensions[extension_count++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+@@ -127,6 +205,8 @@ bool create_instance(struct ctx *ctx, bool with_validation)
+         CHECK(create(ctx->instance, &messenger, NULL, &ctx->messenger));
+     }
+ 
++    if (wanted_wayland())
++        return create_wayland_surface(ctx);
+     PFN_vkCreateHeadlessSurfaceEXT create_surface = (PFN_vkCreateHeadlessSurfaceEXT)
+         vkGetInstanceProcAddr(ctx->instance, "vkCreateHeadlessSurfaceEXT");
+     if (create_surface == NULL)
+@@ -138,7 +218,8 @@ bool create_instance(struct ctx *ctx, bool with_validation)
+     return true;
+ }
+ 
+-/* Picks the first physical device with a graphics queue family that can present to the surface. */
++/* Picks the first physical device with a graphics queue family that can present to the surface,
++ * a real GPU before a software one (llvmpipe) when both can. */
+ bool pick_physical_device(struct ctx *ctx)
+ {
+     uint32_t count = 0;
+@@ -150,7 +231,12 @@ bool pick_physical_device(struct ctx *ctx)
+         return false;
+     bool found = false;
+     if (vkEnumeratePhysicalDevices(ctx->instance, &count, devices) == VK_SUCCESS) {
++        for (uint32_t pass = 0; pass < 2 && !found; pass++)
+         for (uint32_t d = 0; d < count && !found; d++) {
++            VkPhysicalDeviceProperties type;
++            vkGetPhysicalDeviceProperties(devices[d], &type);
++            if ((type.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) != (pass == 1))
++                continue;
+             uint32_t families = 0;
+             vkGetPhysicalDeviceQueueFamilyProperties(devices[d], &families, NULL);
+             VkQueueFamilyProperties *props = calloc(families, sizeof *props);
+@@ -175,7 +261,8 @@ bool pick_physical_device(struct ctx *ctx)
+     if (found) {
+         VkPhysicalDeviceProperties props;
+         vkGetPhysicalDeviceProperties(ctx->physical_device, &props);
+-        (void)fprintf(stderr, "using %s\n", props.deviceName);
++        (void)fprintf(stderr, "using %s%s\n", props.deviceName,
++                      props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? " (cpu)" : "");
+     }
+     return found;
+ }
+diff --git a/tests/headless_swapchain.c b/tests/headless_swapchain.c
+index 57d758d..76ec017 100644
+--- a/tests/headless_swapchain.c
++++ b/tests/headless_swapchain.c
+@@ -36,11 +36,29 @@ bool create_swapchain(struct ctx *ctx, uint32_t width, uint32_t height)
+     if (caps.maxImageCount > 0 && image_count > caps.maxImageCount)
+         image_count = caps.maxImageCount;
+ 
+-    static const VkPresentModeKHR fifo_only[1] = {VK_PRESENT_MODE_FIFO_KHR};
++    /* A role-less wl_surface never gets a frame callback, so FIFO would wait forever: MAILBOX
++     * (what the layer turns FIFO into on surfaces that offer it), else IMMEDIATE. */
++    ctx->present_mode = VK_PRESENT_MODE_FIFO_KHR;
++    if (wanted_wayland()) {
++        VkPresentModeKHR modes[16];
++        uint32_t mode_count = 16;
++        bool mailbox = false, immediate = false;
++        res = vkGetPhysicalDeviceSurfacePresentModesKHR(ctx->physical_device, ctx->surface, &mode_count, modes);
++        for (uint32_t i = 0; (res == VK_SUCCESS || res == VK_INCOMPLETE) && i < mode_count; i++) {
++            mailbox = mailbox || modes[i] == VK_PRESENT_MODE_MAILBOX_KHR;
++            immediate = immediate || modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR;
++        }
++        if (!mailbox && !immediate) {
++            (void)fprintf(stderr, "wayland surface offers neither MAILBOX nor IMMEDIATE\n");
++            return false;
++        }
++        ctx->present_mode = mailbox ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_IMMEDIATE_KHR;
++        (void)fprintf(stderr, "wayland surface: presenting %s\n", mailbox ? "MAILBOX" : "IMMEDIATE");
++    }
+     VkSwapchainPresentModesCreateInfoEXT allowed_modes = {
+         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_EXT,
+         .presentModeCount = 1,
+-        .pPresentModes = fifo_only,
++        .pPresentModes = &ctx->present_mode,
+     };
+     VkSwapchainCreateInfoKHR swapchain = {
+         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+@@ -55,7 +73,7 @@ bool create_swapchain(struct ctx *ctx, uint32_t width, uint32_t height)
+         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+         .preTransform = caps.currentTransform,
+         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+-        .presentMode = VK_PRESENT_MODE_FIFO_KHR,
++        .presentMode = ctx->present_mode,
+         .clipped = VK_TRUE,
+     };
+     CHECK(vkCreateSwapchainKHR(ctx->device, &swapchain, NULL, &ctx->swapchain));

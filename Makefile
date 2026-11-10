@@ -2,16 +2,16 @@ BUILD = build/local
 DEPS = $(abspath ../deps/bin)
 export PATH := $(if $(wildcard $(DEPS)),$(DEPS):)$(PATH)
 
-all: $(BUILD)/build.ninja
+all: setup
 	ninja -C $(BUILD)
 
 test: all
 	meson test -C $(BUILD) --print-errorlogs
 
-$(BUILD)/build.ninja:
-	meson setup $(BUILD)
+setup:
+	@tools/meson-setup.sh $(BUILD) $(CURDIR)
 
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all test clean
+.PHONY: all test setup clean

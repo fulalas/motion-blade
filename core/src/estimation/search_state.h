@@ -16,6 +16,8 @@ typedef struct search_state {
     ivec2 window_origin;
     float mean_weight;
     best_match best;
+    vec2 whole_vector;
+    sad_result whole;
 } search_state;
 
 void search_state_begin(search_state *state, const ref_texture *origin, ivec2 block);
@@ -26,6 +28,9 @@ void search_state_try(search_state *state, const ref_texture *target, vec2 v, fl
                       float length_penalty);
 void search_state_try_sparse(search_state *state, const ref_texture *target, vec2 v, float penalty,
                              float length_penalty, int stride);
+sad_result search_state_seed_sparse(search_state *state, const ref_texture *target, vec2 v, float length_penalty,
+                                    int stride);
+bool search_state_best_below(search_state *state, const ref_texture *target, float limit);
 void search_state_measure_best(search_state *state, const ref_texture *target);
 void search_state_seed(search_state *state, vec2 v, sad_result r, float length_penalty);
 vec4 search_state_result(const search_state *state);

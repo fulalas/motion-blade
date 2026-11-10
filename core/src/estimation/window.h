@@ -23,6 +23,7 @@ typedef struct sad_pair {
 void window_load_texels(window *w, const ref_texture *texture, ivec2 origin);
 void window_load_exact(window *w, const ref_texture *texture, ivec2 origin, vec2 offset);
 void window_load_hardware(window *w, const ref_texture *texture, ivec2 origin, vec2 offset);
+void window_load_hardware_sparse(window *w, const ref_texture *texture, ivec2 origin, vec2 offset, int stride);
 sad_result window_zsad(const window *a, const window *b, float mean_weight);
 sad_result window_zsad_sparse(const window *a, const window *b, float mean_weight, int stride);
 sad_pair window_sad_pair(const window *a, const window *b);

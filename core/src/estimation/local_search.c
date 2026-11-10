@@ -79,6 +79,7 @@ static void try_grid(local_block *lb)
 
 static void try_ring(local_block *lb)
 {
+    search_state_measure_best(&lb->state, &lb->pass->target->texture);
     vec2 seed = lb->state.best.vector;
     for (int k = 0; k < 8; k++) {
         vec2 u = v2_add(seed, v2((float)RING8[k].x, (float)RING8[k].y));
@@ -106,12 +107,11 @@ static vec4 repair_block(const mb_local_search_pass *pass, int id)
     lb.limit = v2((float)(pass->grid.width - MB_WINDOW_SIZE), (float)(pass->grid.height - MB_WINDOW_SIZE));
     vec4 current = vec4s(pass->field)[id];
     vec2 v = v4_xy(current);
-    sad_result original = search_state_sad_hardware(&lb.state, &pass->target->texture, v);
-    search_state_seed(&lb.state, v, original, pass->length_penalty);
+    sad_result original = search_state_seed_sparse(&lb.state, &pass->target->texture, v, pass->length_penalty,
+                                                   MB_LOCAL_STRIDE);
     try_neighbours(&lb, v);
     try_grid(&lb);
     try_ring(&lb);
-    search_state_measure_best(&lb.state, &pass->target->texture);
     bool ok = search_accepts(&pass->acceptance, lb.state.best.sad, original.sad);
     if (ok && pass->reference) {
         ok = supported_in_time(&lb, lb.state.best.vector);

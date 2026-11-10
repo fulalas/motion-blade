@@ -43,15 +43,20 @@ void window_load_exact(window *w, const ref_texture *texture, ivec2 origin, vec2
     }
 }
 
-void window_load_hardware(window *w, const ref_texture *texture, ivec2 origin, vec2 offset)
+void window_load_hardware_sparse(window *w, const ref_texture *texture, ivec2 origin, vec2 offset, int stride)
 {
     vec2 inv = v2_inverse_size(texture->width, texture->height);
     for (int lane = 0; lane < N; lane++) {
         vec2 p = v2_add(lane_origin(origin, lane), offset);
-        for (int x = 0; x < N; x++) {
+        for (int x = lane & (stride - 1); x < N; x += stride) {
             w->rows[lane][x] = ref_sample(texture, (p.x + (float)x) * inv.x, p.y * inv.y, 0);
         }
     }
+}
+
+void window_load_hardware(window *w, const ref_texture *texture, ivec2 origin, vec2 offset)
+{
+    window_load_hardware_sparse(w, texture, origin, offset, 1);
 }
 
 float cluster_sum(const float lanes[N])
@@ -106,9 +111,7 @@ static float total_abs(const window *a, const window *b, float mean)
 
 sad_result window_zsad(const window *a, const window *b, float mean_weight)
 {
-    float diff_sum = total_diff(a, b);
-    float mean = mean_weight > 0.0f ? diff_sum / PIXELS * mean_weight : 0.0f;
-    return (sad_result){total_abs(a, b, mean), diff_sum};
+    return window_zsad_sparse(a, b, mean_weight, 1);
 }
 
 static float sparse_diff_sum(const float a[N], const float b[N], int stride, int phase)

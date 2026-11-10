@@ -16,6 +16,12 @@ reuse them. Results are printed and appended to `tools/compare/results.txt`.
 Needs the Motion Blade build dependencies, plus git, cmake, a C++ compiler, curl, unzip, bc and python3
 with venv.
 
+afmf-linux runs through its test program, on its headless surface (`VK_EXT_headless_surface`). Only Mesa
+has that surface, so with other drivers (NVIDIA) it lands on llvmpipe, the CPU. Under Wayland it then
+presents to an invisible Wayland surface instead, on the GPU; that needs the wayland-client headers when
+afmf is built. `AFMF_WSI=headless|wayland` picks the surface. If it still lands on a CPU device it is
+skipped (`AFMF_ALLOW_CPU=1` to run it anyway).
+
 Some tools can't be shipped, so the user provides them (a missing one only skips that tool):
 
 - Lossless Scaling: `lsfg-vk.dll` from Lossless Scaling on Steam (beta branch "lsfg-vk"). Found in the

@@ -132,40 +132,45 @@ void consider(vec2 u, float sad, float cost)
     }
 }
 
-void try_vector(sampler2D target, vec2 u, float penalty, float length_penalty)
-{
-    float sad = target_sad(target, u);
-    consider(u, sad, sad + penalty + length_penalty * l1(u));
-}
-
 #ifdef SPARSE_STRIDE
 #define SPARSE (LANES / SPARSE_STRIDE)
 
 float sparse_origin[SPARSE];
+vec2 whole_vector = vec2(1e30);
+float whole_sad;
+float whole_diff;
 
 int sparse_phase()
 {
     return int(gl_LocalInvocationID.x) & (SPARSE_STRIDE - 1);
 }
 
-void load_sparse(sampler2D T, vec2 p, out float row[SPARSE])
+#define SPARSE_ROW(NAME, N)                                                                         \
+    void NAME(sampler2D T, vec2 p, out float row[N])                                                \
+    {                                                                                               \
+        float phase = float(sparse_phase());                                                        \
+        for (int k = 0; k < N; k++) {                                                               \
+            row[k] = textureLod(T, (p + vec2(float(SPARSE_STRIDE * k) + phase, 0.0)) * texel_size, 0.0).r; \
+        }                                                                                           \
+    }
+
+SPARSE_ROW(load_sparse, SPARSE)
+
+void pick_sparse(float row[LANES], out float sparse[SPARSE])
 {
-    float phase = float(sparse_phase());
+    int phase = sparse_phase();
     for (int k = 0; k < SPARSE; k++) {
-        row[k] = textureLod(T, (p + vec2(float(SPARSE_STRIDE * k) + phase, 0.0)) * texel_size, 0.0).r;
+        float value = row[SPARSE_STRIDE * k];
+        for (int j = 1; j < SPARSE_STRIDE; j++) {
+            value = phase == j ? row[SPARSE_STRIDE * k + j] : value;
+        }
+        sparse[k] = value;
     }
 }
 
 void load_sparse_origin()
 {
-    int phase = sparse_phase();
-    for (int k = 0; k < SPARSE; k++) {
-        float value = origin_row[SPARSE_STRIDE * k];
-        for (int j = 1; j < SPARSE_STRIDE; j++) {
-            value = phase == j ? origin_row[SPARSE_STRIDE * k + j] : value;
-        }
-        sparse_origin[k] = value;
-    }
+    pick_sparse(origin_row, sparse_origin);
 }
 
 float sparse_window_sad(float row[SPARSE])
@@ -199,9 +204,31 @@ void try_sparse(sampler2D target, vec2 u, float penalty, float length_penalty)
     consider(u, sad, sad + penalty + length_penalty * l1(u));
 }
 
+float best_whole_sad(sampler2D target)
+{
+    if (whole_vector != best.vector) {
+        whole_sad = target_sad(target, best.vector);
+        whole_diff = lane_diff;
+        whole_vector = best.vector;
+    }
+    return whole_sad;
+}
+
+bool best_below(sampler2D target, float limit)
+{
+    return best.sad < limit && best_whole_sad(target) < limit;
+}
+
+void adopt_whole(float sad, float diff)
+{
+    best.cost += sad - best.sad;
+    best.sad = sad;
+    best.diff = diff;
+}
+
 void measure_best(sampler2D target)
 {
-    best.sad = target_sad(target, best.vector);
-    best.diff = lane_diff;
+    float sad = best_whole_sad(target);
+    adopt_whole(sad, whole_diff);
 }
 #endif
