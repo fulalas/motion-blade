@@ -12,7 +12,7 @@ The current options available for PC have at least one drawback:
 - SVP: paid and its engine has lower quality (below).
 - AMD Fluid Motion Frames: closed source and officially only Windows is supported.
 - AMD FSR 3 frame generation: made for games; with video frames alone its quality is much lower.
-- NVIDIA Optical Flow: good quality, but closed source and needs at least an NVIDIA Turing (GTX 1630 or MX450).
+- NVIDIA Optical Flow: closed source, needs at least an NVIDIA Turing (GTX 1630 or MX450), and lower quality (below).
 
 Motion Blade is free and open source, and runs in real time on any vendor, even integrated GPUs like AMD 780M.
 
@@ -25,12 +25,15 @@ Generated frames compared with the real ones (higher is better):
 
 | | PSNR | SSIM |
 |---|---|---|
-| Motion Blade | 38.73 | 0.938 |
+| Motion Blade | 38.89 | 0.940 |
 | RIFE 4.16 lite (SVP 4.7) | 38.14 | 0.935 |
 | Lossless Scaling 3.2.1 (LSFG 3.1) | 37.01 | 0.919 |
 | SVP 4.7 own engine | 36.73 | 0.910 |
 | AMD Fluid Motion Frames for linux 1.3.1 | 34.70 | 0.885 |
+| NVIDIA Optical Flow* | 34.64 | 0.888 |
 | AMD FSR 3.1.6 frame generation | 33.37 | 0.828 |
+
+*FFmpeg nvinterpolate / NvOFFRUC, SDK 5.0.7, GTX 1650 SUPER, perf level SLOW, grid 4x4.
 
 ## How it works
 
