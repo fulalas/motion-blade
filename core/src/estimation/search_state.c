@@ -37,6 +37,22 @@ void search_state_try(search_state *state, const ref_texture *target, vec2 v, fl
     search_state_consider(state, v, r, r.sad + penalty + length_penalty * v2_l1(v));
 }
 
+void search_state_try_sparse(search_state *state, const ref_texture *target, vec2 v, float penalty,
+                             float length_penalty, int stride)
+{
+    window candidate;
+    window_load_hardware(&candidate, target, state->window_origin, v);
+    sad_result r = window_zsad_sparse(&state->origin, &candidate, state->mean_weight, stride);
+    search_state_consider(state, v, r, r.sad + penalty + length_penalty * v2_l1(v));
+}
+
+void search_state_measure_best(search_state *state, const ref_texture *target)
+{
+    sad_result r = search_state_sad_hardware(state, target, state->best.vector);
+    state->best.sad = r.sad;
+    state->best.diff_sum = r.diff_sum;
+}
+
 void search_state_seed(search_state *state, vec2 v, sad_result r, float length_penalty)
 {
     state->best = (best_match){r.sad + length_penalty * v2_l1(v), r.sad, r.diff_sum, v};

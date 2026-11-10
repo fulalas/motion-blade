@@ -51,7 +51,6 @@ Best best;
 #ifdef HARDWARE_ROWS
 HARDWARE_ROW(load_row, 16)
 HARDWARE_ROW(load_row18, 18)
-HARDWARE_ROW(load_row24, 24)
 #else
 EXACT_ROW(load_row, 16)
 #endif
@@ -138,3 +137,71 @@ void try_vector(sampler2D target, vec2 u, float penalty, float length_penalty)
     float sad = target_sad(target, u);
     consider(u, sad, sad + penalty + length_penalty * l1(u));
 }
+
+#ifdef SPARSE_STRIDE
+#define SPARSE (LANES / SPARSE_STRIDE)
+
+float sparse_origin[SPARSE];
+
+int sparse_phase()
+{
+    return int(gl_LocalInvocationID.x) & (SPARSE_STRIDE - 1);
+}
+
+void load_sparse(sampler2D T, vec2 p, out float row[SPARSE])
+{
+    float phase = float(sparse_phase());
+    for (int k = 0; k < SPARSE; k++) {
+        row[k] = textureLod(T, (p + vec2(float(SPARSE_STRIDE * k) + phase, 0.0)) * texel_size, 0.0).r;
+    }
+}
+
+void load_sparse_origin()
+{
+    int phase = sparse_phase();
+    for (int k = 0; k < SPARSE; k++) {
+        float value = origin_row[SPARSE_STRIDE * k];
+        for (int j = 1; j < SPARSE_STRIDE; j++) {
+            value = phase == j ? origin_row[SPARSE_STRIDE * k + j] : value;
+        }
+        sparse_origin[k] = value;
+    }
+}
+
+float sparse_window_sad(float row[SPARSE])
+{
+    float diff = 0.0;
+    for (int x = 0; x < SPARSE; x++) {
+        diff += sparse_origin[x] - row[x];
+    }
+    lane_diff = diff * float(SPARSE_STRIDE);
+    float mean = 0.0;
+    if (mean_weight > 0.0) {
+        mean = cluster_sum(diff) / float(LANES * SPARSE) * mean_weight;
+    }
+    float sum = 0.0;
+    for (int x = 0; x < SPARSE; x++) {
+        sum += abs(sparse_origin[x] - row[x] - mean);
+    }
+    return cluster_sum(sum) * 255.0 * float(SPARSE_STRIDE);
+}
+
+float sparse_sad(sampler2D target, vec2 v)
+{
+    float row[SPARSE];
+    load_sparse(target, lane_start + v, row);
+    return sparse_window_sad(row);
+}
+
+void try_sparse(sampler2D target, vec2 u, float penalty, float length_penalty)
+{
+    float sad = sparse_sad(target, u);
+    consider(u, sad, sad + penalty + length_penalty * l1(u));
+}
+
+void measure_best(sampler2D target)
+{
+    best.sad = target_sad(target, best.vector);
+    best.diff = lane_diff;
+}
+#endif

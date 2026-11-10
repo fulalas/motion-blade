@@ -44,9 +44,10 @@ static bool seen_before(const local_block *lb, int k, vec2 u)
     return false;
 }
 
-static void try_vector(local_block *lb, vec2 u)
+static void try_sparse(local_block *lb, vec2 u)
 {
-    search_state_try(&lb->state, &lb->pass->target->texture, u, 0.0f, lb->pass->length_penalty);
+    search_state_try_sparse(&lb->state, &lb->pass->target->texture, u, 0.0f, lb->pass->length_penalty,
+                            MB_LOCAL_STRIDE);
 }
 
 static void try_neighbours(local_block *lb, vec2 current)
@@ -57,7 +58,7 @@ static void try_neighbours(local_block *lb, vec2 current)
         if (k == CENTER || known || !inside_frame(lb, u) || seen_before(lb, k, u)) {
             continue;
         }
-        try_vector(lb, u);
+        try_sparse(lb, u);
     }
 }
 
@@ -70,7 +71,7 @@ static void try_grid(local_block *lb)
         for (float dx = -radius; dx <= radius; dx += step) {
             vec2 u = v2_add(seed, v2(dx, dy));
             if (!v2_equal(u, lb->state.best.vector) && inside_frame(lb, u)) {
-                try_vector(lb, u);
+                try_sparse(lb, u);
             }
         }
     }
@@ -80,7 +81,8 @@ static void try_ring(local_block *lb)
 {
     vec2 seed = lb->state.best.vector;
     for (int k = 0; k < 8; k++) {
-        try_vector(lb, v2_add(seed, v2((float)RING8[k].x, (float)RING8[k].y)));
+        vec2 u = v2_add(seed, v2((float)RING8[k].x, (float)RING8[k].y));
+        search_state_try(&lb->state, &lb->pass->target->texture, u, 0.0f, lb->pass->length_penalty);
     }
 }
 
@@ -109,6 +111,7 @@ static vec4 repair_block(const mb_local_search_pass *pass, int id)
     try_neighbours(&lb, v);
     try_grid(&lb);
     try_ring(&lb);
+    search_state_measure_best(&lb.state, &pass->target->texture);
     bool ok = search_accepts(&pass->acceptance, lb.state.best.sad, original.sad);
     if (ok && pass->reference) {
         ok = supported_in_time(&lb, lb.state.best.vector);

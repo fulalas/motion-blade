@@ -4,6 +4,8 @@
 #define MB_BLOCK_SIZE 8
 #define MB_WINDOW_SIZE 16
 #define MB_WINDOW_MARGIN 4
+#define MB_ITERATE_STRIDE 4
+#define MB_LOCAL_STRIDE 2
 #define MB_CELL_SIZE 4
 #define MB_MAX_LEVELS 6
 #define MB_MIN_LEVEL_SIZE 48

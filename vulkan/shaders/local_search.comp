@@ -4,6 +4,7 @@
 layout(push_constant) uniform Push { local_search_push push; };
 #include "blocks.glsl"
 #define HARDWARE_ROWS
+#define SPARSE_STRIDE MB_LOCAL_STRIDE
 #include "window.glsl"
 layout(local_size_x = 64) in;
 
@@ -61,27 +62,30 @@ void try_neighbours(vec2 current, int lane)
         if (subgroupClusteredOr((lane < k && first_held == u) || (second < k && second_held == u), LANES)) {
             continue;
         }
-        try_vector(target, u, 0.0, push.length_penalty);
+        try_sparse(target, u, 0.0, push.length_penalty);
     }
 }
 
 void try_even_grid(float radius)
 {
     vec2 seed = best.vector;
-    for (float dy = -radius; dy <= radius; dy += 2.0) {
-        float row[MB_WINDOW_SIZE + 2 * FAST_RADIUS];
-        load_row24(target, lane_start + (seed + vec2(-radius, dy)), row);
+    for (float dy = -radius; dy <= radius; dy += float(SPARSE_STRIDE)) {
+        float row[SPARSE + FAST_RADIUS];
+        vec2 p = lane_start + seed + vec2(-radius + float(sparse_phase()), dy);
+        for (int k = 0; k < SPARSE + FAST_RADIUS; k++) {
+            row[k] = textureLod(target, (p + vec2(float(SPARSE_STRIDE * k), 0.0)) * texel_size, 0.0).r;
+        }
         for (int i = 0; i <= FAST_RADIUS; i++) {
-            float dx = -radius + float(2 * i);
+            float dx = -radius + float(SPARSE_STRIDE * i);
             vec2 u = seed + vec2(dx, dy);
             if (dx > radius || u == best.vector || !inside_frame(u)) {
                 continue;
             }
-            float window_row[LANES];
-            for (int x = 0; x < LANES; x++) {
-                window_row[x] = row[x + 2 * i];
+            float window_row[SPARSE];
+            for (int x = 0; x < SPARSE; x++) {
+                window_row[x] = row[x + i];
             }
-            float sad = window_sad(origin_row, window_row);
+            float sad = sparse_window_sad(window_row);
             consider(u, sad, sad + push.length_penalty * l1(u));
         }
     }
@@ -96,7 +100,7 @@ void try_any_grid(float radius, float step)
             if (u == best.vector || !inside_frame(u)) {
                 continue;
             }
-            try_vector(target, u, 0.0, push.length_penalty);
+            try_sparse(target, u, 0.0, push.length_penalty);
         }
     }
 }
@@ -144,16 +148,18 @@ void repair(int id, int lane)
     limit = vec2(push.width, push.height) - float(MB_WINDOW_SIZE);
     vec4 current = field[id];
     load_origin(origin, window_origin(block), lane);
+    load_sparse_origin();
     float original = target_sad(target, current.xy);
     best = Best(original + push.length_penalty * l1(current.xy), original, lane_diff, current.xy);
     try_neighbours(current.xy, lane);
     float radius = push.radius;
-    if (push.step == 2.0 && radius == floor(radius) && radius <= float(FAST_RADIUS)) {
+    if (push.step == float(SPARSE_STRIDE) && radius == floor(radius) && radius <= float(FAST_RADIUS)) {
         try_even_grid(radius);
     } else {
         try_any_grid(radius, push.step);
     }
     try_ring();
+    measure_best(target);
     bool ok = best.sad < push.max_ratio * original && original - best.sad > push.min_gain;
     if (ok && push.has_reference != 0) {
         ok = supported_in_time(best.vector);

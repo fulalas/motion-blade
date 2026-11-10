@@ -130,7 +130,7 @@ static void random_steps(uint32_t id, uint32_t seed, vec2 steps[2])
 
 static void try_candidate(search_state *state, const mb_iterate_pass *pass, vec2 v, float penalty)
 {
-    search_state_try(state, &pass->target->texture, v, penalty, pass->penalties.length);
+    search_state_try_sparse(state, &pass->target->texture, v, penalty, pass->penalties.length, MB_ITERATE_STRIDE);
 }
 
 static vec4 search_block(const mb_iterate_pass *pass, int id)
@@ -153,6 +153,7 @@ static vec4 search_block(const mb_iterate_pass *pass, int id)
     for (int k = 0; k < 2 && state.best.sad >= limit; k++) {
         try_candidate(&state, pass, v2_add(base, steps[k]), pass->penalties.random);
     }
+    search_state_measure_best(&state, &pass->target->texture);
     return search_state_result(&state);
 }
 

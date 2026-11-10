@@ -111,6 +111,38 @@ sad_result window_zsad(const window *a, const window *b, float mean_weight)
     return (sad_result){total_abs(a, b, mean), diff_sum};
 }
 
+static float sparse_diff_sum(const float a[N], const float b[N], int stride, int phase)
+{
+    float sum = 0.0f;
+    for (int x = phase; x < N; x += stride) {
+        sum += a[x] - b[x];
+    }
+    return sum;
+}
+
+static float sparse_abs_sum(const float a[N], const float b[N], int stride, int phase, float mean)
+{
+    float sum = 0.0f;
+    for (int x = phase; x < N; x += stride) {
+        sum += fabsf(a[x] - b[x] - mean);
+    }
+    return sum;
+}
+
+sad_result window_zsad_sparse(const window *a, const window *b, float mean_weight, int stride)
+{
+    float diffs[N], sums[N];
+    for (int lane = 0; lane < N; lane++) {
+        diffs[lane] = sparse_diff_sum(a->rows[lane], b->rows[lane], stride, lane & (stride - 1));
+    }
+    float diff_sum = cluster_sum(diffs);
+    float mean = mean_weight > 0.0f ? diff_sum / (PIXELS / (float)stride) * mean_weight : 0.0f;
+    for (int lane = 0; lane < N; lane++) {
+        sums[lane] = sparse_abs_sum(a->rows[lane], b->rows[lane], stride, lane & (stride - 1), mean);
+    }
+    return (sad_result){cluster_sum(sums) * LEVELS * (float)stride, diff_sum * (float)stride};
+}
+
 sad_pair window_sad_pair(const window *a, const window *b)
 {
     float mean = total_diff(a, b) / PIXELS;

@@ -4,6 +4,7 @@
 layout(push_constant) uniform Push { iterate_push push; };
 #include "blocks.glsl"
 #define HARDWARE_ROWS
+#define SPARSE_STRIDE MB_ITERATE_STRIDE
 #include "window.glsl"
 layout(local_size_x = 64) in;
 
@@ -131,7 +132,7 @@ void try_random_steps(int id, float limit)
     vec2 coarse = vec2(float(int((h >> 6) & 3u)) - 1.5, float(int((h >> 8) & 3u)) - 1.5);
     vec2 base = best.vector;
     for (int k = 0; k < 2 && best.sad >= limit; k++) {
-        try_vector(target, base + (k == 0 ? fine : coarse), push.penalty_random, push.penalty_length);
+        try_sparse(target, base + (k == 0 ? fine : coarse), push.penalty_random, push.penalty_length);
     }
 }
 
@@ -149,13 +150,15 @@ void main()
     gather_candidates(id, block);
     reset_best();
     float limit = early_exit_limit();
+    load_sparse_origin();
     for (int i = 0; i < candidate_count; i++) {
-        try_vector(target, candidates[i], penalties[i], push.penalty_length);
+        try_sparse(target, candidates[i], penalties[i], push.penalty_length);
         if (best.sad < limit) {
             break;
         }
     }
     try_random_steps(id, limit);
+    measure_best(target);
     float dc = block_dc(best.diff);
     if (lane == 0) {
         field[id] = vec4(best.vector, best.sad, dc);
