@@ -85,7 +85,8 @@ too low.
 every other frame of a video, rebuilds it and scores it against the real one (`-backend cpu` uses the C
 reference instead of the GPU). `tools/regress.sh` checks quality, scene cuts and speed against
 `tools/baseline.txt`; `tools/fetch-data.sh` downloads the test clips. `MOTIONBLADE_PROFILE=1` prints the
-GPU time of each step.
+GPU time of each step. `tools/compare/run.sh` produces the comparison table above (see
+`tools/compare/README.md`).
 
 ## License
 

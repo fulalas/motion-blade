@@ -1,3 +1,7 @@
 /build/
 /winbuild/
 /eval_vk
+/tools/compare/local/
+/tools/compare/results.txt
+/tools/compare/*.dll
+/tools/compare/svp*-linux.run

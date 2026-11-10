@@ -1,0 +1,52 @@
+diff --git a/src/framegen_internal.h b/src/framegen_internal.h
+index 7b3130b..de0a962 100644
+--- a/src/framegen_internal.h
++++ b/src/framegen_internal.h
+@@ -18,7 +18,7 @@
+ #include <sys/stat.h>
+ 
+ #define AFMF_FLOW_BLOCK 8u
+-#define AFMF_DUMP_FRAMES 4u
++#define AFMF_DUMP_FRAMES 100000u
+ /* The SDK's scene change detector reports a change for its first six frames and the search stores
+  * zero vectors while it does: dumps start after that, or they show a plain blend. */
+ #define AFMF_DUMP_FIRST 8u
+diff --git a/tests/headless_frame.c b/tests/headless_frame.c
+index ab7fd70..c7fedfa 100644
+--- a/tests/headless_frame.c
++++ b/tests/headless_frame.c
+@@ -32,9 +32,34 @@ static void paint_scroll(struct ctx *ctx, uint32_t frame, bool fog)
+     }
+ }
+ 
++static bool paint_source(struct ctx *ctx, uint32_t frame)
++{
++    const char *path = getenv("AFMF_TEST_SOURCE");
++    if (path == NULL)
++        return false;
++    static FILE *src;
++    static long count;
++    size_t size = (size_t)ctx->extent.width * ctx->extent.height * 4u;
++    if (src == NULL) {
++        src = fopen(path, "rb");
++        if (src == NULL || fseek(src, 0, SEEK_END) != 0 || (count = ftell(src) / (long)size) < 1) {
++            (void)fprintf(stderr, "AFMF_TEST_SOURCE %s: no frame to read\n", path);
++            exit(1);
++        }
++    }
++    if (fseek(src, (long)(frame % (uint32_t)count) * (long)size, SEEK_SET) != 0 ||
++        fread(ctx->staging_mapped, 1, size, src) != size) {
++        (void)fprintf(stderr, "AFMF_TEST_SOURCE %s: read failed\n", path);
++        exit(1);
++    }
++    return true;
++}
++
+ static void paint_frame(struct ctx *ctx, uint32_t frame)
+ {
+     uint32_t w = ctx->extent.width, h = ctx->extent.height;
++    if (paint_source(ctx, frame))
++        return;
+     if (wanted_fog() || wanted_pan()) {
+         paint_scroll(ctx, frame, wanted_fog());
+         return;

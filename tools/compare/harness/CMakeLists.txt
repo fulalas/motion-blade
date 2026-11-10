@@ -1,0 +1,22 @@
+cmake_minimum_required(VERSION 3.20)
+project(compare_harness CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(Vulkan REQUIRED)
+
+if(FFX_SDK_DIR)
+    add_executable(fsr_fi fsr_fi.cpp)
+    target_include_directories(fsr_fi PRIVATE ${FFX_SDK_DIR}/include)
+    target_link_libraries(fsr_fi PRIVATE ${FFX_BACKEND_LIB} Vulkan::Vulkan)
+endif()
+
+if(LSFGVK_SRC)
+    set(LSFGVK_BUILD_LAYER OFF CACHE BOOL "")
+    set(LSFGVK_BUILD_CLI OFF CACHE BOOL "")
+    set(LSFGVK_BUILD_UI OFF CACHE BOOL "")
+    add_subdirectory(${LSFGVK_SRC} lsfg-vk EXCLUDE_FROM_ALL)
+    add_executable(lsfg_fi lsfg_fi.cpp)
+    target_include_directories(lsfg_fi PRIVATE ${LSFGVK_SRC}/lsfg-vk-pipeline/include)
+    target_link_libraries(lsfg_fi PRIVATE lsfg-vk-pipeline lsfg-vk-helper Vulkan::Vulkan)
+endif()
