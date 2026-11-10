@@ -48,7 +48,7 @@ static const param_entry PARAM_TABLE[] = {
     FLOAT_PARAM("local_step", repair.local_step, 2, 0.25, 16),
     FLOAT_PARAM("cut_max_threshold", cut.max_threshold, 40, ANY),
     FLOAT_PARAM("cut_error_ratio", cut.error_ratio, 4, ANY),
-    FLOAT_PARAM("cut_zero_mean_ratio", cut.zero_mean_ratio, 2, ANY),
+    FLOAT_PARAM("cut_zero_mean_ratio", cut.zero_mean_ratio, 1.4f, ANY),
     FLOAT_PARAM("cut_zero_mean_min", cut.zero_mean_min, 1, ANY),
     FLOAT_PARAM("cut_spread_norm", cut.spread_norm, 45, ANY),
     FLOAT_PARAM("cut_spread_min", cut.spread_min, 0.1f, ANY),
