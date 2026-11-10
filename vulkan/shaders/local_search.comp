@@ -46,6 +46,11 @@ vec2 neighbour_vector(int k)
     return field[block_index(block + ivec2(k % NEIGHBOURHOOD - 2, k / NEIGHBOURHOOD - 2), blocks())].xy;
 }
 
+vec2 lane_value(vec2 value, int from, int lane)
+{
+    return subgroupClusteredAdd(lane == from ? value : vec2(0.0), LANES);
+}
+
 void try_neighbours(vec2 current, int lane)
 {
     int second = lane + LANES;
@@ -55,7 +60,7 @@ void try_neighbours(vec2 current, int lane)
         if (k == CENTER) {
             continue;
         }
-        vec2 u = neighbour_vector(k);
+        vec2 u = k < LANES ? lane_value(first_held, k, lane) : lane_value(second_held, k - LANES, lane);
         if (u == current || u == best.vector || !inside_frame(u)) {
             continue;
         }
