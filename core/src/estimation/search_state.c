@@ -8,7 +8,6 @@ void search_state_begin(search_state *state, const ref_texture *origin, ivec2 bl
     window_load_texels(&state->origin, origin, state->window_origin);
     state->mean_weight = 1.0f;
     state->best = (best_match){1e30f, 0.0f, 0.0f, v2(0.0f, 0.0f)};
-    state->whole_vector = v2(1e30f, 1e30f);
 }
 
 sad_result search_state_sad_hardware(const search_state *state, const ref_texture *target, vec2 v)
@@ -47,34 +46,9 @@ void search_state_try_sparse(search_state *state, const ref_texture *target, vec
     search_state_consider(state, v, r, r.sad + penalty + length_penalty * v2_l1(v));
 }
 
-sad_result search_state_seed_sparse(search_state *state, const ref_texture *target, vec2 v, float length_penalty,
-                                    int stride)
-{
-    window candidate;
-    window_load_hardware(&candidate, target, state->window_origin, v);
-    sad_result r = window_zsad_sparse(&state->origin, &candidate, state->mean_weight, stride);
-    state->best = (best_match){r.sad + length_penalty * v2_l1(v), r.sad, r.diff_sum, v};
-    return window_zsad(&state->origin, &candidate, state->mean_weight);
-}
-
-static sad_result best_whole(search_state *state, const ref_texture *target)
-{
-    if (!v2_equal(state->whole_vector, state->best.vector)) {
-        state->whole = search_state_sad_hardware(state, target, state->best.vector);
-        state->whole_vector = state->best.vector;
-    }
-    return state->whole;
-}
-
-bool search_state_best_below(search_state *state, const ref_texture *target, float limit)
-{
-    return state->best.sad < limit && best_whole(state, target).sad < limit;
-}
-
 void search_state_measure_best(search_state *state, const ref_texture *target)
 {
-    sad_result r = best_whole(state, target);
-    state->best.cost += r.sad - state->best.sad;
+    sad_result r = search_state_sad_hardware(state, target, state->best.vector);
     state->best.sad = r.sad;
     state->best.diff_sum = r.diff_sum;
 }

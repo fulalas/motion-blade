@@ -429,15 +429,23 @@ perf_run() {
     esac
 }
 
+perf_step() {
+    local tool=$1 w=$2 h=$3 len=$4 plog=$5 what=$6
+    : > "$plog"
+    perf_run "$tool" "$w" "$h" "$len" >> "$plog" 2>&1 && return 0
+    log "$tool failed ($what, $len input, exit $?):"
+    tail -5 "$plog" >&2
+    return 1
+}
+
 perf() {
     local tool=$1 size=$(size_of "$PERF_CLIP") plog=$WORK/perf_$1.log i a b c t all=
     local w=${size%x*} h=${size#*x}
     [ -f "$PERF_DIR/even_short.rgba" ] || perf_inputs || return 1
-    : > "$plog"
-    perf_run "$tool" "$w" "$h" short >> "$plog" 2>&1 || { log "$tool failed:"; tail -5 "$plog" >&2; return 1; }
+    perf_step "$tool" "$w" "$h" short "$plog" warm-up || return 1
     for i in $(seq "$PERF_RUNS"); do
-        a=$(date +%s%N); perf_run "$tool" "$w" "$h" short >> "$plog" 2>&1 || return 1
-        b=$(date +%s%N); perf_run "$tool" "$w" "$h" long >> "$plog" 2>&1 || return 1
+        a=$(date +%s%N); perf_step "$tool" "$w" "$h" short "$plog" "run $i" || return 1
+        b=$(date +%s%N); perf_step "$tool" "$w" "$h" long "$plog" "run $i" || return 1
         c=$(date +%s%N)
         t=$(echo "(($c - $b) - ($b - $a)) / 1000000 / ($PERF_LONG - $PERF_SHORT)" | bc -l)
         printf "  run %d: %.2f ms\n" "$i" "$t" >&2

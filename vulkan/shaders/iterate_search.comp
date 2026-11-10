@@ -131,7 +131,7 @@ void try_random_steps(int id, float limit)
     vec2 fine = vec2(float(int(h & 7u)) - 3.5, float(int((h >> 3) & 7u)) - 3.5) * 0.25;
     vec2 coarse = vec2(float(int((h >> 6) & 3u)) - 1.5, float(int((h >> 8) & 3u)) - 1.5);
     vec2 base = best.vector;
-    for (int k = 0; k < 2 && !best_below(target, limit); k++) {
+    for (int k = 0; k < 2 && best.sad >= limit; k++) {
         try_sparse(target, base + (k == 0 ? fine : coarse), push.penalty_random, push.penalty_length);
     }
 }
@@ -153,7 +153,7 @@ void main()
     load_sparse_origin();
     for (int i = 0; i < candidate_count; i++) {
         try_sparse(target, candidates[i], penalties[i], push.penalty_length);
-        if (best_below(target, limit)) {
+        if (best.sad < limit) {
             break;
         }
     }
