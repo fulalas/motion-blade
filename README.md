@@ -1,39 +1,27 @@
 # Motion Blade
 
-Real-time motion interpolation for `mpv` on any GPU with Vulkan support. Increase a video's frame rate
-2x to 8x or to your display's refresh rate.
+Real-time motion interpolation for `mpv` on any GPU with Vulkan support. Increase video frame
+rate from 2x to 8x, or to your display's refresh rate.
 
 ## Why this exists
 
-The current options available for PC have at least one drawback:
+Motion Blade is free, open source and runs on GPUs from any vendor. Even an integrated GPU like the
+AMD 780M interpolates 4K 24 fps video to 48 fps in real time.
 
-- RIFE: a heavy neural network, and slightly lower quality.
-- Lossless Scaling: paid, closed source, officially only Windows is supported, and lower quality.
-- SVP: paid and its engine has lower quality (below).
-- AMD Fluid Motion Frames: closed source and officially only Windows is supported.
-- AMD FSR 3 frame generation: made for games; with video frames alone its quality is much lower.
-- NVIDIA Optical Flow: closed source, needs at least an NVIDIA Turing (GTX 1630 or MX450), and lower quality (below).
+| | License | OS | GPU | Performance cost (lower is better) | Fidelity (higher is better) | Detail (higher is better) |
+|---|---|---|---|---|---|---|
+| Motion Blade 4.5.0 | open source | Linux, Windows | any with Vulkan | 16.6 ms | 38.93 | 0.940 |
+| SVP 4.7 | paid, closed | Windows, macOS, Linux | any | 40.6 ms | 36.97 | 0.912 |
+| RIFE 4.16 lite | open source | Linux, Windows, macOS | any | 117.8 ms | 36.33 | 0.934 |
+| Lossless Scaling 3.2.2 (lsfg-vk 2.0) | paid, closed | Windows (Linux: lsfg-vk) | any | 5.8 ms | 35.51 | 0.929 |
+| AMD Fluid Motion Frames (afmf-linux 1.3.1) | open source | Linux | any with Vulkan | 111.8 ms | 33.01 | 0.872 |
+| NVIDIA Optical Flow (SDK 5.0.7) | free, closed | Windows, Linux | NVIDIA Turing or newer | 21.1 ms | 32.23 | 0.897 |
+| AMD FSR 3.1.4 frame generation | open source | Windows (Linux: community port) | any | 8.2 ms | 31.70 | 0.827 |
 
-Motion Blade is free and open source, and runs in real time on any vendor, even integrated GPUs like AMD 780M.
-
-## Quality
-
-Generated frames compared with the real ones (higher is better):
-
-- PSNR (dB): how close the pixels are.
-- SSIM (0 to 1): how alike edges, textures and detail look. Blur and double images lower it.
-
-| | PSNR | SSIM |
-|---|---|---|
-| Motion Blade | 38.89 | 0.940 |
-| RIFE 4.16 lite (SVP 4.7) | 38.14 | 0.935 |
-| Lossless Scaling 3.2.1 (LSFG 3.1) | 37.01 | 0.919 |
-| SVP 4.7 own engine | 36.73 | 0.910 |
-| AMD Fluid Motion Frames for linux 1.3.1 | 34.70 | 0.885 |
-| NVIDIA Optical Flow* | 34.64 | 0.888 |
-| AMD FSR 3.1.6 frame generation | 33.37 | 0.828 |
-
-*FFmpeg nvinterpolate / NvOFFRUC, SDK 5.0.7, GTX 1650 SUPER, perf level SLOW, grid 4x4.
+- Performance cost: time per generated 1080p frame.
+- Fidelity: PSNR in dB, how close the pixels are to the real frames.
+- Detail: SSIM (0 to 1), how alike edges, textures and detail look. Blur and double images lower it.
+- Tested on an NVIDIA GTX 1650 SUPER.
 
 ## How it works
 
@@ -55,7 +43,7 @@ Windows (static, cross-built from Linux): extract
 [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (UCRT, x86_64) into `winbuild/`, then run
 `./build-windows.sh`. It writes `build/motionblade-windows-x86_64.zip`.
 
-## Use
+## Usage
 
 ```sh
 mpv --vf=motionblade video.mp4
