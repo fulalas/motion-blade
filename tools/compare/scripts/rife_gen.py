@@ -16,10 +16,10 @@ def fill(n, f):
 base = core.std.BlankClip(width=w, height=h, format=vs.RGBS, length=len(frames))
 clip = core.std.ModifyFrame(base, base, fill)
 out = core.rife.RIFE(clip, model_path=model, factor_num=2, gpu_id=0)
+in_between = out[1:2 * len(frames) - 1:2].frames(prefetch=4)
 with open(dst, "wb") as f:
     rgba = np.full((h, w, 4), 255, np.uint8)
-    for i in range(1, 2 * len(frames) - 1, 2):
-        fr = out.get_frame(i)
+    for fr in in_between:
         for p in range(3):
             rgba[:, :, p] = np.clip(np.rint(np.asarray(fr[p]) * 255.0), 0, 255).astype(np.uint8)
         f.write(rgba.tobytes())

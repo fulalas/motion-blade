@@ -48,6 +48,7 @@ need() {
 
 case $MODE in quality|perf|all) ;; *) die "usage: ./run.sh [quality|perf|all] [tool ...]" ;; esac
 need "$FFMPEG" ffprobe python3 bc || exit 1
+FFMPEG=$(readlink -f "$(command -v "$FFMPEG")")
 mkdir -p "$WORK" "$L/logs" "$L/bin" "$L/lib" "$L/src" "$L/build" "$L/stamp"
 trap 'rm -rf "$PERF_DIR" "$WORK"' EXIT
 
@@ -131,7 +132,7 @@ build_glslang() {
 }
 
 afmf_probe() {
-    AFMF_WSI=$1 afmf_run 128 128 /dev/null 2 0 timeout 60 env -u AFMF_TEST_SOURCE 2>&1 | sed -n 's/^using //p'
+    AFMF_WSI=$1 afmf_run 128 128 /dev/null 2 timeout 60 env -u AFMF_TEST_SOURCE 2>&1 | sed -n 's/^using //p'
 }
 
 is_cpu_device() {
@@ -154,8 +155,8 @@ afmf_device() {
     [ -n "$dev" ] || { log "afmf: the test program found no device (AFMF_WSI=$AFMF_WSI)"; return 1; }
     log "afmf: $dev ($AFMF_WSI surface)"
     is_cpu_device "$dev" || return 0
-    [ "${AFMF_ALLOW_CPU:-0}" = 1 ] && return 0
-    log "afmf: that is the CPU, not the GPU (set AFMF_ALLOW_CPU=1 to run it anyway)"
+    [ "${ALLOW_CPU:-0}" = 1 ] && return 0
+    log "afmf: that is the CPU, not the GPU (set ALLOW_CPU=1 to run it anyway)"
     return 1
 }
 
@@ -261,7 +262,7 @@ available() {
         fsr) build_fsr ;;
         lsfg) LSFG_FILE=$(lsfg_dll) && build_lsfg ;;
         nvof) nvof_filter ;;
-        svp) svp_libs ;;
+        svp) svp_libs && opencl_vendors ;;
         *) log "unknown tool $1"; return 1 ;;
     esac
 }
@@ -312,23 +313,42 @@ even() {
     ff -i "$src" -frames:v "$frames" -vf "$vf" -fps_mode passthrough -pix_fmt "${fmt/yuv/yuv420p}" -f rawvideo "$out"
 }
 
-gen_rife() {
-    "$L/venv/bin/python" -I "$K/scripts/rife_gen.py" "$L/lib/librife.so" "$L/models/$RIFE_MODEL" "$@" 2>&1 >/dev/null |
-        grep -v '^\[[0-9]* .*\]  ' >&2
+filtered() {
+    local noise=$1
+    shift
+    "$@" 2>&1 >/dev/null | grep -v "$noise" >&2
     return "${PIPESTATUS[0]}"
+}
+
+gen_rife() {
+    filtered '^\[[0-9]* .*\]  ' "$L/venv/bin/python" -I "$K/scripts/rife_gen.py" "$L/lib/librife.so" "$L/models/$RIFE_MODEL" "$@"
 }
 
 gen_fsr() { "$L/bin/fsr_fi" "$@" >/dev/null; }
 
 gen_lsfg() { "$L/bin/lsfg_fi" "$@" --dll "$LSFG_FILE" >/dev/null; }
 
-gen_svp() { "$L/venv/bin/python" -I "$K/scripts/svp_gen.py" "$L/lib/svp" "$@" 2>/dev/null; }
+mesa_gpu() { grep -qE '0x(1002|8086)' /sys/class/drm/card*/device/vendor 2>/dev/null; }
+
+opencl_vendors() {
+    local d=$WORK/opencl f
+    [ -z "${OCL_ICD_VENDORS:-}" ] && [ -d /etc/OpenCL/vendors ] && ! mesa_gpu || return 0
+    mkdir -p "$d"
+    for f in /etc/OpenCL/vendors/*.icd; do
+        case $f in *rusticl*) ;; *) [ -e "$f" ] && ln -sf "$f" "$d/" ;; esac
+    done
+    export OCL_ICD_VENDORS=$d
+}
+
+gen_svp() { "$L/venv/bin/python" -I "$K/scripts/svp_gen.py" "$L/lib/svp" "$@"; }
+
+nvof_ff() { (cd "$WORK" && ff "$@"); }
 
 afmf_run() {
-    local w=$1 h=$2 src=$3 frames=$4 ms=$5
-    shift 5
+    local w=$1 h=$2 src=$3 frames=$4
+    shift 4
     env VK_ADD_LAYER_PATH="$L/layer" AFMF_TEST_WSI="${AFMF_WSI:-headless}" AFMF_ENABLE=1 AFMF_MIN_FPS=0 AFMF_GOVERNOR=0 AFMF_TEST_EXTENT="${w}x$h" \
-        AFMF_TEST_SOURCE="$src" AFMF_TEST_FRAMES="$frames" AFMF_TEST_FRAME_MS="$ms" "$@" "$L/bin/afmf_headless"
+        AFMF_TEST_SOURCE="$src" AFMF_TEST_FRAMES="$frames" AFMF_TEST_FRAME_MS=0 "$@" "$L/bin/afmf_headless"
 }
 
 gen_afmf() {
@@ -336,7 +356,7 @@ gen_afmf() {
     rm -rf "$d"; mkdir -p "$d/dump"
     local count=$(( $(stat -c %s "$in") / (w * h * 4) ))
     python3 -I "$K/scripts/lead.py" "$in" "$d/src.rgba" "$w" "$h" $lead
-    afmf_run "$w" "$h" "$d/src.rgba" $((count + lead)) 60 AFMF_LOG=1 AFMF_DUMP_DIR="$d/dump" >/dev/null 2>&1
+    afmf_run "$w" "$h" "$d/src.rgba" $((count + lead)) AFMF_LOG=1 AFMF_DUMP_DIR="$d/dump" >/dev/null 2>&1
     for k in $(seq 1 $((count - 1))); do
         [ -f "$d/dump/afmf_generated_$((k + lead)).ppm" ] || { log "afmf: frame $k missing"; return 1; }
     done
@@ -348,10 +368,9 @@ gen_afmf() {
 gen_nvof() {
     local w=$1 h=$2 in=$3 out=$4 d=$WORK/nvof
     rm -rf "$d"; mkdir -p "$d"
-    ff "${NVOF_HW[@]}" -f rawvideo -pix_fmt yuv420p -s "${w}x$h" -r 25 -i "$in" \
+    filtered "^Optical Flow Grid Size" nvof_ff "${NVOF_HW[@]}" -f rawvideo -pix_fmt yuv420p -s "${w}x$h" -r 25 -i "$in" \
         -vf "tpad=start=1:start_mode=clone,$NVOF_UP,nvinterpolate=fps=50" -fps_mode passthrough \
-        -c:v hevc_nvenc -tune lossless "$d/all.mkv" 2>&1 | grep -v "^Optical Flow Grid Size" >&2
-    [ "${PIPESTATUS[0]}" -eq 0 ] || return 1
+        -c:v hevc_nvenc -tune lossless "$d/all.mkv" || return 1
     ff -i "$d/all.mkv" -pix_fmt yuv420p -f rawvideo "$d/all.yuv" || return 1
     python3 -I "$K/scripts/nvof_pick.py" "$d/all.yuv" "$in" "$out" $((w * h * 3 / 2)) || return 1
     rm -rf "$d"
@@ -380,22 +399,22 @@ quality() {
     local tool=$1 fmt=$(fmt_of "$1") c line all=
     for c in $CLIPS; do
         local f=${c%%:*} k=${c##*:}
+        local name=${f##*/}
         local clip=$D/$f.mkv
         if [ "$tool" = motionblade ]; then
             line=$("$E" "$clip" -n "$k" -q | tail -1)
         else
-            local size=$(size_of "$clip")
+            local size=$(size_of "$clip") ref=$clip
             even "$clip" "$k" "$WORK/even.$fmt" "$fmt" || return 1
             "gen_$tool" "${size%x*}" "${size#*x}" "$WORK/even.$fmt" "$WORK/gen.$fmt" ||
-                { log "$tool failed on ${f##*/}"; return 1; }
-            local ref=$clip
+                { log "$tool failed on $name"; return 1; }
             [ "$fmt" = rgba ] && { ref=$WORK/ref.y4m; round_trip "$clip" "$k" "$size" "$ref" || return 1; }
             line=$(score "$ref" "$k" "$WORK/gen.$fmt" "$size")
             rm -f "$WORK/even.$fmt" "$WORK/gen.$fmt" "$WORK/ref.y4m"
         fi
         local p=$(echo "$line" | field "MEAN psnr") s=$(echo "$line" | field ssim)
-        [ -n "$p" ] || { log "$tool: no score on ${f##*/}"; return 1; }
-        printf "  %-32s psnr %7s ssim %7s\n" "${f##*/}" "$p" "$s" >&2
+        [ -n "$p" ] || { log "$tool: no score on $name"; return 1; }
+        printf "  %-32s psnr %7s ssim %7s\n" "$name" "$p" "$s" >&2
         all="$all$p $s"$'\n'
     done
     printf "%s" "$all" | awk '{p += $1; s += $2} END {printf "%.2f %.3f\n", p / NR, s / NR}'
@@ -422,8 +441,8 @@ perf_run() {
     [ "$len" = long ] && n=$PERF_LONG
     case $tool in
         motionblade) "$E" "$d/full.y4m" -n $((2 * n - 1)) -nometric -q ;;
-        afmf) afmf_run "$w" "$h" "$d/even_$len.rgba" $n 0 ;;
-        nvof) ff "${NVOF_HW[@]}" -f rawvideo -pix_fmt yuv420p -s "${w}x$h" -r 25 -i "$d/even_$len.yuv" \
+        afmf) afmf_run "$w" "$h" "$d/even_$len.rgba" $n ;;
+        nvof) nvof_ff "${NVOF_HW[@]}" -f rawvideo -pix_fmt yuv420p -s "${w}x$h" -r 25 -i "$d/even_$len.yuv" \
                 -vf "$NVOF_UP,nvinterpolate=fps=50" -f null - ;;
         *) "gen_$tool" "$w" "$h" "$d/even_$len.$(fmt_of "$tool")" /dev/null ;;
     esac
@@ -458,6 +477,7 @@ build_eval || die "could not build eval (needs the Motion Blade build dependenci
 if [ "$MODE" != perf ]; then clips || die "could not download the test clips"; fi
 if [ "$MODE" != quality ]; then perf_clip || die "could not download the performance clip"; fi
 
+[ -s "$RESULTS" ] && echo >> "$RESULTS"
 {
     echo "== $(date)"
     gpu_info

@@ -20,7 +20,7 @@ afmf-linux runs through its test program, on its headless surface (`VK_EXT_headl
 has that surface, so with other drivers (NVIDIA) it lands on llvmpipe, the CPU. Under Wayland it then
 presents to an invisible Wayland surface instead, on the GPU; that needs the wayland-client headers when
 afmf is built. `AFMF_WSI=headless|wayland` picks the surface. If it still lands on a CPU device it is
-skipped (`AFMF_ALLOW_CPU=1` to run it anyway).
+skipped. FSR 3 and Lossless Scaling stop the same way on a CPU device (`ALLOW_CPU=1` runs them anyway).
 
 Some tools can't be shipped, so the user provides them (a missing one only skips that tool):
 
@@ -36,7 +36,8 @@ RGB round trip, so the conversion itself costs them nothing.
 
 Performance: total time per generated 1080p frame, timed from outside the same way for every tool.
 Each tool runs on 151 and on 451 frames from RAM (`/dev/shm`, about 10 GB free needed), and the
-difference is divided by the 300 extra frames, so start-up is left out. One warm-up run, then the
+difference is divided by the 300 extra frames, so start-up is left out. RIFE and SVP are asked for a few
+frames ahead, as a video player does, so the GPU is never left waiting while a frame is saved. One warm-up run, then the
 median of 3 (`PERF_RUNS=n` to change). afmf-linux and NVIDIA Optical Flow keep the generated frame on the
 GPU; the others copy it back to system memory. Close other GPU work and set the GPU to maximum performance
 first.

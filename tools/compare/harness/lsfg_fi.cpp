@@ -48,10 +48,17 @@ static std::string initVulkan()
         vkGetPhysicalDeviceProperties(d, &p);
         if (sel ? (strstr(p.deviceName, sel) != nullptr) : (p.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU)) { g_phys = d; break; }
     }
-    if (!g_phys) g_phys = devs[0];
+    const bool fallback = !g_phys;
+    if (fallback) g_phys = devs[0];
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(g_phys, &props);
-    fprintf(stderr, "device: %s\n", props.deviceName);
+    const bool cpu = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
+    if (cpu && !getenv("ALLOW_CPU")) {
+        fprintf(stderr, "device: %s is the CPU, not the GPU (set ALLOW_CPU=1 to run it anyway)\n", props.deviceName);
+        exit(1);
+    }
+    if (fallback || cpu || getenv("LSFG_FI_VERBOSE"))
+        fprintf(stderr, "device: %s%s%s\n", props.deviceName, cpu ? " (cpu)" : "", fallback ? " (no match, first device)" : "");
     vkGetPhysicalDeviceMemoryProperties(g_phys, &g_memProps);
 
     vkGetPhysicalDeviceQueueFamilyProperties(g_phys, &n, nullptr);
@@ -222,7 +229,8 @@ int main(int argc, char** argv)
     if (!fout) { perror(outPath); return 1; }
 
     const std::string devId = initVulkan();
-    fprintf(stderr, "lsfg: flow %.2f, perf %s, fp16 %s, warmup %d\n", flow, perf ? "on" : "off", fp16 ? "allowed" : "off", warmup);
+    if (getenv("LSFG_FI_VERBOSE"))
+        fprintf(stderr, "lsfg: flow %.2f, perf %s, fp16 %s, warmup %d\n", flow, perf ? "on" : "off", fp16 ? "allowed" : "off", warmup);
 
     lsfgvk::Instance* lsfg = nullptr;
     lsfgvk::Context* ctx = nullptr;

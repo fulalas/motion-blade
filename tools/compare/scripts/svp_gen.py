@@ -22,7 +22,8 @@ def opencl_gpus():
 
 lib, w, h, src, dst = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], sys.argv[5]
 gpu = 1 if opencl_gpus() > 0 else 0
-print(f"svp: {'GPU (OpenCL)' if gpu else 'CPU (no OpenCL GPU found)'}", file=sys.stderr)
+if not gpu:
+    print("svp: no OpenCL GPU found, running on the CPU", file=sys.stderr)
 core = vs.core
 core.std.LoadPlugin(f"{lib}/libsvpflow1.so")
 core.std.LoadPlugin(f"{lib}/libsvpflow2.so")
@@ -45,8 +46,8 @@ sup = core.svp1.Super(clip, "{gpu:%d}" % gpu)
 vec = core.svp1.Analyse(sup["clip"], sup["data"], clip, "{}")
 out = core.svp2.SmoothFps(clip, sup["clip"], sup["data"], vec["clip"], vec["data"],
                           "{rate:{num:2,den:1,abs:false},scene:{mode:0}}")
+in_between = out[1:2 * count - 1:2].frames(prefetch=4) if count > 1 else ()
 with open(dst, "wb") as f:
-    for i in range(1, 2 * count - 1, 2):
-        fr = out.get_frame(i)
+    for fr in in_between:
         for p in range(3):
             f.write(np.ascontiguousarray(np.asarray(fr[p])).tobytes())
