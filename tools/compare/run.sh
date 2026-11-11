@@ -48,7 +48,8 @@ need() {
 
 case $MODE in quality|perf|all) ;; *) die "usage: ./run.sh [quality|perf|all] [tool ...]" ;; esac
 need "$FFMPEG" ffprobe python3 bc || exit 1
-FFMPEG=$(readlink -f "$(command -v "$FFMPEG")")
+FFMPEG=$(command -v "$FFMPEG")
+case $FFMPEG in /*) ;; *) FFMPEG=$PWD/$FFMPEG ;; esac
 mkdir -p "$WORK" "$L/logs" "$L/bin" "$L/lib" "$L/src" "$L/build" "$L/stamp"
 trap 'rm -rf "$PERF_DIR" "$WORK"' EXIT
 
@@ -154,10 +155,21 @@ afmf_device() {
     fi
     [ -n "$dev" ] || { log "afmf: the test program found no device (AFMF_WSI=$AFMF_WSI)"; return 1; }
     log "afmf: $dev ($AFMF_WSI surface)"
+    gpu_or_allowed afmf "$dev"
+}
+
+gpu_or_allowed() {
+    local tool=$1 dev=$2
     is_cpu_device "$dev" || return 0
     [ "${ALLOW_CPU:-0}" = 1 ] && return 0
-    log "afmf: that is the CPU, not the GPU (set ALLOW_CPU=1 to run it anyway)"
+    log "$tool: $dev is the CPU, not the GPU (set ALLOW_CPU=1 to run it anyway)"
     return 1
+}
+
+harness_device() {
+    local dev
+    dev=$("$L/bin/${1}_fi" --device) || { log "$1: could not pick a Vulkan device"; return 1; }
+    gpu_or_allowed "$1" "$dev"
 }
 
 build_afmf() {
@@ -259,8 +271,8 @@ available() {
         motionblade) return 0 ;;
         rife) build_rife ;;
         afmf) build_afmf ;;
-        fsr) build_fsr ;;
-        lsfg) LSFG_FILE=$(lsfg_dll) && build_lsfg ;;
+        fsr) build_fsr && harness_device fsr ;;
+        lsfg) LSFG_FILE=$(lsfg_dll) && build_lsfg && harness_device lsfg ;;
         nvof) nvof_filter ;;
         svp) svp_libs && opencl_vendors && svp_gpu ;;
         *) log "unknown tool $1"; return 1 ;;

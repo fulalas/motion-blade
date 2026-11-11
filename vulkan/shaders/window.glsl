@@ -183,16 +183,11 @@ float sparse_window_sad(float row[SPARSE])
     return cluster_sum(sum) * 255.0 * float(SPARSE_STRIDE);
 }
 
-float sparse_sad(sampler2D target, vec2 v)
-{
-    float row[SPARSE];
-    load_sparse(target, lane_start + v, row);
-    return sparse_window_sad(row);
-}
-
 void try_sparse(sampler2D target, vec2 u, float penalty, float length_penalty)
 {
-    float sad = sparse_sad(target, u);
+    float row[SPARSE];
+    load_sparse(target, lane_start + u, row);
+    float sad = sparse_window_sad(row);
     consider(u, sad, sad + penalty + length_penalty * l1(u));
 }
 

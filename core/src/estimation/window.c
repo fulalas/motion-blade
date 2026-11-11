@@ -73,42 +73,6 @@ float cluster_sum(const float lanes[N])
     return level[0];
 }
 
-static float row_diff_sum(const float a[N], const float b[N])
-{
-    float sum = 0.0f;
-    for (int x = 0; x < N; x++) {
-        sum += a[x] - b[x];
-    }
-    return sum;
-}
-
-static float row_abs_sum(const float a[N], const float b[N], float mean)
-{
-    float sum = 0.0f;
-    for (int x = 0; x < N; x++) {
-        sum += fabsf(a[x] - b[x] - mean);
-    }
-    return sum;
-}
-
-static float total_diff(const window *a, const window *b)
-{
-    float lanes[N];
-    for (int lane = 0; lane < N; lane++) {
-        lanes[lane] = row_diff_sum(a->rows[lane], b->rows[lane]);
-    }
-    return cluster_sum(lanes);
-}
-
-static float total_abs(const window *a, const window *b, float mean)
-{
-    float lanes[N];
-    for (int lane = 0; lane < N; lane++) {
-        lanes[lane] = row_abs_sum(a->rows[lane], b->rows[lane], mean);
-    }
-    return cluster_sum(lanes) * LEVELS;
-}
-
 sad_result window_zsad(const window *a, const window *b, float mean_weight)
 {
     return window_zsad_sparse(a, b, mean_weight, 1);
@@ -148,8 +112,7 @@ sad_result window_zsad_sparse(const window *a, const window *b, float mean_weigh
 
 sad_pair window_sad_pair(const window *a, const window *b)
 {
-    float mean = total_diff(a, b) / PIXELS;
-    return (sad_pair){total_abs(a, b, 0.0f), total_abs(a, b, mean)};
+    return (sad_pair){window_zsad(a, b, 0.0f).sad, window_zsad(a, b, 1.0f).sad};
 }
 
 float window_sum(const window *w)

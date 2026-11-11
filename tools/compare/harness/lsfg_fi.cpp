@@ -1,4 +1,5 @@
 #include <vulkan/vulkan.h>
+#include "device.h"
 #include "lsfg-vk/lsfgvk.hpp"
 
 #include <cstdio>
@@ -27,7 +28,7 @@ static uint32_t findMemType(uint32_t bits, VkMemoryPropertyFlags want)
     exit(1);
 }
 
-static std::string initVulkan()
+static HarnessDevice selectDevice()
 {
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.pApplicationName = "lsfg_fi";
@@ -36,29 +37,16 @@ static std::string initVulkan()
     ici.pApplicationInfo = &app;
     VK_CHECK(vkCreateInstance(&ici, nullptr, &g_instance));
 
+    HarnessDevice d = chooseDevice(g_instance, "LSFG_FI_DEVICE");
+    g_phys = d.handle;
+    return d;
+}
+
+static std::string initVulkan()
+{
+    const HarnessDevice dev = selectDevice();
+    requireGpu(dev, "LSFG_FI_VERBOSE");
     uint32_t n = 0;
-    vkEnumeratePhysicalDevices(g_instance, &n, nullptr);
-    if (!n) { fprintf(stderr, "no Vulkan device\n"); exit(1); }
-    std::vector<VkPhysicalDevice> devs(n);
-    vkEnumeratePhysicalDevices(g_instance, &n, devs.data());
-    g_phys = VK_NULL_HANDLE;
-    const char* sel = getenv("LSFG_FI_DEVICE");
-    for (auto d : devs) {
-        VkPhysicalDeviceProperties p;
-        vkGetPhysicalDeviceProperties(d, &p);
-        if (sel ? (strstr(p.deviceName, sel) != nullptr) : (p.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU)) { g_phys = d; break; }
-    }
-    const bool fallback = !g_phys;
-    if (fallback) g_phys = devs[0];
-    VkPhysicalDeviceProperties props;
-    vkGetPhysicalDeviceProperties(g_phys, &props);
-    const bool cpu = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
-    if (cpu && !getenv("ALLOW_CPU")) {
-        fprintf(stderr, "device: %s is the CPU, not the GPU (set ALLOW_CPU=1 to run it anyway)\n", props.deviceName);
-        exit(1);
-    }
-    if (fallback || cpu || getenv("LSFG_FI_VERBOSE"))
-        fprintf(stderr, "device: %s%s%s\n", props.deviceName, cpu ? " (cpu)" : "", fallback ? " (no match, first device)" : "");
     vkGetPhysicalDeviceMemoryProperties(g_phys, &g_memProps);
 
     vkGetPhysicalDeviceQueueFamilyProperties(g_phys, &n, nullptr);
@@ -89,7 +77,7 @@ static std::string initVulkan()
     if (!g_importSemaphoreFd) { fprintf(stderr, "vkImportSemaphoreFdKHR missing\n"); exit(1); }
 
     char id[16];
-    snprintf(id, sizeof(id), "%04x:%04x", props.vendorID, props.deviceID);
+    snprintf(id, sizeof(id), "%04x:%04x", dev.props.vendorID, dev.props.deviceID);
     return id;
 }
 
@@ -181,7 +169,8 @@ static void imageBarrier(VkCommandBuffer cb, VkImage img, uint32_t layer, VkImag
 static void usage()
 {
     fprintf(stderr,
-            "usage: lsfg_fi <width> <height> <in.rgba> <out.rgba> [--flow F] [--perf]\n"
+            "usage: lsfg_fi --device\n"
+            "       lsfg_fi <width> <height> <in.rgba> <out.rgba> [--flow F] [--perf]\n"
             "               [--warmup N] [--no-fp16] [--dll PATH]\n"
             "  writes the t=0.5 frame for each input pair (i-1,i), i>=1: out has count-1 frames\n"
             "  --flow F    flow scale 0.25..1.0 (default 1.0)\n"
@@ -196,6 +185,10 @@ static void usage()
 
 int main(int argc, char** argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "--device")) {
+        printDevice(selectDevice());
+        return 0;
+    }
     if (argc < 5) usage();
     const uint32_t W = (uint32_t)atoi(argv[1]);
     const uint32_t H = (uint32_t)atoi(argv[2]);

@@ -16,7 +16,7 @@ def fill(n, f):
 base = core.std.BlankClip(width=w, height=h, format=vs.RGBS, length=len(frames))
 clip = core.std.ModifyFrame(base, base, fill)
 out = core.rife.RIFE(clip, model_path=model, factor_num=2, gpu_id=0)
-in_between = out[1:2 * len(frames) - 1:2].frames(prefetch=4)
+in_between = out[1:2 * len(frames) - 1:2].frames(prefetch=4) if len(frames) > 1 else ()
 with open(dst, "wb") as f:
     rgba = np.full((h, w, 4), 255, np.uint8)
     for fr in in_between:

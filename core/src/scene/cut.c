@@ -5,10 +5,6 @@
 #include "reference/cpu_resources.h"
 #include "reference/kernels.h"
 
-static const float MIN_ERROR_FLOOR = 14.0f;
-static const float ERROR_OFFSET = 4.0f;
-static const float MIN_RECORDED_ERROR = 0.1f;
-
 typedef struct series {
     int count_slot;
     int values_slot;
@@ -62,8 +58,8 @@ static float error_threshold(const mb_cut_pass *pass, const float *history, floa
     if (history[ERRORS.count_slot] <= 0.0f) {
         return pass->max_threshold * k;
     }
-    float relative = pass->error_ratio * series_median(history, ERRORS) + ERROR_OFFSET * k;
-    return fminf(pass->max_threshold * k, fmaxf(MIN_ERROR_FLOOR * k, relative));
+    float relative = pass->error_ratio * series_median(history, ERRORS) + MB_CUT_ERROR_OFFSET * k;
+    return fminf(pass->max_threshold * k, fmaxf(MB_CUT_ERROR_FLOOR * k, relative));
 }
 
 static float zero_threshold(const mb_cut_pass *pass, const float *history, float k)
@@ -83,10 +79,10 @@ void ref_decide_cut(const mb_cut_pass *pass)
     float k = contrast_factor(pass, stats);
     bool error_jump = error > error_threshold(pass, history, k);
     bool cut = error_jump && zero_mean > zero_threshold(pass, history, k);
-    if (error > MIN_RECORDED_ERROR && !error_jump) {
+    if (error > MB_CUT_MIN_RECORDED_ERROR && !error_jump) {
         series_push(history, ERRORS, error);
     }
-    if (error > MIN_RECORDED_ERROR && !cut) {
+    if (error > MB_CUT_MIN_RECORDED_ERROR && !cut) {
         series_push(history, ZEROS, zero_mean);
     }
     stats[MB_STAT_CUT] = cut ? 1u : 0u;

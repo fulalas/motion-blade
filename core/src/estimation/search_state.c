@@ -31,12 +31,6 @@ void search_state_consider(search_state *state, vec2 v, sad_result r, float cost
     }
 }
 
-void search_state_try(search_state *state, const ref_texture *target, vec2 v, float penalty, float length_penalty)
-{
-    sad_result r = search_state_sad_hardware(state, target, v);
-    search_state_consider(state, v, r, r.sad + penalty + length_penalty * v2_l1(v));
-}
-
 void search_state_try_sparse(search_state *state, const ref_texture *target, vec2 v, float penalty,
                              float length_penalty, int stride)
 {

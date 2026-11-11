@@ -9,10 +9,6 @@ layout(push_constant) uniform Push { cut_push push; };
 layout(std430, binding = 0) buffer Stats { uint stats[]; };
 layout(std430, binding = 1) buffer History { float history[]; };
 
-#define MIN_ERROR_FLOOR 14.0
-#define ERROR_OFFSET 4.0
-#define MIN_RECORDED_ERROR 0.1
-
 float series_median(int values, int count)
 {
     float v[MB_HISTORY_LENGTH];
@@ -57,8 +53,8 @@ float error_threshold(float k)
     if (count <= 0) {
         return push.max_threshold * k;
     }
-    float relative = push.error_ratio * series_median(MB_HIST_ERRORS, count) + ERROR_OFFSET * k;
-    return min(push.max_threshold * k, max(MIN_ERROR_FLOOR * k, relative));
+    float relative = push.error_ratio * series_median(MB_HIST_ERRORS, count) + MB_CUT_ERROR_OFFSET * k;
+    return min(push.max_threshold * k, max(MB_CUT_ERROR_FLOOR * k, relative));
 }
 
 float zero_threshold(float k)
@@ -77,10 +73,10 @@ void main()
     float k = contrast_factor();
     bool error_jump = error > error_threshold(k);
     bool cut = error_jump && zero_mean > zero_threshold(k);
-    if (error > MIN_RECORDED_ERROR && !error_jump) {
+    if (error > MB_CUT_MIN_RECORDED_ERROR && !error_jump) {
         series_push(MB_HIST_ERROR_COUNT, MB_HIST_ERRORS, error);
     }
-    if (error > MIN_RECORDED_ERROR && !cut) {
+    if (error > MB_CUT_MIN_RECORDED_ERROR && !cut) {
         series_push(MB_HIST_ZERO_COUNT, MB_HIST_ZEROS, zero_mean);
     }
     stats[MB_STAT_CUT] = cut ? 1u : 0u;

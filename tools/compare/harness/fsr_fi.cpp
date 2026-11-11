@@ -1,4 +1,5 @@
 #include <vulkan/vulkan.h>
+#include "device.h"
 #include <FidelityFX/host/ffx_interface.h>
 #include <FidelityFX/host/ffx_opticalflow.h>
 #include <FidelityFX/host/ffx_frameinterpolation.h>
@@ -159,7 +160,7 @@ static bool hasExt(const std::vector<VkExtensionProperties>& exts, const char* n
     return false;
 }
 
-static void initVulkan()
+static HarnessDevice selectDevice()
 {
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.pApplicationName = "fsr_fi";
@@ -168,29 +169,16 @@ static void initVulkan()
     ici.pApplicationInfo = &app;
     VK_CHECK(vkCreateInstance(&ici, nullptr, &g_instance));
 
+    HarnessDevice d = chooseDevice(g_instance, "FSR_FI_DEVICE");
+    g_phys = d.handle;
+    return d;
+}
+
+static void initVulkan()
+{
+    const HarnessDevice dev = selectDevice();
+    requireGpu(dev, "FSR_FI_VERBOSE");
     uint32_t n = 0;
-    vkEnumeratePhysicalDevices(g_instance, &n, nullptr);
-    if (!n) { fprintf(stderr, "no Vulkan device\n"); exit(1); }
-    std::vector<VkPhysicalDevice> devs(n);
-    vkEnumeratePhysicalDevices(g_instance, &n, devs.data());
-    g_phys = VK_NULL_HANDLE;
-    const char* sel = getenv("FSR_FI_DEVICE");
-    for (auto d : devs) {
-        VkPhysicalDeviceProperties p;
-        vkGetPhysicalDeviceProperties(d, &p);
-        if (sel ? (strstr(p.deviceName, sel) != nullptr) : (p.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU)) { g_phys = d; break; }
-    }
-    const bool fallback = !g_phys;
-    if (fallback) g_phys = devs[0];
-    VkPhysicalDeviceProperties props;
-    vkGetPhysicalDeviceProperties(g_phys, &props);
-    const bool cpu = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
-    if (cpu && !getenv("ALLOW_CPU")) {
-        fprintf(stderr, "device: %s is the CPU, not the GPU (set ALLOW_CPU=1 to run it anyway)\n", props.deviceName);
-        exit(1);
-    }
-    if (fallback || cpu || getenv("FSR_FI_VERBOSE"))
-        fprintf(stderr, "device: %s%s%s\n", props.deviceName, cpu ? " (cpu)" : "", fallback ? " (no match, first device)" : "");
     vkGetPhysicalDeviceMemoryProperties(g_phys, &g_memProps);
 
     vkGetPhysicalDeviceQueueFamilyProperties(g_phys, &n, nullptr);
@@ -240,7 +228,8 @@ static void initVulkan()
 static void usage()
 {
     fprintf(stderr,
-            "usage: fsr_fi <width> <height> <in.rgba> <out.rgba> [--warmup N]\n"
+            "usage: fsr_fi --device\n"
+            "       fsr_fi <width> <height> <in.rgba> <out.rgba> [--warmup N]\n"
             "  writes the t=0.5 frame for each input pair (i-1,i), i>=1: out has count-1 frames\n"
             "  --warmup N: dispatches of frame 0 before the first pair (default 10; FSR blends without optical flow for 10 frames after a reset)\n");
     exit(1);
@@ -248,6 +237,10 @@ static void usage()
 
 int main(int argc, char** argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "--device")) {
+        printDevice(selectDevice());
+        return 0;
+    }
     if (argc < 5) usage();
     const uint32_t W = (uint32_t)atoi(argv[1]);
     const uint32_t H = (uint32_t)atoi(argv[2]);
