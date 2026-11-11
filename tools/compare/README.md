@@ -33,14 +33,15 @@ Each tool also needs the items below. A tool that is missing something is skippe
 | afmf-linux | CMake 3.28 or newer; glslang (built if `glslangValidator` is missing); Mesa, or a Wayland session and the wayland-client headers (see below) |
 | FSR 3 | Vulkan 1.3; glslang (as above) |
 | Lossless Scaling | Vulkan 1.2; `lsfg-vk.dll` from Lossless Scaling on Steam (beta branch "lsfg-vk"), found in the Steam folder, next to `run.sh`, or with `LSFG_DLL=/path` |
-| SVP | The official installer `svp*-linux.run`, next to `run.sh` or with `SVP_INSTALLER=/path`; an OpenCL driver with the `libOpenCL.so.1` loader (Mesa rusticl, ROCm or NVIDIA). Without OpenCL, SVP runs on the CPU and its speed can't be compared |
+| SVP | The official installer `svp*-linux.run`, next to `run.sh` or with `SVP_INSTALLER=/path`; an OpenCL driver with the `libOpenCL.so.1` loader (Mesa rusticl, ROCm or NVIDIA) |
 | NVIDIA Optical Flow | An NVIDIA GPU (Turing or newer) with the proprietary driver (CUDA and NVENC); an FFmpeg build with the `nvinterpolate` filter and `hevc_nvenc`, set with `FFMPEG=/path/to/ffmpeg` |
 
 afmf-linux runs through its test program, on its headless surface (`VK_EXT_headless_surface`). Only Mesa
 has that surface, so with other drivers (NVIDIA) it lands on llvmpipe, the CPU. Under Wayland it then
 presents to an invisible Wayland surface instead, on the GPU; that needs the wayland-client headers when
 afmf is built. `AFMF_WSI=headless|wayland` picks the surface. If it still lands on a CPU device it is
-skipped. FSR 3 and Lossless Scaling stop the same way on a CPU device (`ALLOW_CPU=1` runs them anyway).
+skipped. FSR 3 and Lossless Scaling stop the same way on a CPU device, and SVP when it finds no OpenCL GPU
+(`ALLOW_CPU=1` runs them anyway).
 
 ## How it measures
 

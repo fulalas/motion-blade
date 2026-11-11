@@ -1,3 +1,4 @@
+import os
 import sys
 import ctypes
 import numpy as np
@@ -20,9 +21,16 @@ def opencl_gpus():
             total += d.value
     return total
 
+if sys.argv[1:] == ["--gpus"]:
+    print(opencl_gpus())
+    sys.exit(0)
+
 lib, w, h, src, dst = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], sys.argv[5]
 gpu = 1 if opencl_gpus() > 0 else 0
 if not gpu:
+    if os.environ.get("ALLOW_CPU") != "1":
+        print("svp: no OpenCL GPU found (set ALLOW_CPU=1 to run it on the CPU anyway)", file=sys.stderr)
+        sys.exit(1)
     print("svp: no OpenCL GPU found, running on the CPU", file=sys.stderr)
 core = vs.core
 core.std.LoadPlugin(f"{lib}/libsvpflow1.so")

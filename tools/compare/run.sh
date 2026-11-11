@@ -262,7 +262,7 @@ available() {
         fsr) build_fsr ;;
         lsfg) LSFG_FILE=$(lsfg_dll) && build_lsfg ;;
         nvof) nvof_filter ;;
-        svp) svp_libs && opencl_vendors ;;
+        svp) svp_libs && opencl_vendors && svp_gpu ;;
         *) log "unknown tool $1"; return 1 ;;
     esac
 }
@@ -327,6 +327,14 @@ gen_rife() {
 gen_fsr() { "$L/bin/fsr_fi" "$@" >/dev/null; }
 
 gen_lsfg() { "$L/bin/lsfg_fi" "$@" --dll "$LSFG_FILE" >/dev/null; }
+
+svp_gpu() {
+    local n=$("$L/venv/bin/python" -I "$K/scripts/svp_gen.py" --gpus 2>/dev/null)
+    [ "${n:-0}" -gt 0 ] && return 0
+    [ "${ALLOW_CPU:-0}" = 1 ] && return 0
+    log "svp: no OpenCL GPU found, it would run on the CPU (install an OpenCL driver, or set ALLOW_CPU=1 to run it anyway)"
+    return 1
+}
 
 mesa_gpu() { grep -qE '0x(1002|8086)' /sys/class/drm/card*/device/vendor 2>/dev/null; }
 
