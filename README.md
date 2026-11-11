@@ -12,13 +12,13 @@ The table below (generated with `tools/compare/run.sh`) compares Motion Blade ag
 
 | | License | OS | GPU | Performance cost (lower is better) | Fidelity (higher is better) | Detail (higher is better) |
 |---|---|---|---|---|---|---|
-| Motion Blade 4.5.0 | open source | Linux, Windows | any with Vulkan | 16.6 ms | 100% | 100% |
-| SVP 4.7 | paid, closed | Windows, macOS, Linux | any | 40.6 ms | 80% | 68% |
-| RIFE 4.16 lite | open source | Linux, Windows, macOS | any | 117.8 ms | 74% | 91% |
-| Lossless Scaling 3.2.2 (lsfg-vk 2.0) | paid, closed | Windows (Linux: lsfg-vk) | any | 5.8 ms | 67% | 85% |
-| AMD Fluid Motion Frames (afmf-linux 1.3.1) | open source | Linux | any with Vulkan | 111.8 ms | 51% | 47% |
-| NVIDIA Optical Flow (SDK 5.0.7) | free, closed | Windows, Linux | NVIDIA Turing or newer | 21.1 ms | 46% | 58% |
-| AMD FSR 3.1.4 frame generation | open source | Windows (Linux: community port) | any | 8.2 ms | 43% | 35% |
+| Motion Blade 4.7.2 | open source | Linux, Windows | any with Vulkan | 14.0 ms | 100% | 100% |
+| RIFE 4.16 lite | open source | Linux, Windows, macOS | any | 117.0 ms | 93% | 89% |
+| Lossless Scaling 3.2.2 (lsfg-vk 2.0) | paid, closed | Windows (Linux: lsfg-vk) | any | 4.9 ms | 84% | 83% |
+| SVP 4.7 | paid, closed | Windows, macOS, Linux | any | 39.1 ms | 80% | 67% |
+| NVIDIA Optical Flow (SDK 5.0.7) | free, closed | Windows, Linux | NVIDIA Turing or newer | 19.9 ms | 70% | 58% |
+| AMD Fluid Motion Frames (afmf-linux 1.3.1) | open source | Linux | any with Vulkan | 4.6 ms | 63% | 46% |
+| AMD FSR 3.1.4 frame generation | open source | Windows (Linux: community port) | any | 7.2 ms | 53% | 34% |
 
 - Performance cost: time per generated 1080p frame.
 - Fidelity: pixel error compared with Motion Blade's.
