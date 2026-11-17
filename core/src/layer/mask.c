@@ -153,7 +153,7 @@ static float nearness(const mb_layer_blur_pass *pass, const layer_kernel *k, int
             sum += source[ry * pass->width + rx].x * k->weights[j + k->radius] * k->weights[i + k->radius];
         }
     }
-    return clampf((float)MB_LAYER_NEAR_GAIN * sum, 0.0f, 1.0f);
+    return clampf((float)MB_LAYER_NEAR_GAIN * (sum - (float)MB_LAYER_NEAR_FLOOR), 0.0f, 1.0f);
 }
 
 void ref_layer_blur(const mb_layer_blur_pass *pass)

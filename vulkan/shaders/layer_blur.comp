@@ -33,7 +33,7 @@ float nearness(ivec2 q)
                    near_weights[i + MB_LAYER_NEAR_TAPS];
         }
     }
-    return clamp(float(MB_LAYER_NEAR_GAIN) * sum, 0.0, 1.0);
+    return clamp(float(MB_LAYER_NEAR_GAIN) * (sum - float(MB_LAYER_NEAR_FLOOR)), 0.0, 1.0);
 }
 
 float decided(float value, float prior)

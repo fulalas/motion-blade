@@ -276,14 +276,18 @@ struct layer_search_push {
 };
 
 struct layer_model_push {
-    int32_t cells;
+    int32_t cells_x;
+    int32_t cells_y;
+    int32_t width;
+    int32_t height;
     float min_share;
     int32_t has_previous;
 };
 
 struct layer_pair_push {
     int32_t has_past;
-    int32_t cells;
+    int32_t cells_x;
+    int32_t cells_y;
     float min_share;
 };
 
