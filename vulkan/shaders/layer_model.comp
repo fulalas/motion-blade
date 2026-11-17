@@ -1,0 +1,139 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { layer_model_push push; };
+#include "layer.glsl"
+layout(local_size_x = MB_LAYER_MODEL_LANES) in;
+
+layout(std430, binding = 0) readonly buffer Raw { vec4 raw[]; };
+layout(std430, binding = 1) writeonly buffer Model { vec4 model[]; };
+layout(std430, binding = 2) readonly buffer Previous { vec4 previous[]; };
+
+#define LANES MB_LAYER_MODEL_LANES
+#define ROUNDS 3
+const float TOLERANCES[ROUNDS] = float[ROUNDS](4.0, 2.0, 2.0);
+
+shared vec4 parts[LANES];
+shared vec4 total;
+int lane;
+
+vec4 reduce(vec4 part)
+{
+    parts[lane] = part;
+    barrier();
+    if (lane == 0) {
+        vec4 sum = vec4(0.0);
+        for (int k = 0; k < LANES; k++) {
+            sum += parts[k];
+        }
+        total = sum;
+    }
+    barrier();
+    return total;
+}
+
+float l1(vec2 v)
+{
+    return abs(v.x) + abs(v.y);
+}
+
+float agreeing_weight(vec4 r, vec2 m)
+{
+    float limit = float(MB_LAYER_CONSENSUS_REL) * l1(m) + float(MB_LAYER_CONSENSUS_ABS);
+    return l1(r.xy - m) <= limit ? r.z : 0.0;
+}
+
+vec4 robust_term(vec4 r, vec2 m, float tolerance)
+{
+    float d = l1(r.xy - m) / (3.0 * tolerance);
+    float w = clamp(1.0 - d * d, 0.0, 1.0);
+    w = r.z * w * w;
+    return vec4(w * r.x, w * r.y, w, 0.0);
+}
+
+vec4 lane_candidate()
+{
+    vec4 candidate = vec4(0.0);
+    for (int i = lane; i < push.cells; i += LANES) {
+        if (raw[i].z > candidate.z) {
+            candidate = raw[i];
+        }
+    }
+    float support = 0.0;
+    for (int i = 0; i < push.cells; i++) {
+        support += agreeing_weight(raw[i], candidate.xy);
+    }
+    return vec4(candidate.xy, support, 0.0);
+}
+
+vec2 best_supported()
+{
+    parts[lane] = lane_candidate();
+    barrier();
+    vec2 best = vec2(0.0);
+    float best_support = 0.0;
+    for (int k = 0; k < LANES; k++) {
+        if (parts[k].z > best_support) {
+            best_support = parts[k].z;
+            best = parts[k].xy;
+        }
+    }
+    barrier();
+    return best;
+}
+
+vec2 refit(vec2 m, float tolerance)
+{
+    vec4 part = vec4(0.0);
+    for (int i = lane; i < push.cells; i += LANES) {
+        part += robust_term(raw[i], m, tolerance);
+    }
+    vec4 t = reduce(part);
+    return t.z < 1e-6 ? m : t.xy / t.z;
+}
+
+vec4 summary(vec2 m)
+{
+    vec4 part = vec4(0.0);
+    for (int i = lane; i < push.cells; i += LANES) {
+        part += vec4(raw[i].z > 0.0 ? 1.0 : 0.0, agreeing_weight(raw[i], m), raw[i].z, raw[i].w);
+    }
+    return reduce(part);
+}
+
+bool light_changed(float mean)
+{
+    vec4 part = vec4(0.0);
+    for (int i = lane; i < push.cells; i += LANES) {
+        part.x += abs(raw[i].w - 1.0) <= float(MB_LAYER_LIGHT_STEADY) ? 1.0 : 0.0;
+        part.y += abs(raw[i].w - mean) <= float(MB_LAYER_LIGHT_BAND) ? 1.0 : 0.0;
+    }
+    vec4 shares = reduce(part) / float(push.cells);
+    return abs(mean - 1.0) > float(MB_LAYER_LIGHT_STEADY) && shares.x < float(MB_LAYER_LIGHT_SHARE) &&
+           shares.y >= float(MB_LAYER_LIGHT_SHARE);
+}
+
+bool is_layer(vec2 m, float share, float agreement)
+{
+    bool kept = push.has_previous != 0 && previous[0].z > 0.5;
+    float min_length = kept ? float(MB_LAYER_KEEP_MIN_LENGTH) : float(MB_LAYER_MODEL_MIN_LENGTH);
+    float min_share = kept ? push.min_share * float(MB_LAYER_KEEP_SHARE) : push.min_share;
+    float min_agreement = kept ? float(MB_LAYER_KEEP_CONSENSUS) : float(MB_LAYER_MIN_CONSENSUS);
+    return share >= min_share && l1(m) >= min_length && agreement >= min_agreement;
+}
+
+void main()
+{
+    lane = int(gl_LocalInvocationID.x);
+    vec2 m = best_supported();
+    for (int round = 0; round < ROUNDS; round++) {
+        m = refit(m, TOLERANCES[round]);
+    }
+    vec4 t = summary(m);
+    float share = t.x / float(push.cells);
+    bool light = light_changed(t.w / float(push.cells));
+    if (lane == 0) {
+        bool enabled = is_layer(m, share, t.y / max(t.z, 1e-6)) && !light;
+        model[0] = vec4(m, enabled ? 1.0 : 0.0, share);
+    }
+}

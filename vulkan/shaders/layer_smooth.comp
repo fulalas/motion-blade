@@ -1,0 +1,70 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { layer_smooth_push push; };
+#include "layer.glsl"
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Raw { vec4 raw[]; };
+layout(std430, binding = 1) readonly buffer Model { vec4 model[]; };
+layout(std430, binding = 2) readonly buffer Previous { vec4 previous[]; };
+layout(std430, binding = 3) writeonly buffer Field { vec4 field[]; };
+
+LAYER_KERNEL(smooth_weights, float(MB_LAYER_SMOOTH_SIGMA), MB_LAYER_SMOOTH_RADIUS)
+LAYER_KERNEL(prior_weights, float(MB_LAYER_PRIOR_SIGMA), MB_LAYER_PRIOR_RADIUS)
+
+ivec2 cells()
+{
+    return ivec2(push.cells_x, push.cells_y);
+}
+
+bool is_inlier(vec4 r, vec2 expected)
+{
+    float limit = max(float(MB_LAYER_INLIER_REL) * (abs(expected.x) + abs(expected.y)), float(MB_LAYER_INLIER_ABS));
+    vec2 away = abs(r.xy - expected);
+    return r.z > 0.0 && away.x + away.y < limit;
+}
+
+vec2 smoothed_vector(ivec2 cell, vec2 m)
+{
+    vec2 sum = vec2(0.0);
+    float total = 0.0;
+    for (int dy = -MB_LAYER_SMOOTH_RADIUS; dy <= MB_LAYER_SMOOTH_RADIUS; dy++) {
+        for (int dx = -MB_LAYER_SMOOTH_RADIUS; dx <= MB_LAYER_SMOOTH_RADIUS; dx++) {
+            int j = layer_cell_index(cell + ivec2(dx, dy), cells());
+            vec2 expected = push.has_previous != 0 ? previous[j].xy : m;
+            vec4 r = raw[j];
+            if (is_inlier(r, expected)) {
+                float w = r.z * smooth_weights[dy + MB_LAYER_SMOOTH_RADIUS] * smooth_weights[dx + MB_LAYER_SMOOTH_RADIUS];
+                sum += r.xy * w;
+                total += w;
+            }
+        }
+    }
+    return (sum + m) * (1.0 / (total + 1.0));
+}
+
+float prior_at(ivec2 cell)
+{
+    float sum = 0.0;
+    for (int dy = -MB_LAYER_PRIOR_RADIUS; dy <= MB_LAYER_PRIOR_RADIUS; dy++) {
+        for (int dx = -MB_LAYER_PRIOR_RADIUS; dx <= MB_LAYER_PRIOR_RADIUS; dx++) {
+            float moving = raw[layer_cell_index(cell + ivec2(dx, dy), cells())].z > 0.0 ? 1.0 : 0.0;
+            sum += moving * prior_weights[dy + MB_LAYER_PRIOR_RADIUS] * prior_weights[dx + MB_LAYER_PRIOR_RADIUS];
+        }
+    }
+    return clamp((sum - float(MB_LAYER_PRIOR_LO)) / float(MB_LAYER_PRIOR_SPAN), 0.0, 1.0);
+}
+
+void main()
+{
+    int id = int(gl_GlobalInvocationID.x);
+    vec4 m = model[0];
+    if (id >= push.cells_x * push.cells_y || !(m.z > 0.5 || m.w >= push.min_share * float(MB_LAYER_KEEP_SHARE))) {
+        return;
+    }
+    fill_smooth_weights();
+    fill_prior_weights();
+    ivec2 cell = ivec2(id % push.cells_x, id / push.cells_x);
+    field[id] = vec4(smoothed_vector(cell, model[0].xy), prior_at(cell), 0.0);
+}

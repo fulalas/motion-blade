@@ -1,0 +1,78 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { layer_blur_push push; };
+#include "layer.glsl"
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer Source { vec2 source[]; };
+layout(std430, binding = 1) writeonly buffer Target { vec2 target[]; };
+layout(std430, binding = 2) readonly buffer FirstModel { vec4 first_model[]; };
+layout(std430, binding = 3) readonly buffer SecondModel { vec4 second_model[]; };
+layout(std430, binding = 4) readonly buffer Trigger { vec4 trigger[]; };
+
+LAYER_GATE(first_model, second_model, trigger, push.gate)
+
+LAYER_KERNEL(decide_weights, float(MB_LAYER_DECIDE_SIGMA), MB_LAYER_DECIDE_RADIUS)
+LAYER_KERNEL(soften_weights, float(MB_LAYER_SOFTEN_SIGMA), MB_LAYER_SOFTEN_RADIUS)
+LAYER_KERNEL(near_weights, float(MB_LAYER_NEAR_SIGMA) / float(MB_LAYER_NEAR_STEP), MB_LAYER_NEAR_TAPS)
+
+float source_at(ivec2 p)
+{
+    p = clamp(p, ivec2(0), ivec2(push.width, push.height) - 1);
+    return source[p.y * push.width + p.x].x;
+}
+
+float nearness(ivec2 q)
+{
+    fill_near_weights();
+    float sum = 0.0;
+    for (int j = -MB_LAYER_NEAR_TAPS; j <= MB_LAYER_NEAR_TAPS; j++) {
+        for (int i = -MB_LAYER_NEAR_TAPS; i <= MB_LAYER_NEAR_TAPS; i++) {
+            sum += source_at(q + ivec2(i, j) * MB_LAYER_NEAR_STEP) * near_weights[j + MB_LAYER_NEAR_TAPS] *
+                   near_weights[i + MB_LAYER_NEAR_TAPS];
+        }
+    }
+    return clamp(float(MB_LAYER_NEAR_GAIN) * sum, 0.0, 1.0);
+}
+
+float decided(float value, float prior)
+{
+    if (prior <= float(MB_LAYER_PRIOR_FLOOR)) {
+        return 0.0;
+    }
+    float score = value + (prior - 0.5) * float(MB_LAYER_PRIOR_BIAS);
+    return clamp(score / float(MB_LAYER_DECIDE_SOFTNESS) + 0.5, 0.0, 1.0);
+}
+
+#define BLURRED(NAME, RADIUS)                                                                        \
+    float blurred_##NAME(ivec2 q)                                                                    \
+    {                                                                                                \
+        fill_##NAME##_weights();                                                                     \
+        float sum = 0.0;                                                                             \
+        for (int dy = -RADIUS; dy <= RADIUS; dy++) {                                                 \
+            for (int dx = -RADIUS; dx <= RADIUS; dx++) {                                             \
+                sum += source_at(q + ivec2(dx, dy)) * NAME##_weights[dy + RADIUS] * NAME##_weights[dx + RADIUS]; \
+            }                                                                                        \
+        }                                                                                            \
+        return sum;                                                                                  \
+    }
+
+BLURRED(decide, MB_LAYER_DECIDE_RADIUS)
+BLURRED(soften, MB_LAYER_SOFTEN_RADIUS)
+
+void main()
+{
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (q.x >= push.width || q.y >= push.height) {
+        return;
+    }
+    int i = q.y * push.width + q.x;
+    if (!layer_gate_open()) {
+        if (push.decide == 0 && !layer_moving()) {
+            target[i] = vec2(0.0);
+        }
+        return;
+    }
+    target[i] = push.decide != 0 ? vec2(decided(blurred_decide(q), source[i].y), 0.0) : vec2(blurred_soften(q), nearness(q));
+}

@@ -99,6 +99,9 @@ static const param_entry PARAM_TABLE[] = {
     FLOAT_PARAM("panel_switch", panel.switch_level, 16, ANY),
     FLOAT_PARAM("panel_source_distance", panel.source_distance, 8, ANY),
     INT_PARAM("panel_radius", panel.radius, 8, 0, 16),
+    INT_PARAM("fast_layer", layer.enabled, 1, 0, 1),
+    FLOAT_PARAM("fast_layer_pull", layer.pull, 0.04f, ANY),
+    FLOAT_PARAM("fast_layer_min_share", layer.min_share, 0.14f, 0, 1),
     INT_PARAM("crop_bars", framing.crop_bars, 1, 0, 1),
     INT_PARAM("bar_settle_frames", framing.settle_frames, 48, 0, 100000),
 };

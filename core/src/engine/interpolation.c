@@ -1,6 +1,7 @@
 #include "engine/interpolation.h"
 
 #include "engine/geometry.h"
+#include "engine/layers.h"
 #include "engine/motion.h"
 
 typedef struct pair_fields {
@@ -18,12 +19,6 @@ typedef struct pass_context {
     float t;
     mb_buffer *selection;
 } pass_context;
-
-static const pair_motion *ready_pair(const mb_engine *engine, int back)
-{
-    const pair_motion *m = back >= 0 && back < PAIR_RING ? pair_at(engine, back) : NULL;
-    return m && m->ready ? m : NULL;
-}
 
 pair_choice choose_pair(const mb_engine *engine, int end)
 {
@@ -314,5 +309,6 @@ void record_interpolation(mb_engine *engine, const pair_choice *pair, double t)
     find_panels(&ctx);
     split_blocks(&ctx);
     blend(&ctx);
+    composite_layers(engine, pair, warp_of(&ctx));
     bridge_cut(&ctx);
 }

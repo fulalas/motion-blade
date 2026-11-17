@@ -1,0 +1,55 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { layer_guard_push push; };
+#include "layer.glsl"
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D a_luma;
+layout(binding = 1) uniform sampler2D b_luma;
+layout(binding = 2) uniform sampler2D out_luma;
+layout(std430, binding = 3) readonly buffer Stats { uint stats[]; };
+layout(std430, binding = 4) readonly buffer ForwardModel { vec4 forward_model[]; };
+layout(std430, binding = 5) readonly buffer BackwardModel { vec4 backward_model[]; };
+layout(std430, binding = 6) writeonly buffer Guard { vec2 guard[]; };
+layout(std430, binding = 7) readonly buffer MaskA { vec2 mask_a[]; };
+layout(std430, binding = 8) readonly buffer MaskB { vec2 mask_b[]; };
+
+float guard_at(ivec2 q)
+{
+    ivec2 last = ivec2(push.frame_width, push.frame_height) - 1;
+    float sum = 0.0;
+    for (int j = 0; j < MB_LAYER_GUARD_TAPS; j++) {
+        for (int i = 0; i < MB_LAYER_GUARD_TAPS; i++) {
+            ivec2 p = q * push.step + (2 * ivec2(i, j) + 1) * push.step / 4 - push.step / 2;
+            p = clamp(p, ivec2(0), last);
+            float still = mix(texelFetch(a_luma, p, 0).r, texelFetch(b_luma, p, 0).r, push.t);
+            sum += abs(texelFetch(out_luma, p, 0).r - still);
+        }
+    }
+    return sum / float(MB_LAYER_GUARD_TAPS * MB_LAYER_GUARD_TAPS) * 255.0 * push.luma_scale;
+}
+
+bool near_layer(ivec2 q)
+{
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 p = clamp(q + ivec2(dx, dy), ivec2(0), ivec2(push.width, push.height) - 1);
+            int i = p.y * push.width + p.x;
+            if (mask_a[i].y > 0.0 || mask_b[i].y > 0.0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void main()
+{
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (q.x >= push.width || q.y >= push.height) {
+        return;
+    }
+    bool enabled = (forward_model[0].z > 0.5 || backward_model[0].z > 0.5) && stats[MB_STAT_CUT] == 0u;
+    guard[q.y * push.width + q.x] = vec2(enabled && near_layer(q) ? guard_at(q) : 0.0, 0.0);
+}

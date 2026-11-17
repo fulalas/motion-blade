@@ -25,6 +25,14 @@ PUSH_FITS(struct split_push);
 PUSH_FITS(struct interpolate_push);
 PUSH_FITS(struct extrapolate_push);
 PUSH_FITS(struct bar_flags_push);
+PUSH_FITS(struct layer_search_push);
+PUSH_FITS(struct layer_model_push);
+PUSH_FITS(struct layer_pair_push);
+PUSH_FITS(struct layer_smooth_push);
+PUSH_FITS(struct layer_evidence_push);
+PUSH_FITS(struct layer_blur_push);
+PUSH_FITS(struct layer_guard_push);
+PUSH_FITS(struct layer_composite_push);
 
 static uint32_t tiles(int size)
 {
@@ -331,5 +339,93 @@ void vk_extrapolate(void *self, const mb_extrapolate_pass *pass)
                    image(w->a_level),         image(w->b_level),          buffer(e->next.field),
                    buffer(e->next.stats),     image(e->past.neighbour_level), image(e->next.neighbour_level)};
     pass_id variant = warp_variant(PASS_EXTRAPOLATE_8, w->chroma.interleaved, w->range.sixteen_bit);
+    over_quads(self, (dispatch_desc){variant, BINDINGS(b), PUSH(push)}, w);
+}
+
+void vk_layer_search(void *self, const mb_layer_search_pass *pass)
+{
+    mb_layer_grid g = pass->grid;
+    struct layer_search_push push = {g.cells_x, g.cells_y, g.width, g.height, pass->model != NULL, pass->pull};
+    binding b[] = {image(pass->origin), image(pass->target), buffer(pass->model), buffer(pass->raw)};
+    int groups_x = (g.cells_x + MB_LAYER_SEARCH_ROW - 1) / MB_LAYER_SEARCH_ROW;
+    over_items(self, (dispatch_desc){PASS_LAYER_SEARCH, BINDINGS(b), PUSH(push)}, groups_x * g.cells_y);
+}
+
+void vk_layer_model(void *self, const mb_layer_model_pass *pass)
+{
+    struct layer_model_push push = {pass->cells, pass->min_share, pass->previous != NULL};
+    binding b[] = {buffer(pass->raw), buffer(pass->model), buffer(pass->previous)};
+    over_items(self, (dispatch_desc){PASS_LAYER_MODEL, BINDINGS(b), PUSH(push)}, 1);
+}
+
+void vk_layer_pair(void *self, const mb_layer_pair_pass *pass)
+{
+    struct layer_pair_push push = {pass->past[0] != NULL, pass->min_share};
+    binding b[] = {buffer(pass->models[0]), buffer(pass->models[1]), buffer(pass->past[0]), buffer(pass->past[1])};
+    over_items(self, (dispatch_desc){PASS_LAYER_PAIR, BINDINGS(b), PUSH(push)}, 1);
+}
+
+void vk_layer_smooth(void *self, const mb_layer_smooth_pass *pass)
+{
+    mb_layer_grid g = pass->grid;
+    struct layer_smooth_push push = {g.cells_x, g.cells_y, pass->previous != NULL, pass->min_share};
+    binding b[] = {buffer(pass->raw), buffer(pass->model), buffer(pass->previous), buffer(pass->field)};
+    over_items(self, (dispatch_desc){PASS_LAYER_SMOOTH, BINDINGS(b), PUSH(push)}, g.cells_x * g.cells_y);
+}
+
+static int gate_bits(mb_buffer *const models[2], const mb_buffer *trigger)
+{
+    return (models[0] != NULL) | (models[1] != NULL) << 1 | (trigger != NULL) << 2;
+}
+
+void vk_layer_evidence(void *self, const mb_layer_evidence_pass *pass)
+{
+    const mb_layer_side *s = pass->sides;
+    struct layer_evidence_push push = {pass->width, pass->height, pass->grid.cells_x, pass->grid.cells_y,
+                                       pass->detail_step,
+                                       gate_bits((mb_buffer *const[]){s[0].model, s[1].model}, pass->trigger)};
+    binding b[] = {image(pass->frame),  image(s[0].frame),   image(s[1].frame),  image(pass->detail),
+                   buffer(s[0].field),  buffer(s[0].model),  buffer(s[0].stats), buffer(s[1].field),
+                   buffer(s[1].model),  buffer(s[1].stats),  buffer(pass->evidence), buffer(pass->trigger)};
+    over_tiles(self, (dispatch_desc){PASS_LAYER_EVIDENCE, BINDINGS(b), PUSH(push)}, pass->width, pass->height);
+}
+
+void vk_layer_blur(void *self, const mb_layer_blur_pass *pass)
+{
+    const mb_layer_gate *gate = &pass->gate;
+    struct layer_blur_push push = {pass->width, pass->height, pass->decide, gate_bits(gate->models, gate->trigger)};
+    binding b[] = {buffer(pass->source), buffer(pass->target), buffer(gate->models[0]), buffer(gate->models[1]),
+                   buffer(gate->trigger)};
+    over_tiles(self, (dispatch_desc){PASS_LAYER_BLUR, BINDINGS(b), PUSH(push)}, pass->width, pass->height);
+}
+
+void vk_layer_guard(void *self, const mb_layer_guard_pass *pass)
+{
+    struct layer_guard_push push = {pass->width, pass->height, pass->frame_width, pass->frame_height, pass->step,
+                                    pass->t, pass->luma_scale};
+    binding b[] = {image(pass->a),           image(pass->b),           image(pass->output), buffer(pass->stats),
+                   buffer(pass->models[0]),  buffer(pass->models[1]),  buffer(pass->guard),
+                   buffer(pass->masks[0]),   buffer(pass->masks[1])};
+    over_tiles(self, (dispatch_desc){PASS_LAYER_GUARD, BINDINGS(b), PUSH(push)}, pass->width, pass->height);
+}
+
+void vk_layer_composite(void *self, const mb_layer_composite_pass *pass)
+{
+    const mb_warp *w = &pass->warp;
+    const mb_chroma_layout *c = &w->chroma;
+    const mb_pair_planes *f = &w->frames;
+    const mb_frame_planes *o = &w->output;
+    struct layer_composite_push push = {
+        w->width, w->height, c->width, c->height, c->shift_x, c->shift_y, pass->grid.cells_x, pass->grid.cells_y,
+        pass->mask_width, pass->mask_height, pass->top_scale, pass->mask_scale, w->t, w->range.max_value,
+        w->range.step,
+    };
+    binding b[] = {image(f->a.luma),         image(f->b.luma),           image(f->a.chroma[0]),
+                   image(f->b.chroma[0]),    image(second_chroma(&f->a)), image(second_chroma(&f->b)),
+                   image(o->luma),           image(o->chroma[0]),        image(second_chroma(o)),
+                   buffer(w->stats),         buffer(pass->fields[0]),    buffer(pass->fields[1]),
+                   buffer(pass->models[0]),  buffer(pass->models[1]),    buffer(pass->masks[0]),
+                   buffer(pass->masks[1]),   buffer(pass->guard)};
+    pass_id variant = warp_variant(PASS_LAYER_COMPOSITE_8, w->chroma.interleaved, w->range.sixteen_bit);
     over_quads(self, (dispatch_desc){variant, BINDINGS(b), PUSH(push)}, w);
 }

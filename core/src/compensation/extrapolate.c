@@ -236,12 +236,6 @@ static void extrapolate(const mb_extrapolate_pass *pass, bool from_b)
     }
 }
 
-static vec2 chroma_texel(const mb_frame_planes *planes, const mb_chroma_layout *chroma, ivec2 p)
-{
-    chroma_channels c = chroma_channels_of(planes, chroma);
-    return v2(ref_texel(c.first, p.x, p.y, 0), ref_texel(c.second, p.x, p.y, c.second_channel));
-}
-
 typedef struct quad_copy {
     const mb_warp *warp;
     const mb_frame_planes *source;

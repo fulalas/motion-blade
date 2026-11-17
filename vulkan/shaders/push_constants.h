@@ -266,6 +266,77 @@ struct extrapolate_push {
     int32_t extrapolate;
 };
 
+struct layer_search_push {
+    int32_t cells_x;
+    int32_t cells_y;
+    int32_t width;
+    int32_t height;
+    int32_t has_model;
+    float pull;
+};
+
+struct layer_model_push {
+    int32_t cells;
+    float min_share;
+    int32_t has_previous;
+};
+
+struct layer_pair_push {
+    int32_t has_past;
+    float min_share;
+};
+
+struct layer_smooth_push {
+    int32_t cells_x;
+    int32_t cells_y;
+    int32_t has_previous;
+    float min_share;
+};
+
+struct layer_evidence_push {
+    int32_t width;
+    int32_t height;
+    int32_t cells_x;
+    int32_t cells_y;
+    int32_t detail_step;
+    int32_t gate;
+};
+
+struct layer_blur_push {
+    int32_t width;
+    int32_t height;
+    int32_t decide;
+    int32_t gate;
+};
+
+struct layer_guard_push {
+    int32_t width;
+    int32_t height;
+    int32_t frame_width;
+    int32_t frame_height;
+    int32_t step;
+    float t;
+    float luma_scale;
+};
+
+struct layer_composite_push {
+    int32_t width;
+    int32_t height;
+    int32_t chroma_width;
+    int32_t chroma_height;
+    int32_t shift_x;
+    int32_t shift_y;
+    int32_t cells_x;
+    int32_t cells_y;
+    int32_t mask_width;
+    int32_t mask_height;
+    int32_t top_scale;
+    int32_t mask_scale;
+    float t;
+    float max_value;
+    float quant_step;
+};
+
 struct bar_flags_push {
     int32_t width;
     int32_t height;

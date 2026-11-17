@@ -1,6 +1,7 @@
 #include "engine/motion.h"
 
 #include "engine/geometry.h"
+#include "engine/layers.h"
 
 typedef struct direction_frames {
     int origin;
@@ -23,6 +24,12 @@ pair_motion *pair_at(const mb_engine *engine, int back)
 {
     const motion_fields *f = &engine->fields;
     return (pair_motion *)&f->pairs[(f->newest_pair - back + PAIR_RING) % PAIR_RING];
+}
+
+pair_motion *ready_pair(const mb_engine *engine, int back)
+{
+    pair_motion *m = back >= 0 && back < PAIR_RING ? pair_at(engine, back) : NULL;
+    return m && m->ready ? m : NULL;
 }
 
 void motion_advance(mb_engine *engine)
@@ -289,6 +296,7 @@ mb_status run_motion(mb_engine *engine)
         local_search(engine, direction);
     }
     decide_cut(engine);
+    estimate_layers(engine);
     pair_at(engine, 0)->ready = true;
     return MB_SUCCESS;
 }

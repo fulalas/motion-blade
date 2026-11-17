@@ -21,3 +21,10 @@ need_clip() {
     esac
     exit 1
 }
+
+shader_stats() {
+    MOTIONBLADE_VERBOSE=1 RADV_DEBUG=shaderstats,nocache "$1" "$D/suite/crowd_run_1080p50.mkv" -n 3 -q 2>&1 |
+        awk '/compiling the .* pipeline/ {name = $4} /^VGPRs:/ {v = $2} /^Spilled VGPRs:/ {s = $3}
+             /^Subgroups per SIMD:/ {w = $4} /^Instructions:/ {i = $2}
+             /^Latency:/ {print name, v, s, w, i, $2; name = "unnamed"}'
+}

@@ -303,6 +303,137 @@ static void tee_extrapolate(void *self, const mb_extrapolate_pass *pass)
     }
 }
 
+static void tee_layer_search(void *self, const mb_layer_search_pass *pass)
+{
+    tee *t = self;
+    for (int side = 0; side < SIDES; side++) {
+        mb_layer_search_pass p = *pass;
+        p.origin = IMAGE(pass->origin);
+        p.target = IMAGE(pass->target);
+        p.model = BUFFER(pass->model);
+        p.raw = BUFFER(pass->raw);
+        OPS(t, side)->layer_search(SELF(t, side), &p);
+    }
+    check_buffer(t, "layer_search", pass->raw, COMPARE_FIELD);
+}
+
+static void tee_layer_model(void *self, const mb_layer_model_pass *pass)
+{
+    tee *t = self;
+    for (int side = 0; side < SIDES; side++) {
+        mb_layer_model_pass p = *pass;
+        p.raw = BUFFER(pass->raw);
+        p.model = BUFFER(pass->model);
+        p.previous = BUFFER(pass->previous);
+        OPS(t, side)->layer_model(SELF(t, side), &p);
+    }
+    check_buffer(t, "layer_model", pass->model, COMPARE_FLOATS);
+}
+
+static void tee_layer_pair(void *self, const mb_layer_pair_pass *pass)
+{
+    tee *t = self;
+    for (int side = 0; side < SIDES; side++) {
+        mb_layer_pair_pass p = {{BUFFER(pass->models[0]), BUFFER(pass->models[1])},
+                                {BUFFER(pass->past[0]), BUFFER(pass->past[1])}, pass->min_share};
+        OPS(t, side)->layer_pair(SELF(t, side), &p);
+    }
+    check_buffer(t, "layer_pair", pass->models[0], COMPARE_FLOATS);
+    check_buffer(t, "layer_pair", pass->models[1], COMPARE_FLOATS);
+    if (pass->past[0]) {
+        check_buffer(t, "layer_pair", pass->past[0], COMPARE_FLOATS);
+        check_buffer(t, "layer_pair", pass->past[1], COMPARE_FLOATS);
+    }
+}
+
+static void tee_layer_smooth(void *self, const mb_layer_smooth_pass *pass)
+{
+    tee *t = self;
+    for (int side = 0; side < SIDES; side++) {
+        mb_layer_smooth_pass p = *pass;
+        p.raw = BUFFER(pass->raw);
+        p.model = BUFFER(pass->model);
+        p.previous = BUFFER(pass->previous);
+        p.field = BUFFER(pass->field);
+        OPS(t, side)->layer_smooth(SELF(t, side), &p);
+    }
+    check_buffer(t, "layer_smooth", pass->field, COMPARE_FLOATS);
+}
+
+static mb_layer_side layer_side(mb_layer_side from, int side)
+{
+    return (mb_layer_side){IMAGE(from.frame), BUFFER(from.field), BUFFER(from.model), BUFFER(from.stats)};
+}
+
+static mb_layer_gate gate_side(mb_layer_gate from, int side)
+{
+    return (mb_layer_gate){{BUFFER(from.models[0]), BUFFER(from.models[1])}, BUFFER(from.trigger)};
+}
+
+static void tee_layer_evidence(void *self, const mb_layer_evidence_pass *pass)
+{
+    tee *t = self;
+    for (int side = 0; side < SIDES; side++) {
+        mb_layer_evidence_pass p = *pass;
+        p.frame = IMAGE(pass->frame);
+        p.detail = IMAGE(pass->detail);
+        p.trigger = BUFFER(pass->trigger);
+        p.sides[0] = layer_side(pass->sides[0], side);
+        p.sides[1] = layer_side(pass->sides[1], side);
+        p.evidence = BUFFER(pass->evidence);
+        OPS(t, side)->layer_evidence(SELF(t, side), &p);
+    }
+    check_buffer(t, "layer_evidence", pass->evidence, COMPARE_FLOATS);
+}
+
+static void tee_layer_blur(void *self, const mb_layer_blur_pass *pass)
+{
+    tee *t = self;
+    for (int side = 0; side < SIDES; side++) {
+        mb_layer_blur_pass p = *pass;
+        p.source = BUFFER(pass->source);
+        p.target = BUFFER(pass->target);
+        p.gate = gate_side(pass->gate, side);
+        OPS(t, side)->layer_blur(SELF(t, side), &p);
+    }
+    check_buffer(t, "layer_blur", pass->target, COMPARE_FLOATS);
+}
+
+static void tee_layer_guard(void *self, const mb_layer_guard_pass *pass)
+{
+    tee *t = self;
+    for (int side = 0; side < SIDES; side++) {
+        mb_layer_guard_pass p = *pass;
+        p.a = IMAGE(pass->a);
+        p.b = IMAGE(pass->b);
+        p.output = IMAGE(pass->output);
+        p.stats = BUFFER(pass->stats);
+        p.models[0] = BUFFER(pass->models[0]);
+        p.models[1] = BUFFER(pass->models[1]);
+        p.masks[0] = BUFFER(pass->masks[0]);
+        p.masks[1] = BUFFER(pass->masks[1]);
+        p.guard = BUFFER(pass->guard);
+        OPS(t, side)->layer_guard(SELF(t, side), &p);
+    }
+    check_buffer(t, "layer_guard", pass->guard, COMPARE_FLOATS);
+}
+
+static void tee_layer_composite(void *self, const mb_layer_composite_pass *pass)
+{
+    tee *t = self;
+    for (int side = 0; side < SIDES; side++) {
+        mb_layer_composite_pass p = *pass;
+        p.warp = warp_side(&pass->warp, side);
+        for (int k = 0; k < 2; k++) {
+            p.fields[k] = BUFFER(pass->fields[k]);
+            p.models[k] = BUFFER(pass->models[k]);
+            p.masks[k] = BUFFER(pass->masks[k]);
+        }
+        p.guard = BUFFER(pass->guard);
+        OPS(t, side)->layer_composite(SELF(t, side), &p);
+    }
+}
+
 static void tee_prepare(void *self, const mb_video_format *format)
 {
     tee *t = self;
@@ -358,4 +489,12 @@ const mb_backend_ops TEE_OPS = {
     .split = tee_split,
     .interpolate = tee_interpolate,
     .extrapolate = tee_extrapolate,
+    .layer_search = tee_layer_search,
+    .layer_model = tee_layer_model,
+    .layer_pair = tee_layer_pair,
+    .layer_smooth = tee_layer_smooth,
+    .layer_evidence = tee_layer_evidence,
+    .layer_blur = tee_layer_blur,
+    .layer_guard = tee_layer_guard,
+    .layer_composite = tee_layer_composite,
 };

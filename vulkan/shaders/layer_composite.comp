@@ -1,0 +1,231 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { layer_composite_push push; };
+#include "layer.glsl"
+#include "chroma.glsl"
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D a_luma;
+layout(binding = 1) uniform sampler2D b_luma;
+layout(binding = 2) uniform sampler2D a_chroma1;
+layout(binding = 3) uniform sampler2D b_chroma1;
+layout(binding = 4) uniform sampler2D a_chroma2;
+layout(binding = 5) uniform sampler2D b_chroma2;
+#ifdef DEPTH16
+layout(binding = 6, r16) uniform image2D out_luma;
+#ifdef NV
+layout(binding = 7, rg16) uniform image2D out_chroma1;
+#else
+layout(binding = 7, r16) uniform image2D out_chroma1;
+layout(binding = 8, r16) uniform image2D out_chroma2;
+#endif
+#else
+layout(binding = 6, r8) uniform image2D out_luma;
+#ifdef NV
+layout(binding = 7, rg8) uniform image2D out_chroma1;
+#else
+layout(binding = 7, r8) uniform image2D out_chroma1;
+layout(binding = 8, r8) uniform image2D out_chroma2;
+#endif
+#endif
+layout(std430, binding = 9) readonly buffer Stats { uint stats[]; };
+layout(std430, binding = 10) readonly buffer ForwardField { vec4 forward_field[]; };
+layout(std430, binding = 11) readonly buffer BackwardField { vec4 backward_field[]; };
+layout(std430, binding = 12) readonly buffer ForwardModel { vec4 forward_model[]; };
+layout(std430, binding = 13) readonly buffer BackwardModel { vec4 backward_model[]; };
+layout(std430, binding = 14) readonly buffer MaskA { vec2 mask_a[]; };
+layout(std430, binding = 15) readonly buffer MaskB { vec2 mask_b[]; };
+layout(std430, binding = 16) readonly buffer Guard { vec2 guard[]; };
+
+#ifdef NV
+#define INTERLEAVED true
+#else
+#define INTERLEAVED false
+#endif
+
+LAYER_FIELD_AT(forward_at, forward_field)
+LAYER_FIELD_AT(backward_at, backward_field)
+
+struct LayerQuad {
+    vec2 motion;
+    float alpha;
+    float weight_a;
+    float weight_b;
+    float both;
+    float only_a;
+    float only_b;
+    float hidden;
+    float distrust;
+};
+
+bool forward_active;
+bool backward_active;
+LayerQuad quad;
+
+vec4 direction_field(int direction, vec2 position)
+{
+    float scale = float(push.top_scale);
+    ivec2 cells = ivec2(push.cells_x, push.cells_y);
+    bool own = direction == 0 ? forward_active : backward_active;
+    bool use_forward = (direction == 0) == own;
+    vec4 f = use_forward ? forward_at(position * (1.0 / scale), cells) : backward_at(position * (1.0 / scale), cells);
+    float sign = own ? scale : -scale;
+    return vec4(f.xy * sign, f.z, 0.0);
+}
+
+float edge_weight(vec2 p)
+{
+    vec2 size = vec2(push.width, push.height);
+    float d = min(min(p.x - 0.5, size.x - 0.5 - p.x), min(p.y - 0.5, size.y - 0.5 - p.y));
+    if (d < 0.0) {
+        return 0.0;
+    }
+    float ramp = float(MB_LAYER_EDGE_RAMP) * float(push.top_scale);
+    return clamp(d / ramp + float(MB_LAYER_EDGE_FLOOR), 0.0, 1.0);
+}
+
+vec2 mask_value(int side, ivec2 p)
+{
+    p = clamp(p, ivec2(0), ivec2(push.mask_width, push.mask_height) - 1);
+    int i = p.y * push.mask_width + p.x;
+    return side == 0 ? mask_a[i] : side == 1 ? mask_b[i] : guard[i];
+}
+
+vec2 mask_at(int side, vec2 p)
+{
+    vec2 g = clamp(p / float(push.mask_scale) - 0.5, vec2(0.0), vec2(push.mask_width - 1, push.mask_height - 1));
+    ivec2 p0 = ivec2(floor(g));
+    vec2 f = g - vec2(p0);
+    vec2 top = mix(mask_value(side, p0), mask_value(side, p0 + ivec2(1, 0)), f.x);
+    vec2 bottom = mix(mask_value(side, p0 + ivec2(0, 1)), mask_value(side, p0 + ivec2(1, 1)), f.x);
+    return mix(top, bottom, f.y);
+}
+
+void measure_quad(vec2 c)
+{
+    float t = push.t;
+    vec4 a0 = direction_field(0, c);
+    vec4 b0 = direction_field(1, c);
+    vec4 a1 = direction_field(0, c - a0.xy * t);
+    vec4 b1 = direction_field(1, c - b0.xy * (1.0 - t));
+    quad.motion = a1.xy * (1.0 - t) - b1.xy * t;
+    vec2 from_a = c - quad.motion * t;
+    vec2 from_b = c + quad.motion * (1.0 - t);
+    float va = edge_weight(from_a);
+    float vb = edge_weight(from_b);
+    float ma = mask_at(0, from_a).x;
+    float mb = mask_at(1, from_b).x;
+    float sa = clamp(4.0 * va, 0.0, 1.0);
+    float sb = clamp(4.0 * vb, 0.0, 1.0);
+    quad.alpha = min(ma, mb) * sa * sb + ma * sa * (1.0 - sb) + mb * sb * (1.0 - sa);
+    quad.weight_a = (1.0 - t) * va;
+    quad.weight_b = t * vb;
+    vec2 here_a = mask_at(0, c);
+    vec2 here_b = mask_at(1, c);
+    quad.both = (1.0 - here_a.x) * (1.0 - here_b.x);
+    quad.only_a = (1.0 - here_a.x) * here_b.x;
+    quad.only_b = here_a.x * (1.0 - here_b.x);
+    quad.hidden = here_a.x * here_b.x;
+    float near = max(here_a.y, here_b.y);
+    float excess = (mask_at(2, c).x - float(MB_LAYER_GUARD_LO)) / float(MB_LAYER_GUARD_SPAN);
+    quad.distrust = clamp(excess, 0.0, 1.0) * near;
+}
+
+bool untouched()
+{
+    float skip = float(MB_LAYER_SKIP);
+    return quad.alpha < skip && quad.both > 1.0 - skip && quad.distrust < skip;
+}
+
+float composed(float moved_a, float moved_b, float a, float b, float current)
+{
+    float front = (moved_a * quad.weight_a + moved_b * quad.weight_b) / max(quad.weight_a + quad.weight_b, 1e-6);
+    float still = mix(a, b, push.t);
+    float back = mix(current, still, quad.distrust) * quad.both + a * quad.only_a + b * quad.only_b + still * quad.hidden;
+    return front * quad.alpha + back * (1.0 - quad.alpha);
+}
+
+float output_value(float v)
+{
+#ifdef DEPTH16
+    v = min(v, push.max_value);
+    if (push.quant_step > 0.0) {
+        v = round(v / push.quant_step) * push.quant_step;
+    }
+#endif
+    return v;
+}
+
+void compose_luma(ivec2 p)
+{
+    if (p.x >= push.width || p.y >= push.height) {
+        return;
+    }
+    vec2 size = vec2(push.width, push.height);
+    vec2 c = vec2(p) + 0.5;
+    float moved_a = textureLod(a_luma, (c - quad.motion * push.t) / size, 0.0).r;
+    float moved_b = textureLod(b_luma, (c + quad.motion * (1.0 - push.t)) / size, 0.0).r;
+    float value = composed(moved_a, moved_b, texelFetch(a_luma, p, 0).r, texelFetch(b_luma, p, 0).r,
+                           imageLoad(out_luma, p).r);
+    imageStore(out_luma, p, vec4(output_value(value)));
+}
+
+vec2 chroma_fetch(sampler2D first, sampler2D second, ivec2 p)
+{
+#ifdef NV
+    return texelFetch(first, p, 0).rg;
+#else
+    return vec2(texelFetch(first, p, 0).r, texelFetch(second, p, 0).r);
+#endif
+}
+
+
+void compose_chroma(ivec2 p)
+{
+    if (p.x >= push.chroma_width || p.y >= push.chroma_height) {
+        return;
+    }
+    vec2 size = vec2(push.chroma_width, push.chroma_height);
+    vec2 c = vec2(p) + 0.5;
+    vec2 motion = quad.motion / vec2(1 << push.shift_x, 1 << push.shift_y);
+    vec2 moved_a = chroma_sample(a_chroma1, a_chroma2, (c - motion * push.t) / size, INTERLEAVED);
+    vec2 moved_b = chroma_sample(b_chroma1, b_chroma2, (c + motion * (1.0 - push.t)) / size, INTERLEAVED);
+    vec2 a = chroma_fetch(a_chroma1, a_chroma2, p);
+    vec2 b = chroma_fetch(b_chroma1, b_chroma2, p);
+#ifdef NV
+    vec2 current = imageLoad(out_chroma1, p).rg;
+#else
+    vec2 current = vec2(imageLoad(out_chroma1, p).r, imageLoad(out_chroma2, p).r);
+#endif
+    vec2 value = vec2(output_value(composed(moved_a.x, moved_b.x, a.x, b.x, current.x)),
+                      output_value(composed(moved_a.y, moved_b.y, a.y, b.y, current.y)));
+#ifdef NV
+    imageStore(out_chroma1, p, vec4(value, 0.0, 0.0));
+#else
+    imageStore(out_chroma1, p, vec4(value.x));
+    imageStore(out_chroma2, p, vec4(value.y));
+#endif
+}
+
+void main()
+{
+    ivec2 q0 = ivec2(gl_GlobalInvocationID.xy) * 2;
+    forward_active = forward_model[0].z > 0.5;
+    backward_active = backward_model[0].z > 0.5;
+    if (q0.x >= push.width || q0.y >= push.height || !(forward_active || backward_active) || stats[MB_STAT_CUT] != 0u) {
+        return;
+    }
+    measure_quad(vec2(q0) + 1.0);
+    if (untouched()) {
+        return;
+    }
+    for (int j = 0; j < 4; j++) {
+        compose_luma(q0 + ivec2(j & 1, j >> 1));
+    }
+    for (int cy = 0; cy < (2 >> push.shift_y); cy++) {
+        for (int cx = 0; cx < (2 >> push.shift_x); cx++) {
+            compose_chroma((q0 >> ivec2(push.shift_x, push.shift_y)) + ivec2(cx, cy));
+        }
+    }
+}

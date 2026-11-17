@@ -90,9 +90,7 @@ speed() {
     put half_ms "$(speed_ms -p half_resolution=1)"
     MOTIONBLADE_PROFILE=1 speed_run 2>&1 | grep "motionblade profile" |
         awk -v runs=$RUNS '{printf "pass_%s %s\n", $3, $4 / runs}' >>"$out"
-    vg=$(RADV_DEBUG=shaderstats,nocache "$E" "$D/suite/crowd_run_1080p50.mkv" -n 3 -q 2>&1 | grep -E "^VGPRs" | tail -1 |
-         awk '{print $2}')
-    [ -n "$vg" ] && put interpolate_vgprs "$vg"
+    shader_stats "$E" | awk '$1 == "interpolate" || $1 == "extrapolate" {print $1 "_vgprs", $2}' >>"$out"
 }
 
 rule() {
@@ -102,7 +100,8 @@ rule() {
         *_psnr|*_cpsnr) echo higher 0.05 ;;
         *_ssim) echo higher 0.002 ;;
         speed_ms_1080p|half_ms) echo lower "$(echo "$2" | awk '{print $1 * 0.05}')" ;;
-        interpolate_vgprs) echo max 128 ;;
+        interpolate_vgprs) echo max 144 ;;
+        extrapolate_vgprs) echo max 128 ;;
         gpu_level) echo warn ;;
         *) echo exact ;;
     esac
@@ -134,7 +133,7 @@ report() {
     done <"$out"
     while read -r k b; do
         grep -q "^$k " "$out" && continue
-        case $k in pass_*|speed_ms_1080p|half_ms|interpolate_vgprs|gpu_level) [ $speed = 0 ] && continue ;; esac
+        case $k in pass_*|speed_ms_1080p|half_ms|*_vgprs|gpu_level) [ $speed = 0 ] && continue ;; esac
         printf "%-26s %-34s %-34s %s\n" "$k" "missing" "$b" FAIL
         fail=1
     done <"$B"

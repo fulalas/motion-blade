@@ -99,6 +99,12 @@ typedef struct mb_panel_params {
     int radius;
 } mb_panel_params;
 
+typedef struct mb_layer_params {
+    int enabled;
+    float pull;
+    float min_share;
+} mb_layer_params;
+
 typedef struct mb_framing_params {
     int crop_bars;
     int settle_frames;
@@ -111,6 +117,7 @@ typedef struct mb_params {
     mb_select_params select;
     mb_blend_params blend;
     mb_panel_params panel;
+    mb_layer_params layer;
     mb_framing_params framing;
 } mb_params;
 

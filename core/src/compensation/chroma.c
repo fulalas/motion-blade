@@ -17,6 +17,12 @@ vec2 chroma_from_luma(const mb_chroma_layout *chroma, vec2 luma)
     return v2(luma.x / (float)(1 << chroma->shift_x), luma.y / (float)(1 << chroma->shift_y));
 }
 
+vec2 chroma_texel(const mb_frame_planes *planes, const mb_chroma_layout *chroma, ivec2 p)
+{
+    chroma_channels c = chroma_channels_of(planes, chroma);
+    return v2(ref_texel(c.first, p.x, p.y, 0), ref_texel(c.second, p.x, p.y, c.second_channel));
+}
+
 vec2 chroma_sample(const mb_frame_planes *planes, const mb_chroma_layout *chroma, vec2 position)
 {
     vec2 inv = v2_inverse_size(chroma->width, chroma->height);

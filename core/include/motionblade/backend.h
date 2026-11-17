@@ -117,6 +117,14 @@ typedef struct mb_backend_ops {
     void (*split)(void *self, const mb_split_pass *pass);
     void (*interpolate)(void *self, const mb_interpolate_pass *pass);
     void (*extrapolate)(void *self, const mb_extrapolate_pass *pass);
+    void (*layer_search)(void *self, const mb_layer_search_pass *pass);
+    void (*layer_model)(void *self, const mb_layer_model_pass *pass);
+    void (*layer_pair)(void *self, const mb_layer_pair_pass *pass);
+    void (*layer_smooth)(void *self, const mb_layer_smooth_pass *pass);
+    void (*layer_evidence)(void *self, const mb_layer_evidence_pass *pass);
+    void (*layer_blur)(void *self, const mb_layer_blur_pass *pass);
+    void (*layer_guard)(void *self, const mb_layer_guard_pass *pass);
+    void (*layer_composite)(void *self, const mb_layer_composite_pass *pass);
 } mb_backend_ops;
 
 typedef struct mb_backend {

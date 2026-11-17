@@ -40,6 +40,13 @@ static const expectation EXPECTED[] = {
     {"interpolate_luma", 0.99, 2.0},
     {"interpolate_chroma", 0.99, 2.0},
     {"output_cut", 1.0, 0.0},
+    {"layer_search", 0.99, 0.1},
+    {"layer_model", 0.99, 0.05},
+    {"layer_pair", 0.99, 0.05},
+    {"layer_smooth", 0.99, 0.05},
+    {"layer_evidence", 0.99, 20.0},
+    {"layer_blur", 0.99, 0.01},
+    {"layer_guard", 0.9, 1.0},
 };
 
 typedef struct run_config {

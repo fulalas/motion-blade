@@ -1,0 +1,45 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { layer_pair_push push; };
+#include "motionblade/layout.h"
+layout(local_size_x = 1) in;
+
+layout(std430, binding = 0) buffer ForwardModel { vec4 forward_model[]; };
+layout(std430, binding = 1) buffer BackwardModel { vec4 backward_model[]; };
+layout(std430, binding = 2) buffer PastForward { vec4 past_forward[]; };
+layout(std430, binding = 3) buffer PastBackward { vec4 past_backward[]; };
+
+float l1(vec2 v)
+{
+    return abs(v.x) + abs(v.y);
+}
+
+bool directions_agree(vec4 f, vec4 b)
+{
+    return l1(f.xy + b.xy) <= float(MB_LAYER_PAIR_REL) * max(l1(f.xy), l1(b.xy)) + float(MB_LAYER_PAIR_ABS);
+}
+
+bool continues_into(vec4 past, vec4 current)
+{
+    return current.z > 0.5 && past.w >= push.min_share * float(MB_LAYER_KEEP_SHARE) &&
+           l1(past.xy) >= float(MB_LAYER_KEEP_MIN_LENGTH) &&
+           l1(past.xy - current.xy) <= float(MB_LAYER_ADOPT_REL) * l1(current.xy) + float(MB_LAYER_ADOPT_ABS);
+}
+
+void main()
+{
+    if (!directions_agree(forward_model[0], backward_model[0])) {
+        forward_model[0].z = 0.0;
+        backward_model[0].z = 0.0;
+    }
+    if (push.has_past == 0 || !directions_agree(past_forward[0], past_backward[0])) {
+        return;
+    }
+    if (past_forward[0].z <= 0.5 && continues_into(past_forward[0], forward_model[0])) {
+        past_forward[0].z = 2.0;
+    }
+    if (past_backward[0].z <= 0.5 && continues_into(past_backward[0], backward_model[0])) {
+        past_backward[0].z = 2.0;
+    }
+}

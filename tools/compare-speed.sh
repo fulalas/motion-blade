@@ -40,13 +40,6 @@ for r in $(seq "$ROUNDS"); do
     done
 done
 
-shader_stats() {
-    RADV_DEBUG=shaderstats,nocache "$1" "$D/suite/crowd_run_1080p50.mkv" -n 3 -q 2>&1 |
-        awk '/^VGPRs:/ {v = $2} /^Spilled VGPRs:/ {s = $3} /^Subgroups per SIMD:/ {w = $4}
-             /^Instructions:/ {i = $2} /^Latency:/ {line[++n] = v " VGPRs, " s " spilled, " w " waves, " i " instr, latency " $2}
-             END {for (k = n - 1; k <= n; k++) print "  pipeline " k ": " line[k]}'
-}
-
 echo "ms per interpolated frame over $ROUNDS rounds: old and new median, old and new best"
 awk '{k = $2 " " $3; v[$1, k, ++n[$1, k]] = $4; keys[k] = 1}
      function sorted(side, k, a,    m, i) {
@@ -72,8 +65,19 @@ awk '{k = $2 " " $3; v[$1, k, ++n[$1, k]] = $4; keys[k] = 1}
              printf "%-28s %8.4f %8.4f %+7.1f%%   best %8.4f %8.4f\n", k, o, w, change, best("old", k), best("new", k)
          }
      }' "$work/runs" | sort
-echo "last two pipelines created (interpolate, and extrapolate when it exists)"
+shader_report() {
+    shader_stats "$1" | awk '{line[++n] = $0; if ($1 == "interpolate" || $1 == "extrapolate") named[++m] = $0}
+        END {
+            if (m == 0) for (k = n - 1; k <= n; k++) named[++m] = "last-" (n - k + 1) substr(line[k], index(line[k], " "))
+            for (k = 1; k <= m; k++) {
+                split(named[k], f, " ")
+                print "  " f[1] ": " f[2] " VGPRs, " f[3] " spilled, " f[4] " waves, " f[5] " instr, latency " f[6]
+            }
+        }'
+}
+
+echo "shader stats (interpolate and extrapolate; older builds without pipeline names: last two created)"
 echo "old:"
-shader_stats "$OLD"
+shader_report "$OLD"
 echo "new:"
-shader_stats "$NEW"
+shader_report "$NEW"

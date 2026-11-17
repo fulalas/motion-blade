@@ -86,6 +86,39 @@ static const uint32_t SPV_EXTRAPOLATE_8_NV[] =
 static const uint32_t SPV_EXTRAPOLATE_16_NV[] =
 #include "extrapolate16nv.spv.h"
     ;
+static const uint32_t SPV_LAYER_SEARCH[] =
+#include "layer_search.spv.h"
+    ;
+static const uint32_t SPV_LAYER_MODEL[] =
+#include "layer_model.spv.h"
+    ;
+static const uint32_t SPV_LAYER_PAIR[] =
+#include "layer_pair.spv.h"
+    ;
+static const uint32_t SPV_LAYER_SMOOTH[] =
+#include "layer_smooth.spv.h"
+    ;
+static const uint32_t SPV_LAYER_EVIDENCE[] =
+#include "layer_evidence.spv.h"
+    ;
+static const uint32_t SPV_LAYER_BLUR[] =
+#include "layer_blur.spv.h"
+    ;
+static const uint32_t SPV_LAYER_GUARD[] =
+#include "layer_guard.spv.h"
+    ;
+static const uint32_t SPV_LAYER_COMPOSITE_8[] =
+#include "layer_composite8.spv.h"
+    ;
+static const uint32_t SPV_LAYER_COMPOSITE_16[] =
+#include "layer_composite16.spv.h"
+    ;
+static const uint32_t SPV_LAYER_COMPOSITE_8_NV[] =
+#include "layer_composite8nv.spv.h"
+    ;
+static const uint32_t SPV_LAYER_COMPOSITE_16_NV[] =
+#include "layer_composite16nv.spv.h"
+    ;
 
 enum { MAX_BINDINGS = 32 };
 
@@ -101,6 +134,7 @@ typedef struct pass_info {
 #define SPIRV(code) code, sizeof(code)
 #define INTERPOLATE_BINDINGS "SSSSSSBBBIIISSBBBBB"
 #define EXTRAPOLATE_BINDINGS "SSSSSSBBBIIISSBBSS"
+#define COMPOSITE_BINDINGS "SSSSSSIIIBBBBBBBB"
 
 static const pass_info PASSES[PASS_COUNT] = {
     [PASS_NORMALIZE] = {SPIRV(SPV_NORMALIZE), "SI", false, 0, "normalize"},
@@ -122,6 +156,13 @@ static const pass_info PASSES[PASS_COUNT] = {
     [PASS_PANEL_SPREAD] = {SPIRV(SPV_PANEL_SPREAD), "BWBB", false, 64, "panel_spread"},
     [PASS_SPLIT] = {SPIRV(SPV_SPLIT), "SSBWB", true, 64, "split"},
     [PASS_BAR_FLAGS] = {SPIRV(SPV_BAR_FLAGS), "SSW", false, 0, "bar_flags"},
+    [PASS_LAYER_SEARCH] = {SPIRV(SPV_LAYER_SEARCH), "SSBW", false, 1, "layer_search"},
+    [PASS_LAYER_MODEL] = {SPIRV(SPV_LAYER_MODEL), "BWB", false, 1, "layer_model"},
+    [PASS_LAYER_PAIR] = {SPIRV(SPV_LAYER_PAIR), "WWWW", false, 1, "layer_pair"},
+    [PASS_LAYER_SMOOTH] = {SPIRV(SPV_LAYER_SMOOTH), "BBBW", false, 64, "layer_smooth"},
+    [PASS_LAYER_EVIDENCE] = {SPIRV(SPV_LAYER_EVIDENCE), "SSSSBBBBBBWB", false, 0, "layer_evidence"},
+    [PASS_LAYER_BLUR] = {SPIRV(SPV_LAYER_BLUR), "BWBBB", false, 0, "layer_blur"},
+    [PASS_LAYER_GUARD] = {SPIRV(SPV_LAYER_GUARD), "SSSBBBWBB", false, 0, "layer_guard"},
     [PASS_INTERPOLATE_8] = {SPIRV(SPV_INTERPOLATE_8), INTERPOLATE_BINDINGS, true, 0, "interpolate"},
     [PASS_INTERPOLATE_16] = {SPIRV(SPV_INTERPOLATE_16), INTERPOLATE_BINDINGS, true, 0, "interpolate"},
     [PASS_INTERPOLATE_8_NV] = {SPIRV(SPV_INTERPOLATE_8_NV), INTERPOLATE_BINDINGS, true, 0, "interpolate"},
@@ -130,6 +171,10 @@ static const pass_info PASSES[PASS_COUNT] = {
     [PASS_EXTRAPOLATE_16] = {SPIRV(SPV_EXTRAPOLATE_16), EXTRAPOLATE_BINDINGS, true, 0, "extrapolate"},
     [PASS_EXTRAPOLATE_8_NV] = {SPIRV(SPV_EXTRAPOLATE_8_NV), EXTRAPOLATE_BINDINGS, true, 0, "extrapolate"},
     [PASS_EXTRAPOLATE_16_NV] = {SPIRV(SPV_EXTRAPOLATE_16_NV), EXTRAPOLATE_BINDINGS, true, 0, "extrapolate"},
+    [PASS_LAYER_COMPOSITE_8] = {SPIRV(SPV_LAYER_COMPOSITE_8), COMPOSITE_BINDINGS, false, 0, "layer_composite"},
+    [PASS_LAYER_COMPOSITE_16] = {SPIRV(SPV_LAYER_COMPOSITE_16), COMPOSITE_BINDINGS, false, 0, "layer_composite"},
+    [PASS_LAYER_COMPOSITE_8_NV] = {SPIRV(SPV_LAYER_COMPOSITE_8_NV), COMPOSITE_BINDINGS, false, 0, "layer_composite"},
+    [PASS_LAYER_COMPOSITE_16_NV] = {SPIRV(SPV_LAYER_COMPOSITE_16_NV), COMPOSITE_BINDINGS, false, 0, "layer_composite"},
 };
 
 static VkDescriptorType descriptor_type(char kind)
@@ -170,6 +215,7 @@ static mb_status create_layouts(mbvk_backend *vk, pipeline *p, const pass_info *
 
 static mb_status create_pipeline(mbvk_backend *vk, pipeline *p, const pass_info *info)
 {
+    mb_log(&vk->logger, MB_LOG_VERBOSE, "compiling the %s pipeline", info->name);
     mb_status status = create_layouts(vk, p, info);
     VkShaderModule module;
     VkShaderModuleCreateInfo code = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, info->size, info->code};
@@ -340,6 +386,7 @@ void pipelines_prepare(mbvk_backend *vk, const mb_video_format *format)
     bool sixteen_bit = mb_bytes_per_sample(format) == 2;
     ready_pipeline(vk, warp_variant(PASS_INTERPOLATE_8, interleaved, sixteen_bit));
     ready_pipeline(vk, warp_variant(PASS_EXTRAPOLATE_8, interleaved, sixteen_bit));
+    ready_pipeline(vk, warp_variant(PASS_LAYER_COMPOSITE_8, interleaved, sixteen_bit));
 }
 
 uint32_t pipeline_groups(pass_id pass, int items)

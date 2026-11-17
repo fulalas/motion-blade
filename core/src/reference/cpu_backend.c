@@ -289,6 +289,14 @@ REFERENCE_PASS(panel_spread, mb_panel_spread_pass)
 REFERENCE_PASS(split, mb_split_pass)
 REFERENCE_PASS(interpolate, mb_interpolate_pass)
 REFERENCE_PASS(extrapolate, mb_extrapolate_pass)
+REFERENCE_PASS(layer_search, mb_layer_search_pass)
+REFERENCE_PASS(layer_model, mb_layer_model_pass)
+REFERENCE_PASS(layer_pair, mb_layer_pair_pass)
+REFERENCE_PASS(layer_smooth, mb_layer_smooth_pass)
+REFERENCE_PASS(layer_evidence, mb_layer_evidence_pass)
+REFERENCE_PASS(layer_blur, mb_layer_blur_pass)
+REFERENCE_PASS(layer_guard, mb_layer_guard_pass)
+REFERENCE_PASS(layer_composite, mb_layer_composite_pass)
 
 static const mb_backend_ops CPU_OPS = {
     .destroy = cpu_destroy,
@@ -337,6 +345,14 @@ static const mb_backend_ops CPU_OPS = {
     .split = cpu_split,
     .interpolate = cpu_interpolate,
     .extrapolate = cpu_extrapolate,
+    .layer_search = cpu_layer_search,
+    .layer_model = cpu_layer_model,
+    .layer_pair = cpu_layer_pair,
+    .layer_smooth = cpu_layer_smooth,
+    .layer_evidence = cpu_layer_evidence,
+    .layer_blur = cpu_layer_blur,
+    .layer_guard = cpu_layer_guard,
+    .layer_composite = cpu_layer_composite,
 };
 
 mb_status mb_cpu_backend_create(mb_backend *backend)

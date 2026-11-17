@@ -344,6 +344,108 @@ typedef struct mb_interpolate_pass {
     mb_blend_costs costs;
 } mb_interpolate_pass;
 
+typedef struct mb_layer_grid {
+    int cells_x;
+    int cells_y;
+    int width;
+    int height;
+} mb_layer_grid;
+
+typedef struct mb_layer_search_pass {
+    mb_image *origin;
+    mb_image *target;
+    mb_buffer *model;
+    mb_buffer *raw;
+    mb_layer_grid grid;
+    float pull;
+} mb_layer_search_pass;
+
+typedef struct mb_layer_model_pass {
+    mb_buffer *raw;
+    mb_buffer *model;
+    mb_buffer *previous;
+    int cells;
+    float min_share;
+} mb_layer_model_pass;
+
+typedef struct mb_layer_pair_pass {
+    mb_buffer *models[2];
+    mb_buffer *past[2];
+    float min_share;
+} mb_layer_pair_pass;
+
+typedef struct mb_layer_smooth_pass {
+    mb_buffer *raw;
+    mb_buffer *model;
+    mb_buffer *previous;
+    mb_buffer *field;
+    mb_layer_grid grid;
+    float min_share;
+} mb_layer_smooth_pass;
+
+typedef struct mb_layer_side {
+    mb_image *frame;
+    mb_buffer *field;
+    mb_buffer *model;
+    mb_buffer *stats;
+} mb_layer_side;
+
+typedef struct mb_layer_gate {
+    mb_buffer *models[2];
+    mb_buffer *trigger;
+} mb_layer_gate;
+
+typedef struct mb_layer_evidence_pass {
+    mb_buffer *trigger;
+    mb_image *frame;
+    mb_image *detail;
+    mb_layer_side sides[2];
+    mb_buffer *evidence;
+    mb_layer_grid grid;
+    int width;
+    int height;
+    int detail_step;
+} mb_layer_evidence_pass;
+
+typedef struct mb_layer_blur_pass {
+    mb_layer_gate gate;
+    mb_buffer *source;
+    mb_buffer *target;
+    int width;
+    int height;
+    bool decide;
+} mb_layer_blur_pass;
+
+typedef struct mb_layer_guard_pass {
+    mb_image *a;
+    mb_image *b;
+    mb_image *output;
+    mb_buffer *stats;
+    mb_buffer *models[2];
+    mb_buffer *masks[2];
+    mb_buffer *guard;
+    int width;
+    int height;
+    int frame_width;
+    int frame_height;
+    int step;
+    float t;
+    float luma_scale;
+} mb_layer_guard_pass;
+
+typedef struct mb_layer_composite_pass {
+    mb_warp warp;
+    mb_buffer *fields[2];
+    mb_buffer *models[2];
+    mb_buffer *masks[2];
+    mb_buffer *guard;
+    mb_layer_grid grid;
+    int mask_width;
+    int mask_height;
+    int top_scale;
+    int mask_scale;
+} mb_layer_composite_pass;
+
 typedef struct mb_extrapolate_pass {
     mb_warp warp;
     mb_extrapolation extrapolation;

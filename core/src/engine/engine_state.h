@@ -20,6 +20,7 @@ typedef struct geometry {
 typedef struct frame_slot {
     mb_frame_planes planes;
     mb_image *levels[MB_MAX_LEVELS];
+    mb_buffer *layer_mask;
     int border_version;
     uint64_t id;
 } frame_slot;
@@ -28,6 +29,8 @@ typedef struct pair_motion {
     mb_buffer *forward[MB_MAX_LEVELS];
     mb_buffer *backward[MB_MAX_LEVELS];
     mb_buffer *stats;
+    mb_buffer *layer_field[2];
+    mb_buffer *layer_model[2];
     bool ready;
 } pair_motion;
 
@@ -37,6 +40,10 @@ typedef struct motion_fields {
     mb_buffer *scratch[MB_MAX_LEVELS];
     mb_buffer *history;
     mb_buffer *cross_keys;
+    mb_buffer *layer_raw;
+    mb_buffer *layer_scratch;
+    mb_buffer *mask_evidence;
+    mb_buffer *mask_scratch;
 } motion_fields;
 
 typedef struct selection_buffers {
@@ -50,6 +57,7 @@ typedef struct selection_buffers {
     mb_buffer *global_motion;
     mb_buffer *panel_flags;
     mb_buffer *panel_spread;
+    mb_buffer *layer_guard;
 } selection_buffers;
 
 typedef struct pair_state {

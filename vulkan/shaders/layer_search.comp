@@ -1,0 +1,201 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { layer_search_push push; };
+#include "layer.glsl"
+#define LANES 32
+#define ROW MB_LAYER_SEARCH_ROW
+#define THREADS (LANES * ROW)
+layout(local_size_x = THREADS) in;
+
+layout(binding = 0) uniform sampler2D origin;
+layout(binding = 1) uniform sampler2D target;
+layout(std430, binding = 2) readonly buffer Model { vec4 model[]; };
+layout(std430, binding = 3) writeonly buffer Raw { vec4 raw[]; };
+
+#define TAPS (MB_LAYER_WINDOW_TAPS * MB_LAYER_WINDOW_TAPS)
+#define REACH (MB_LAYER_WINDOW_TAPS - 1)
+#define TILE_SPAN (2 * (MB_LAYER_RANGE_X + REACH + 1) + 1)
+#define TILE_X (TILE_SPAN + MB_LAYER_CELL * (ROW - 1))
+#define TILE_Y (2 * (MB_LAYER_RANGE_Y + REACH + 1) + 1)
+#define CANDIDATES (MB_LAYER_ROWS * MB_LAYER_COLUMNS)
+
+shared float tile[TILE_X * TILE_Y];
+shared float origin_taps[ROW][TAPS];
+shared float lane_cost[THREADS];
+shared int lane_index[THREADS];
+
+int column;
+int lane;
+vec2 center;
+vec2 size;
+vec2 pull_to;
+float pull;
+
+ivec2 tap_offset(int k)
+{
+    return ivec2(2 * (k % MB_LAYER_WINDOW_TAPS) - REACH, 2 * (k / MB_LAYER_WINDOW_TAPS) - REACH);
+}
+
+bool inside(vec2 p)
+{
+    return p.x >= 1.0 && p.x <= size.x - 1.0 && p.y >= 1.0 && p.y <= size.y - 1.0;
+}
+
+float corner(ivec2 offset)
+{
+    ivec2 t = offset + ivec2(TILE_SPAN / 2 + column * MB_LAYER_CELL, TILE_Y / 2);
+    return tile[t.y * TILE_X + t.x];
+}
+
+bool complete(ivec2 v)
+{
+    return inside(center + vec2(v - REACH)) && inside(center + vec2(v + REACH));
+}
+
+float full_sad(ivec2 v)
+{
+    float sum = 0.0;
+    for (int k = 0; k < TAPS; k++) {
+        sum += abs(origin_taps[column][k] - corner(tap_offset(k) + v));
+    }
+    return sum / float(TAPS) * 255.0;
+}
+
+float pulled(ivec2 v, float sad)
+{
+    vec2 away = abs(vec2(v) - pull_to);
+    return sad + pull * (away.x + away.y);
+}
+
+ivec2 candidate(int c)
+{
+    return ivec2((c % MB_LAYER_COLUMNS) * MB_LAYER_STEP - MB_LAYER_RANGE_X,
+                 (c / MB_LAYER_COLUMNS) * MB_LAYER_STEP - MB_LAYER_RANGE_Y);
+}
+
+void load(int thread, vec2 first_center)
+{
+    for (int i = thread; i < TILE_X * TILE_Y; i += THREADS) {
+        vec2 p = first_center + vec2(i % TILE_X - TILE_SPAN / 2, i / TILE_X - TILE_Y / 2);
+        tile[i] = textureLod(target, p / size, 0.0).r;
+    }
+    if (lane < TAPS) {
+        origin_taps[column][lane] = textureLod(origin, (center + vec2(tap_offset(lane))) / size, 0.0).r;
+    }
+    barrier();
+}
+
+void search_coarse(int thread)
+{
+    float lowest = 1e30;
+    int index = CANDIDATES;
+    for (int c = lane; c < CANDIDATES; c += LANES) {
+        ivec2 v = candidate(c);
+        if (complete(v)) {
+            float cost = pulled(v, full_sad(v));
+            if (cost < lowest) {
+                lowest = cost;
+                index = c;
+            }
+        }
+    }
+    lane_cost[thread] = lowest;
+    lane_index[thread] = index;
+    barrier();
+}
+
+bool beats(int a, int b)
+{
+    return lane_index[a] < CANDIDATES &&
+           (lane_index[b] >= CANDIDATES || lane_cost[a] < lane_cost[b] ||
+            (lane_cost[a] == lane_cost[b] && lane_index[a] < lane_index[b]));
+}
+
+void reduce_lanes(int thread)
+{
+    for (int stride = LANES / 2; stride > 0; stride >>= 1) {
+        if (lane < stride && beats(thread + stride, thread)) {
+            lane_cost[thread] = lane_cost[thread + stride];
+            lane_index[thread] = lane_index[thread + stride];
+        }
+        barrier();
+    }
+}
+
+vec2 measure_still()
+{
+    float sum = 0.0;
+    float count = 0.0;
+    float own = 0.0;
+    float other = 0.0;
+    for (int k = 0; k < TAPS; k++) {
+        if (inside(center + vec2(tap_offset(k)))) {
+            float there = corner(tap_offset(k));
+            sum += abs(origin_taps[column][k] - there);
+            count += 1.0;
+            own += origin_taps[column][k];
+            other += there;
+        }
+    }
+    return vec2(sum / max(count, 1e-6) * 255.0, other / max(own, 1e-4));
+}
+
+vec4 raw_vector(bool found, ivec2 v, float sad, vec2 still)
+{
+    float zero = still.x;
+    bool moving = found && sad < float(MB_LAYER_MAX_RATIO) * zero && zero - sad > float(MB_LAYER_MIN_GAIN) &&
+                  abs(v.x) + abs(v.y) >= MB_LAYER_MIN_LENGTH;
+    float weight = moving ? clamp(zero - sad, 0.0, float(MB_LAYER_MAX_GAIN)) : 0.0;
+    return vec4(vec2(v), weight, still.y);
+}
+
+void search_fine(int thread, int base, bool valid, int id)
+{
+    int found = lane_index[base];
+    barrier();
+    ivec2 v = found < CANDIDATES ? candidate(found) : ivec2(0);
+    lane_cost[thread] = 1e30;
+    lane_index[thread] = CANDIDATES;
+    if (found < CANDIDATES && lane < 9) {
+        ivec2 u = v + ivec2(lane % 3 - 1, lane / 3 - 1);
+        if (lane == 4 || complete(u)) {
+            lane_cost[thread] = pulled(u, full_sad(u));
+            lane_index[thread] = 0;
+        }
+    }
+    barrier();
+    if (lane == 0 && valid) {
+        bool any = false;
+        float lowest = 1e30;
+        ivec2 pick = ivec2(0);
+        for (int k = 0; k < 9; k++) {
+            int order = k == 0 ? 4 : (k <= 4 ? k - 1 : k);
+            if (lane_index[base + order] < CANDIDATES && (!any || lane_cost[base + order] < lowest)) {
+                lowest = lane_cost[base + order];
+                pick = v + ivec2(order % 3 - 1, order / 3 - 1);
+                any = true;
+            }
+        }
+        raw[id] = raw_vector(any, pick, any ? full_sad(pick) : 0.0, measure_still());
+    }
+}
+
+void main()
+{
+    int thread = int(gl_LocalInvocationID.x);
+    lane = thread % LANES;
+    column = thread / LANES;
+    int groups_x = (push.cells_x + ROW - 1) / ROW;
+    int cell_y = int(gl_WorkGroupID.x) / groups_x;
+    int first = (int(gl_WorkGroupID.x) % groups_x) * ROW;
+    size = vec2(push.width, push.height);
+    vec2 first_center = vec2(float(first * MB_LAYER_CELL + MB_LAYER_CELL / 2), float(cell_y * MB_LAYER_CELL + MB_LAYER_CELL / 2));
+    center = first_center + vec2(float(column * MB_LAYER_CELL), 0.0);
+    pull_to = push.has_model != 0 ? model[0].xy : vec2(0.0);
+    pull = push.has_model != 0 ? push.pull : 0.0;
+    load(thread, first_center);
+    search_coarse(thread);
+    reduce_lanes(thread);
+    search_fine(thread, column * LANES, first + column < push.cells_x, cell_y * push.cells_x + first + column);
+}

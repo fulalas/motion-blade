@@ -1,0 +1,134 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { layer_evidence_push push; };
+#include "layer.glsl"
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D frame;
+layout(binding = 1) uniform sampler2D before;
+layout(binding = 2) uniform sampler2D after;
+layout(binding = 3) uniform sampler2D detail;
+layout(std430, binding = 4) readonly buffer BeforeField { vec4 before_field[]; };
+layout(std430, binding = 5) readonly buffer BeforeModel { vec4 before_model[]; };
+layout(std430, binding = 6) readonly buffer BeforeStats { uint before_stats[]; };
+layout(std430, binding = 7) readonly buffer AfterField { vec4 after_field[]; };
+layout(std430, binding = 8) readonly buffer AfterModel { vec4 after_model[]; };
+layout(std430, binding = 9) readonly buffer AfterStats { uint after_stats[]; };
+layout(std430, binding = 10) writeonly buffer Evidence { vec2 evidence[]; };
+layout(std430, binding = 11) readonly buffer Trigger { vec4 trigger[]; };
+
+#define RADIUS MB_LAYER_EVIDENCE_RADIUS
+#define TAPS ((2 * RADIUS + 1) * (2 * RADIUS + 1))
+
+LAYER_GATE(before_model, after_model, trigger, push.gate)
+LAYER_FIELD_AT(before_at, before_field)
+LAYER_FIELD_AT(after_at, after_field)
+
+ivec2 size()
+{
+    return ivec2(push.width, push.height);
+}
+
+float own(ivec2 p)
+{
+    return texelFetch(frame, clamp(p, ivec2(0), size() - 1), 0).r;
+}
+
+float other(int side, ivec2 p)
+{
+    p = clamp(p, ivec2(0), size() - 1);
+    return side == 0 ? texelFetch(before, p, 0).r : texelFetch(after, p, 0).r;
+}
+
+float moved(int side, vec2 uv)
+{
+    return side == 0 ? textureLod(before, uv, 0.0).r : textureLod(after, uv, 0.0).r;
+}
+
+float still_error(int side, ivec2 q)
+{
+    float sum = 0.0;
+    for (int dy = -RADIUS; dy <= RADIUS; dy++) {
+        for (int dx = -RADIUS; dx <= RADIUS; dx++) {
+            sum += abs(own(q + ivec2(dx, dy)) - other(side, q + ivec2(dx, dy)));
+        }
+    }
+    return sum / float(TAPS) * 255.0;
+}
+
+vec2 moving_error(int side, ivec2 q, vec2 v)
+{
+    float sum = 0.0;
+    float count = 0.0;
+    vec2 last = vec2(size() - 1);
+    for (int dy = -RADIUS; dy <= RADIUS; dy++) {
+        for (int dx = -RADIUS; dx <= RADIUS; dx++) {
+            ivec2 r = clamp(q + ivec2(dx, dy), ivec2(0), size() - 1);
+            vec2 s = vec2(r) + v;
+            if (s.x >= 0.0 && s.x <= last.x && s.y >= 0.0 && s.y <= last.y) {
+                sum += abs(own(r) - moved(side, (s + 0.5) / vec2(size())));
+                count += 1.0;
+            }
+        }
+    }
+    return vec2(sum / max(count, 1.0) * 255.0, count > 0.5 * float(TAPS) ? 1.0 : 0.0);
+}
+
+float softness_at(ivec2 q)
+{
+    ivec2 last = textureSize(detail, 0) - 1;
+    int step = push.detail_step;
+    float sum = 0.0;
+    for (int j = 0; j < 3 * step; j++) {
+        for (int i = 0; i < 3 * step; i++) {
+            ivec2 p = clamp((q - 1) * step + ivec2(i, j), ivec2(0), last);
+            float here = texelFetch(detail, p, 0).r;
+            sum += abs(texelFetch(detail, min(p + ivec2(1, 0), last), 0).r - here) +
+                   abs(texelFetch(detail, min(p + ivec2(0, 1), last), 0).r - here);
+        }
+    }
+    float level = sum / float(9 * step * step) * 255.0;
+    return 1.0 - smoothstep(float(MB_LAYER_DETAIL_LO), float(MB_LAYER_DETAIL_HI), level);
+}
+
+bool side_present(int side)
+{
+    bool cut = side == 0 ? before_stats[MB_STAT_CUT] != 0u : after_stats[MB_STAT_CUT] != 0u;
+    return (push.gate & (1 << side)) != 0 && !cut;
+}
+
+bool side_moving(int side)
+{
+    float enabled = side == 0 ? before_model[0].z : after_model[0].z;
+    return (push.gate & (1 << side)) != 0 && enabled > 0.5;
+}
+
+void main()
+{
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (q.x >= push.width || q.y >= push.height || !layer_gate_open()) {
+        return;
+    }
+    float still = 1e30, moving = 0.0, prior = 2.0;
+    bool any = false;
+    for (int side = 0; side < 2; side++) {
+        if (!side_present(side)) {
+            continue;
+        }
+        still = min(still, still_error(side, q));
+        if (side_moving(side)) {
+            ivec2 cells = ivec2(push.cells_x, push.cells_y);
+            vec2 top = (vec2(q) + 0.5) * 0.5;
+            vec4 f = side == 0 ? before_at(top, cells) : after_at(top, cells);
+            vec2 e = moving_error(side, q, f.xy * 2.0);
+            if (e.y > 0.5) {
+                moving = max(moving, e.x);
+                prior = min(prior, f.z);
+                any = true;
+            }
+        }
+    }
+    float clip = float(MB_LAYER_EVIDENCE_CLIP);
+    evidence[q.y * push.width + q.x] = any ? vec2(clamp(still - moving, -clip, clip), prior * softness_at(q)) : vec2(0.0);
+}

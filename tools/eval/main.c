@@ -48,13 +48,18 @@ static bool converts(const evaluation *ev)
     return ev->options->format != test_format_default();
 }
 
+static mb_logger eval_logger(void)
+{
+    return mb_logger_stderr(getenv("MOTIONBLADE_VERBOSE") ? MB_LOG_VERBOSE : MB_LOG_WARNING);
+}
+
 static mb_status create_backend(const char *name, mb_backend *backend)
 {
     if (!strcmp(name, "cpu")) {
         return mb_cpu_backend_create(backend);
     }
     if (!strcmp(name, "vulkan")) {
-        mbvk_config config = {.logger = mb_logger_stderr(MB_LOG_WARNING), .profile = getenv("MOTIONBLADE_PROFILE")};
+        mbvk_config config = {.logger = eval_logger(), .profile = getenv("MOTIONBLADE_PROFILE")};
         return mbvk_backend_create(&config, backend, NULL);
     }
     return MB_ERROR_INVALID;
@@ -64,7 +69,7 @@ static mb_engine *create_engine(const eval_options *o, int width, int height)
 {
     mb_engine_config config = {
         .format = test_format_video(o->format, width, height),
-        .logger = mb_logger_stderr(getenv("MOTIONBLADE_VERBOSE") ? MB_LOG_VERBOSE : MB_LOG_WARNING),
+        .logger = eval_logger(),
         .params = mb_params_default(),
     };
     mb_status status = create_backend(o->backend, &config.backend);

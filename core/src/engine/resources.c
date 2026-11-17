@@ -3,9 +3,10 @@
 #include <string.h>
 
 #include "engine/geometry.h"
+#include "engine/layers.h"
 
 enum { FIELD_BYTES = 16, KEY_BYTES = 16, CELL_BYTES = 64, FLOAT_BYTES = 4, FLAG_BYTES = 8 };
-enum { STATS_BYTES = MB_STAT_COUNT * 4, HISTORY_BYTES = MB_HIST_COUNT * 4, GLOBAL_BYTES = 16 };
+enum { STATS_BYTES = MB_STAT_COUNT * 4, HISTORY_BYTES = MB_HIST_COUNT * 4, GLOBAL_BYTES = 16, MASK_BYTES = 8 };
 
 typedef struct allocator {
     const mb_backend *backend;
@@ -76,6 +77,7 @@ mb_status frames_create(mb_engine *engine)
             mb_grid grid = g->grids[level];
             slot->levels[level] = new_image(&a, grid.width, grid.height, MB_TEXELS_R16F);
         }
+        slot->layer_mask = new_buffer(&a, layer_mask_texels(g) * MASK_BYTES);
     }
     return a.status;
 }
@@ -87,6 +89,7 @@ void frames_destroy(const mb_backend *backend, frame_slot frames[FRAME_RING])
         for (int level = 0; level < MB_MAX_LEVELS; level++) {
             free_image(backend, &frames[k].levels[level]);
         }
+        free_buffer(backend, &frames[k].layer_mask);
     }
 }
 
@@ -102,6 +105,10 @@ static void create_pair(allocator *a, pair_motion *m, const geometry *g)
         m->backward[level] = new_buffer(a, field_bytes(g, level));
     }
     m->stats = new_buffer(a, STATS_BYTES);
+    for (int direction = 0; direction < 2; direction++) {
+        m->layer_field[direction] = new_buffer(a, layer_cells(g) * FIELD_BYTES);
+        m->layer_model[direction] = new_buffer(a, FIELD_BYTES);
+    }
     m->ready = false;
 }
 
@@ -116,6 +123,10 @@ static void create_fields(allocator *a, motion_fields *f, const geometry *g)
     size_t blocks = (size_t)geometry_base_blocks(g);
     f->history = new_buffer(a, HISTORY_BYTES);
     f->cross_keys = new_buffer(a, blocks * KEY_BYTES);
+    f->layer_raw = new_buffer(a, layer_cells(g) * FIELD_BYTES);
+    f->layer_scratch = new_buffer(a, layer_cells(g) * FIELD_BYTES);
+    f->mask_evidence = new_buffer(a, layer_mask_texels(g) * MASK_BYTES);
+    f->mask_scratch = new_buffer(a, layer_mask_texels(g) * MASK_BYTES);
 }
 
 static void create_selection(allocator *a, selection_buffers *s, const geometry *g)
@@ -132,6 +143,7 @@ static void create_selection(allocator *a, selection_buffers *s, const geometry 
     s->global_motion = new_buffer(a, GLOBAL_BYTES);
     s->panel_flags = new_buffer(a, blocks * FLAG_BYTES);
     s->panel_spread = new_buffer(a, blocks * FLOAT_BYTES);
+    s->layer_guard = new_buffer(a, layer_mask_texels(g) * MASK_BYTES);
 }
 
 mb_status buffers_create(mb_engine *engine)
@@ -150,6 +162,10 @@ static void destroy_pair(const mb_backend *backend, pair_motion *m)
         free_buffer(backend, &m->backward[level]);
     }
     free_buffer(backend, &m->stats);
+    for (int direction = 0; direction < 2; direction++) {
+        free_buffer(backend, &m->layer_field[direction]);
+        free_buffer(backend, &m->layer_model[direction]);
+    }
     m->ready = false;
 }
 
@@ -163,6 +179,10 @@ static void destroy_fields(const mb_backend *backend, motion_fields *f)
     }
     free_buffer(backend, &f->history);
     free_buffer(backend, &f->cross_keys);
+    free_buffer(backend, &f->layer_raw);
+    free_buffer(backend, &f->layer_scratch);
+    free_buffer(backend, &f->mask_evidence);
+    free_buffer(backend, &f->mask_scratch);
 }
 
 static void destroy_selection(const mb_backend *backend, selection_buffers *s)
@@ -170,6 +190,7 @@ static void destroy_selection(const mb_backend *backend, selection_buffers *s)
     mb_buffer **all[] = {
         &s->keys, &s->extra_keys, &s->selection[0], &s->selection[1], &s->cells, &s->fallback,
         &s->offsets, &s->offsets_median, &s->global_motion, &s->panel_flags, &s->panel_spread,
+        &s->layer_guard,
     };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
         free_buffer(backend, all[i]);
