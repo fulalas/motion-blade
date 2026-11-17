@@ -360,15 +360,17 @@ void vk_layer_model(void *self, const mb_layer_model_pass *pass)
 
 void vk_layer_pair(void *self, const mb_layer_pair_pass *pass)
 {
-    struct layer_pair_push push = {pass->past[0] != NULL, pass->min_share};
-    binding b[] = {buffer(pass->models[0]), buffer(pass->models[1]), buffer(pass->past[0]), buffer(pass->past[1])};
+    struct layer_pair_push push = {pass->past[0] != NULL, pass->cells, pass->min_share};
+    binding b[] = {buffer(pass->models[0]),      buffer(pass->models[1]),      buffer(pass->past[0]),
+                   buffer(pass->past[1]),        buffer(pass->fields[0]),      buffer(pass->fields[1]),
+                   buffer(pass->past_fields[0]), buffer(pass->past_fields[1])};
     over_items(self, (dispatch_desc){PASS_LAYER_PAIR, BINDINGS(b), PUSH(push)}, 1);
 }
 
 void vk_layer_smooth(void *self, const mb_layer_smooth_pass *pass)
 {
     mb_layer_grid g = pass->grid;
-    struct layer_smooth_push push = {g.cells_x, g.cells_y, pass->previous != NULL, pass->min_share};
+    struct layer_smooth_push push = {g.cells_x, g.cells_y, g.width, g.height, pass->previous != NULL, pass->min_share};
     binding b[] = {buffer(pass->raw), buffer(pass->model), buffer(pass->previous), buffer(pass->field)};
     over_items(self, (dispatch_desc){PASS_LAYER_SMOOTH, BINDINGS(b), PUSH(push)}, g.cells_x * g.cells_y);
 }

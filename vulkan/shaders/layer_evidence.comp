@@ -110,7 +110,7 @@ void main()
     if (q.x >= push.width || q.y >= push.height || !layer_gate_open()) {
         return;
     }
-    float still = 1e30, moving = 0.0, prior = 2.0;
+    float still = 1e30, moving = 0.0, prior = 2.0, known = 0.0;
     bool any = false;
     for (int side = 0; side < 2; side++) {
         if (!side_present(side)) {
@@ -124,11 +124,13 @@ void main()
             vec2 e = moving_error(side, q, f.xy * 2.0);
             if (e.y > 0.5) {
                 moving = max(moving, e.x);
-                prior = min(prior, f.z);
+                prior = min(prior, f.z + (1.0 - f.w));
+                known = max(known, f.w);
                 any = true;
             }
         }
     }
     float clip = float(MB_LAYER_EVIDENCE_CLIP);
-    evidence[q.y * push.width + q.x] = any ? vec2(clamp(still - moving, -clip, clip), prior * softness_at(q)) : vec2(0.0);
+    float trusted = min(prior, 1.0) * clamp(2.0 * known, 0.0, 1.0);
+    evidence[q.y * push.width + q.x] = any ? vec2(clamp(still - moving, -clip, clip), trusted * softness_at(q)) : vec2(0.0);
 }

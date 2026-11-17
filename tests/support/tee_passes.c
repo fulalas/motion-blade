@@ -334,15 +334,22 @@ static void tee_layer_pair(void *self, const mb_layer_pair_pass *pass)
 {
     tee *t = self;
     for (int side = 0; side < SIDES; side++) {
-        mb_layer_pair_pass p = {{BUFFER(pass->models[0]), BUFFER(pass->models[1])},
-                                {BUFFER(pass->past[0]), BUFFER(pass->past[1])}, pass->min_share};
+        mb_layer_pair_pass p = *pass;
+        for (int k = 0; k < 2; k++) {
+            p.models[k] = BUFFER(pass->models[k]);
+            p.past[k] = BUFFER(pass->past[k]);
+            p.fields[k] = BUFFER(pass->fields[k]);
+            p.past_fields[k] = BUFFER(pass->past_fields[k]);
+        }
         OPS(t, side)->layer_pair(SELF(t, side), &p);
     }
-    check_buffer(t, "layer_pair", pass->models[0], COMPARE_FLOATS);
-    check_buffer(t, "layer_pair", pass->models[1], COMPARE_FLOATS);
-    if (pass->past[0]) {
-        check_buffer(t, "layer_pair", pass->past[0], COMPARE_FLOATS);
-        check_buffer(t, "layer_pair", pass->past[1], COMPARE_FLOATS);
+    for (int k = 0; k < 2; k++) {
+        check_buffer(t, "layer_pair", pass->models[k], COMPARE_FLOATS);
+        check_buffer(t, "layer_pair", pass->fields[k], COMPARE_FLOATS);
+        if (pass->past[k]) {
+            check_buffer(t, "layer_pair", pass->past[k], COMPARE_FLOATS);
+            check_buffer(t, "layer_pair", pass->past_fields[k], COMPARE_FLOATS);
+        }
     }
 }
 

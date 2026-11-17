@@ -60,8 +60,8 @@ static layer_quad quad_at(const mb_layer_composite_pass *pass, vec2 c)
     float vb = edge_weight(pass, from_b);
     float ma = mask_at(pass, pass->masks[0], from_a).x;
     float mb = mask_at(pass, pass->masks[1], from_b).x;
-    float sa = clampf(4.0f * va, 0.0f, 1.0f);
-    float sb = clampf(4.0f * vb, 0.0f, 1.0f);
+    float sa = clampf(2.0f * va, 0.0f, 1.0f);
+    float sb = clampf(2.0f * vb, 0.0f, 1.0f);
     q.alpha = fminf(ma, mb) * sa * sb + ma * sa * (1.0f - sb) + mb * sb * (1.0f - sa);
     q.weight_a = (1.0f - t) * va;
     q.weight_b = t * vb;

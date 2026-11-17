@@ -116,8 +116,8 @@ void measure_quad(vec2 c)
     float vb = edge_weight(from_b);
     float ma = mask_at(0, from_a).x;
     float mb = mask_at(1, from_b).x;
-    float sa = clamp(4.0 * va, 0.0, 1.0);
-    float sb = clamp(4.0 * vb, 0.0, 1.0);
+    float sa = clamp(2.0 * va, 0.0, 1.0);
+    float sb = clamp(2.0 * vb, 0.0, 1.0);
     quad.alpha = min(ma, mb) * sa * sb + ma * sa * (1.0 - sb) + mb * sb * (1.0 - sa);
     quad.weight_a = (1.0 - t) * va;
     quad.weight_b = t * vb;

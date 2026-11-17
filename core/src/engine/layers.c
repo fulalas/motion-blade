@@ -96,6 +96,9 @@ static void compare_directions(mb_engine *engine)
     mb_layer_pair_pass pass = {
         {m->layer_model[0], m->layer_model[1]},
         {past ? past->layer_model[0] : NULL, past ? past->layer_model[1] : NULL},
+        {m->layer_field[0], m->layer_field[1]},
+        {past ? past->layer_field[0] : NULL, past ? past->layer_field[1] : NULL},
+        (int)layer_cells(&engine->geo),
         engine->params.layer.min_share,
     };
     engine->backend.ops->layer_pair(engine->backend.self, &pass);

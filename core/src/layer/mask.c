@@ -8,6 +8,7 @@ typedef struct side_evidence {
     float still;
     float moving;
     float prior;
+    float known;
     bool has_motion;
 } side_evidence;
 
@@ -47,12 +48,13 @@ static side_evidence side_at(const mb_layer_evidence_pass *pass, const mb_layer_
 {
     const ref_texture *frame = &pass->frame->texture;
     const ref_texture *other = &side->frame->texture;
-    side_evidence e = {still_error(frame, other, x, y), 0.0f, 0.0f, false};
+    side_evidence e = {still_error(frame, other, x, y), 0.0f, 0.0f, 0.0f, false};
     if (layer_is_active(side->model)) {
         vec2 top = v2(((float)x + 0.5f) * 0.5f, ((float)y + 0.5f) * 0.5f);
         vec4 f = layer_field_at(vec4s(side->field), pass->grid, top);
         e.has_motion = moving_error(frame, other, x, y, v2_scale(v4_xy(f), 2.0f), &e.moving);
-        e.prior = f.z;
+        e.prior = f.z + (1.0f - f.w);
+        e.known = f.w;
     }
     return e;
 }
@@ -79,6 +81,7 @@ static vec2 evidence_at(const mb_layer_evidence_pass *pass, int x, int y)
     float still = 1e30f;
     float moving = 0.0f;
     float prior = 2.0f;
+    float known = 0.0f;
     bool any = false;
     for (int s = 0; s < 2; s++) {
         const mb_layer_side *side = &pass->sides[s];
@@ -90,6 +93,7 @@ static vec2 evidence_at(const mb_layer_evidence_pass *pass, int x, int y)
         if (e.has_motion) {
             moving = fmaxf(moving, e.moving);
             prior = fminf(prior, e.prior);
+            known = fmaxf(known, e.known);
             any = true;
         }
     }
@@ -97,7 +101,8 @@ static vec2 evidence_at(const mb_layer_evidence_pass *pass, int x, int y)
         return v2(0.0f, 0.0f);
     }
     float clip = (float)MB_LAYER_EVIDENCE_CLIP;
-    return v2(clampf(still - moving, -clip, clip), prior * softness_at(pass, x, y));
+    float trusted = fminf(prior, 1.0f) * clampf(2.0f * known, 0.0f, 1.0f);
+    return v2(clampf(still - moving, -clip, clip), trusted * softness_at(pass, x, y));
 }
 
 void ref_layer_evidence(const mb_layer_evidence_pass *pass)

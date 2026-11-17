@@ -283,12 +283,15 @@ struct layer_model_push {
 
 struct layer_pair_push {
     int32_t has_past;
+    int32_t cells;
     float min_share;
 };
 
 struct layer_smooth_push {
     int32_t cells_x;
     int32_t cells_y;
+    int32_t width;
+    int32_t height;
     int32_t has_previous;
     float min_share;
 };

@@ -3,12 +3,23 @@
 #include "push_constants.h"
 layout(push_constant) uniform Push { layer_pair_push push; };
 #include "motionblade/layout.h"
-layout(local_size_x = 1) in;
+layout(local_size_x = MB_LAYER_PAIR_LANES) in;
 
 layout(std430, binding = 0) buffer ForwardModel { vec4 forward_model[]; };
 layout(std430, binding = 1) buffer BackwardModel { vec4 backward_model[]; };
 layout(std430, binding = 2) buffer PastForward { vec4 past_forward[]; };
 layout(std430, binding = 3) buffer PastBackward { vec4 past_backward[]; };
+layout(std430, binding = 4) buffer ForwardField { vec4 forward_field[]; };
+layout(std430, binding = 5) buffer BackwardField { vec4 backward_field[]; };
+layout(std430, binding = 6) buffer PastForwardField { vec4 past_forward_field[]; };
+layout(std430, binding = 7) buffer PastBackwardField { vec4 past_backward_field[]; };
+
+#define KEEP 0
+#define BORROW_FORWARD 1
+#define BORROW_BACKWARD 2
+
+shared vec4 models[4];
+shared int action;
 
 float l1(vec2 v)
 {
@@ -27,19 +38,73 @@ bool continues_into(vec4 past, vec4 current)
            l1(past.xy - current.xy) <= float(MB_LAYER_ADOPT_REL) * l1(current.xy) + float(MB_LAYER_ADOPT_ABS);
 }
 
-void main()
+bool measured_layer(vec4 f, vec4 b)
 {
-    if (!directions_agree(forward_model[0], backward_model[0])) {
-        forward_model[0].z = 0.0;
-        backward_model[0].z = 0.0;
+    return abs(f.z - 1.0) < 0.125 && abs(b.z - 1.0) < 0.125;
+}
+
+bool no_layer(vec4 f, vec4 b)
+{
+    return f.z <= 0.5 && b.z <= 0.5;
+}
+
+void decide()
+{
+    vec4 f = forward_model[0], b = backward_model[0];
+    if (!directions_agree(f, b)) {
+        f.z = 0.0;
+        b.z = 0.0;
     }
-    if (push.has_past == 0 || !directions_agree(past_forward[0], past_backward[0])) {
+    action = KEEP;
+    models[0] = f;
+    models[1] = b;
+    if (push.has_past == 0) {
         return;
     }
-    if (past_forward[0].z <= 0.5 && continues_into(past_forward[0], forward_model[0])) {
-        past_forward[0].z = 2.0;
+    vec4 pf = past_forward[0], pb = past_backward[0];
+    if (directions_agree(pf, pb)) {
+        if (pf.z <= 0.5 && continues_into(pf, f)) {
+            pf.z = 2.0;
+        }
+        if (pb.z <= 0.5 && continues_into(pb, b)) {
+            pb.z = 2.0;
+        }
     }
-    if (past_backward[0].z <= 0.5 && continues_into(past_backward[0], backward_model[0])) {
-        past_backward[0].z = 2.0;
+    if (no_layer(f, b) && measured_layer(pf, pb)) {
+        action = BORROW_FORWARD;
+        models[0] = vec4(pf.xy, float(MB_LAYER_BORROWED), pf.w);
+        models[1] = vec4(pb.xy, float(MB_LAYER_BORROWED), pb.w);
+    } else if (no_layer(pf, pb) && measured_layer(f, b)) {
+        action = BORROW_BACKWARD;
+        pf = vec4(f.xy, 2.0, f.w);
+        pb = vec4(b.xy, 2.0, b.w);
+    }
+    models[2] = pf;
+    models[3] = pb;
+}
+
+void main()
+{
+    int lane = int(gl_LocalInvocationID.x);
+    if (lane == 0) {
+        decide();
+    }
+    barrier();
+    for (int i = lane; i < push.cells && action != KEEP; i += MB_LAYER_PAIR_LANES) {
+        if (action == BORROW_FORWARD) {
+            forward_field[i] = past_forward_field[i];
+            backward_field[i] = past_backward_field[i];
+        } else {
+            past_forward_field[i] = forward_field[i];
+            past_backward_field[i] = backward_field[i];
+        }
+    }
+    if (lane == 0) {
+        forward_model[0] = models[0];
+        backward_model[0] = models[1];
+        if (push.has_past != 0) {
+            past_forward[0] = models[2];
+            past_backward[0] = models[3];
+        }
     }
 }

@@ -143,27 +143,49 @@ static bool continues_into(vec4 past, vec4 current, float min_share)
            apart <= (float)MB_LAYER_ADOPT_REL * v2_l1(v4_xy(current)) + (float)MB_LAYER_ADOPT_ABS;
 }
 
+static bool measured_layer(vec4 forward, vec4 backward)
+{
+    return fabsf(forward.z - 1.0f) < 0.125f && fabsf(backward.z - 1.0f) < 0.125f;
+}
+
+static bool no_layer(vec4 forward, vec4 backward)
+{
+    return forward.z <= 0.5f && backward.z <= 0.5f;
+}
+
+static void borrow(vec4 *const to[2], mb_buffer *const to_fields[2], vec4 *const from[2],
+                   mb_buffer *const from_fields[2], int cells, float state)
+{
+    for (int d = 0; d < 2; d++) {
+        for (int i = 0; i < cells; i++) {
+            vec4s(to_fields[d])[i] = vec4s(from_fields[d])[i];
+        }
+        *to[d] = (vec4){from[d]->x, from[d]->y, state, from[d]->w};
+    }
+}
+
 void ref_layer_pair(const mb_layer_pair_pass *pass)
 {
-    vec4 *forward = vec4s(pass->models[0]);
-    vec4 *backward = vec4s(pass->models[1]);
-    if (!directions_agree(*forward, *backward)) {
-        forward->z = 0.0f;
-        backward->z = 0.0f;
+    vec4 *current[2] = {vec4s(pass->models[0]), vec4s(pass->models[1])};
+    if (!directions_agree(*current[0], *current[1])) {
+        current[0]->z = 0.0f;
+        current[1]->z = 0.0f;
     }
     if (!pass->past[0]) {
         return;
     }
-    vec4 *past_forward = vec4s(pass->past[0]);
-    vec4 *past_backward = vec4s(pass->past[1]);
-    if (!directions_agree(*past_forward, *past_backward)) {
-        return;
+    vec4 *past[2] = {vec4s(pass->past[0]), vec4s(pass->past[1])};
+    if (directions_agree(*past[0], *past[1])) {
+        for (int d = 0; d < 2; d++) {
+            if (past[d]->z <= 0.5f && continues_into(*past[d], *current[d], pass->min_share)) {
+                past[d]->z = 2.0f;
+            }
+        }
     }
-    if (past_forward->z <= 0.5f && continues_into(*past_forward, *forward, pass->min_share)) {
-        past_forward->z = 2.0f;
-    }
-    if (past_backward->z <= 0.5f && continues_into(*past_backward, *backward, pass->min_share)) {
-        past_backward->z = 2.0f;
+    if (no_layer(*current[0], *current[1]) && measured_layer(*past[0], *past[1])) {
+        borrow(current, pass->fields, past, pass->past_fields, pass->cells, (float)MB_LAYER_BORROWED);
+    } else if (no_layer(*past[0], *past[1]) && measured_layer(*current[0], *current[1])) {
+        borrow(past, pass->past_fields, current, pass->fields, pass->cells, 2.0f);
     }
 }
 
@@ -193,17 +215,32 @@ static vec2 smoothed_vector(const mb_layer_smooth_pass *pass, const layer_kernel
     return v2_scale(v2_add(sum, model), 1.0f / (total + 1.0f));
 }
 
-static float prior_at(const mb_layer_smooth_pass *pass, const layer_kernel *k, int cx, int cy)
+static bool window_inside(mb_layer_grid g, int cx, int cy, vec2 model)
+{
+    float reach = (float)(MB_LAYER_WINDOW_TAPS - 1);
+    float x = (float)(cx * MB_LAYER_CELL + MB_LAYER_CELL / 2) + model.x;
+    float y = (float)(cy * MB_LAYER_CELL + MB_LAYER_CELL / 2) + model.y;
+    return x - reach >= 1.0f && x + reach <= (float)(g.width - 1) && y - reach >= 1.0f && y + reach <= (float)(g.height - 1);
+}
+
+static vec2 prior_at(const mb_layer_smooth_pass *pass, const layer_kernel *k, int cx, int cy, vec2 model)
 {
     const vec4 *raw = vec4s(pass->raw);
-    float sum = 0.0f;
+    float moving = 0.0f;
+    float known = 0.0f;
     for (int dy = -k->radius; dy <= k->radius; dy++) {
         for (int dx = -k->radius; dx <= k->radius; dx++) {
-            float moving = is_moving(raw[layer_cell_index(pass->grid, cx + dx, cy + dy)]) ? 1.0f : 0.0f;
-            sum += moving * k->weights[dy + k->radius] * k->weights[dx + k->radius];
+            int x = clampi(cx + dx, 0, pass->grid.cells_x - 1);
+            int y = clampi(cy + dy, 0, pass->grid.cells_y - 1);
+            if (window_inside(pass->grid, x, y, model)) {
+                float w = k->weights[dy + k->radius] * k->weights[dx + k->radius];
+                moving += is_moving(raw[layer_cell_index(pass->grid, x, y)]) ? w : 0.0f;
+                known += w;
+            }
         }
     }
-    return clampf((sum - (float)MB_LAYER_PRIOR_LO) / (float)MB_LAYER_PRIOR_SPAN, 0.0f, 1.0f);
+    float share = moving / fmaxf(known, 1e-6f);
+    return v2(clampf((share - (float)MB_LAYER_PRIOR_LO) / (float)MB_LAYER_PRIOR_SPAN, 0.0f, 1.0f), known);
 }
 
 static bool may_become_layer(vec4 model, float min_share)
@@ -225,6 +262,7 @@ void ref_layer_smooth(const mb_layer_smooth_pass *pass)
         int cx = id % g.cells_x;
         int cy = id / g.cells_x;
         vec2 v = smoothed_vector(pass, &smooth, cx, cy, model);
-        field[id] = (vec4){v.x, v.y, prior_at(pass, &prior, cx, cy), 0.0f};
+        vec2 p = prior_at(pass, &prior, cx, cy, model);
+        field[id] = (vec4){v.x, v.y, p.x, p.y};
     }
 }

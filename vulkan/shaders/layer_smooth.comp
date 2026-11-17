@@ -44,16 +44,30 @@ vec2 smoothed_vector(ivec2 cell, vec2 m)
     return (sum + m) * (1.0 / (total + 1.0));
 }
 
-float prior_at(ivec2 cell)
+bool window_inside(ivec2 cell, vec2 m)
 {
-    float sum = 0.0;
+    float reach = float(MB_LAYER_WINDOW_TAPS - 1);
+    vec2 p = vec2(cell * MB_LAYER_CELL + MB_LAYER_CELL / 2) + m;
+    return p.x - reach >= 1.0 && p.x + reach <= float(push.width - 1) && p.y - reach >= 1.0 &&
+           p.y + reach <= float(push.height - 1);
+}
+
+vec2 prior_at(ivec2 cell, vec2 m)
+{
+    float moving = 0.0;
+    float known = 0.0;
     for (int dy = -MB_LAYER_PRIOR_RADIUS; dy <= MB_LAYER_PRIOR_RADIUS; dy++) {
         for (int dx = -MB_LAYER_PRIOR_RADIUS; dx <= MB_LAYER_PRIOR_RADIUS; dx++) {
-            float moving = raw[layer_cell_index(cell + ivec2(dx, dy), cells())].z > 0.0 ? 1.0 : 0.0;
-            sum += moving * prior_weights[dy + MB_LAYER_PRIOR_RADIUS] * prior_weights[dx + MB_LAYER_PRIOR_RADIUS];
+            ivec2 c = clamp(cell + ivec2(dx, dy), ivec2(0), cells() - 1);
+            if (window_inside(c, m)) {
+                float w = prior_weights[dy + MB_LAYER_PRIOR_RADIUS] * prior_weights[dx + MB_LAYER_PRIOR_RADIUS];
+                moving += raw[layer_cell_index(c, cells())].z > 0.0 ? w : 0.0;
+                known += w;
+            }
         }
     }
-    return clamp((sum - float(MB_LAYER_PRIOR_LO)) / float(MB_LAYER_PRIOR_SPAN), 0.0, 1.0);
+    float share = moving / max(known, 1e-6);
+    return vec2(clamp((share - float(MB_LAYER_PRIOR_LO)) / float(MB_LAYER_PRIOR_SPAN), 0.0, 1.0), known);
 }
 
 void main()
@@ -66,5 +80,5 @@ void main()
     fill_smooth_weights();
     fill_prior_weights();
     ivec2 cell = ivec2(id % push.cells_x, id / push.cells_x);
-    field[id] = vec4(smoothed_vector(cell, model[0].xy), prior_at(cell), 0.0);
+    field[id] = vec4(smoothed_vector(cell, model[0].xy), prior_at(cell, model[0].xy));
 }

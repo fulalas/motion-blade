@@ -371,6 +371,9 @@ typedef struct mb_layer_model_pass {
 typedef struct mb_layer_pair_pass {
     mb_buffer *models[2];
     mb_buffer *past[2];
+    mb_buffer *fields[2];
+    mb_buffer *past_fields[2];
+    int cells;
     float min_share;
 } mb_layer_pair_pass;
 
