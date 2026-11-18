@@ -24,59 +24,53 @@ shared ivec2 shift;
 shared vec2 counts[MB_LAYER_PAIR_LANES];
 bool visible;
 
-float l1(vec2 v)
-{
-    return abs(v.x) + abs(v.y);
-}
-
 bool directions_agree(vec4 f, vec4 b)
 {
     return l1(f.xy + b.xy) <= float(MB_LAYER_PAIR_REL) * max(l1(f.xy), l1(b.xy)) + float(MB_LAYER_PAIR_ABS);
 }
 
+bool is_measured(vec4 m)
+{
+    return abs(m.z - 1.0) < 0.125;
+}
+
+bool big_enough_to_keep(vec4 m)
+{
+    return m.w >= push.min_share * float(MB_LAYER_KEEP_SHARE) && l1(m.xy) >= float(MB_LAYER_KEEP_MIN_LENGTH);
+}
+
 bool continues_into(vec4 past, vec4 current)
 {
-    return current.z > 0.5 && past.w >= push.min_share * float(MB_LAYER_KEEP_SHARE) &&
-           l1(past.xy) >= float(MB_LAYER_KEEP_MIN_LENGTH) &&
+    return current.z > 0.5 && big_enough_to_keep(past) &&
            l1(past.xy - current.xy) <= float(MB_LAYER_ADOPT_REL) * l1(current.xy) + float(MB_LAYER_ADOPT_ABS);
 }
 
 bool measured_layer(vec4 f, vec4 b)
 {
-    return abs(f.z - 1.0) < 0.125 && abs(b.z - 1.0) < 0.125;
+    return is_measured(f) && is_measured(b);
 }
 
 bool nearly_measured(vec4 measured, vec4 other)
 {
-    return abs(measured.z - 1.0) < 0.125 && other.w >= push.min_share * float(MB_LAYER_KEEP_SHARE) &&
-           l1(other.xy) >= float(MB_LAYER_KEEP_MIN_LENGTH);
-}
-
-bool inside_search(vec4 m)
-{
-    float margin = float(MB_LAYER_LEND_MARGIN);
-    return abs(m.x) <= float(MB_LAYER_RANGE_X) - margin && abs(m.y) <= float(MB_LAYER_RANGE_Y) - margin;
+    return is_measured(measured) && big_enough_to_keep(other);
 }
 
 bool entering_layer(vec4 f, vec4 b)
 {
-    return inside_search(f) && inside_search(b) && (nearly_measured(f, b) || nearly_measured(b, f));
+    return layer_inside_search(f.xy) && layer_inside_search(b.xy) && (nearly_measured(f, b) || nearly_measured(b, f));
 }
 
-ivec2 lend_shift()
+ivec2 lend_shift(vec4 f, vec4 b)
 {
-    vec4 f = forward_model[0], b = backward_model[0];
-    return ivec2(floor((abs(f.z - 1.0) < 0.125 ? f.xy : -b.xy) / float(MB_LAYER_CELL) + 0.5));
+    return ivec2(floor((is_measured(f) ? f.xy : -b.xy) / float(MB_LAYER_CELL) + 0.5));
 }
 
-void count_visible(int lane, ivec2 cells)
+void count_visible(int lane, ivec2 cells, ivec2 s)
 {
-    ivec2 s = lend_shift();
     vec2 part = vec2(0.0);
     for (int i = lane; i < cells.x * cells.y; i += MB_LAYER_PAIR_LANES) {
-        ivec2 c = ivec2(i % cells.x, i / cells.x) - s;
         bool layer = forward_field[i].z > 0.5;
-        part += vec2(layer ? 1.0 : 0.0, layer && all(greaterThanEqual(c, ivec2(0))) && all(lessThan(c, cells)) ? 1.0 : 0.0);
+        part += vec2(layer ? 1.0 : 0.0, layer && layer_cell_inside(ivec2(i % cells.x, i / cells.x) - s, cells) ? 1.0 : 0.0);
     }
     counts[lane] = part;
     barrier();
@@ -94,49 +88,76 @@ bool no_layer(vec4 f, vec4 b)
     return f.z <= 0.5 && b.z <= 0.5;
 }
 
-void decide()
+struct Plan {
+    vec4 f;
+    vec4 b;
+    vec4 pf;
+    vec4 pb;
+};
+
+Plan plan()
 {
-    vec4 f = forward_model[0], b = backward_model[0];
-    if (!directions_agree(f, b)) {
-        f.z = 0.0;
-        b.z = 0.0;
+    Plan p = Plan(forward_model[0], backward_model[0], vec4(0.0), vec4(0.0));
+    if (!directions_agree(p.f, p.b)) {
+        p.f.z = 0.0;
+        p.b.z = 0.0;
     }
-    action = KEEP;
-    models[0] = f;
-    models[1] = b;
     if (push.has_past == 0) {
-        return;
+        return p;
     }
-    vec4 pf = past_forward[0], pb = past_backward[0];
-    if (directions_agree(pf, pb)) {
-        if (pf.z <= 0.5 && continues_into(pf, f)) {
-            pf.z = 2.0;
+    p.pf = past_forward[0];
+    p.pb = past_backward[0];
+    if (directions_agree(p.pf, p.pb)) {
+        if (p.pf.z <= 0.5 && continues_into(p.pf, p.f)) {
+            p.pf.z = float(MB_LAYER_ADOPTED_STATE);
         }
-        if (pb.z <= 0.5 && continues_into(pb, b)) {
-            pb.z = 2.0;
+        if (p.pb.z <= 0.5 && continues_into(p.pb, p.b)) {
+            p.pb.z = float(MB_LAYER_ADOPTED_STATE);
         }
     }
-    if (no_layer(f, b) && measured_layer(pf, pb)) {
+    return p;
+}
+
+bool borrows_forward(Plan p)
+{
+    return push.has_past != 0 && no_layer(p.f, p.b) && measured_layer(p.pf, p.pb);
+}
+
+bool may_lend_back(Plan p)
+{
+    return push.has_past != 0 && !borrows_forward(p) && no_layer(p.pf, p.pb) && entering_layer(p.f, p.b);
+}
+
+void decide(Plan p)
+{
+    action = KEEP;
+    models[0] = p.f;
+    models[1] = p.b;
+    if (borrows_forward(p)) {
         action = BORROW_FORWARD;
-        models[0] = vec4(pf.xy, float(MB_LAYER_BORROWED), pf.w);
-        models[1] = vec4(pb.xy, float(MB_LAYER_BORROWED), pb.w);
-    } else if (no_layer(pf, pb) && entering_layer(f, b) && visible) {
+        models[0] = vec4(p.pf.xy, float(MB_LAYER_BORROWED), p.pf.w);
+        models[1] = vec4(p.pb.xy, float(MB_LAYER_BORROWED), p.pb.w);
+    } else if (may_lend_back(p) && visible) {
         action = BORROW_BACKWARD;
-        shift = lend_shift();
-        pf = vec4(f.xy, 2.0, f.w);
-        pb = vec4(b.xy, 2.0, b.w);
+        shift = lend_shift(p.f, p.b);
+        p.pf = vec4(p.f.xy, float(MB_LAYER_ADOPTED_STATE), p.f.w);
+        p.pb = vec4(p.b.xy, float(MB_LAYER_ADOPTED_STATE), p.b.w);
     }
-    models[2] = pf;
-    models[3] = pb;
+    models[2] = p.pf;
+    models[3] = p.pb;
 }
 
 void main()
 {
     int lane = int(gl_LocalInvocationID.x);
     ivec2 cells = ivec2(push.cells_x, push.cells_y);
-    count_visible(lane, cells);
+    Plan p = plan();
+    visible = false;
+    if (may_lend_back(p)) {
+        count_visible(lane, cells, lend_shift(p.f, p.b));
+    }
     if (lane == 0) {
-        decide();
+        decide(p);
     }
     barrier();
     for (int i = lane; i < cells.x * cells.y && action != KEEP; i += MB_LAYER_PAIR_LANES) {

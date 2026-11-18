@@ -7,6 +7,11 @@ int layer_cell_index(mb_layer_grid grid, int x, int y)
     return clampi(y, 0, grid.cells_y - 1) * grid.cells_x + clampi(x, 0, grid.cells_x - 1);
 }
 
+bool layer_cell_inside(mb_layer_grid grid, int x, int y)
+{
+    return x >= 0 && x < grid.cells_x && y >= 0 && y < grid.cells_y;
+}
+
 static vec4 mix4(vec4 a, vec4 b, float w)
 {
     return (vec4){mixf(a.x, b.x, w), mixf(a.y, b.y, w), mixf(a.z, b.z, w), mixf(a.w, b.w, w)};
@@ -80,5 +85,5 @@ bool layer_any_active(mb_buffer *const models[2])
 
 bool layer_gate_open(mb_buffer *const models[2], const mb_buffer *trigger)
 {
-    return layer_any_active(models) && (!trigger || vec4s(trigger)[0].z > (float)MB_LAYER_ADOPTED);
+    return layer_any_active(models) && (!trigger || vec4s(trigger)[0].z > (float)MB_LAYER_ADOPTED_LIMIT);
 }

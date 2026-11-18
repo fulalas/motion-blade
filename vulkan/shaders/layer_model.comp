@@ -33,11 +33,6 @@ vec4 reduce(vec4 part)
     return total;
 }
 
-float l1(vec2 v)
-{
-    return abs(v.x) + abs(v.y);
-}
-
 float agreeing_weight(vec4 r, vec2 m)
 {
     float limit = float(MB_LAYER_CONSENSUS_REL) * l1(m) + float(MB_LAYER_CONSENSUS_ABS);
@@ -93,47 +88,44 @@ vec2 refit(vec2 m, float tolerance)
     return t.z < 1e-6 ? m : t.xy / t.z;
 }
 
-bool window_inside(ivec2 cell, vec2 m)
-{
-    float reach = float(MB_LAYER_WINDOW_TAPS - 1);
-    vec2 p = vec2(cell * MB_LAYER_CELL + MB_LAYER_CELL / 2) + m;
-    return p.x - reach >= 1.0 && p.x + reach <= float(push.width - 1) && p.y - reach >= 1.0 &&
-           p.y + reach <= float(push.height - 1);
-}
-
 bool is_covered(ivec2 cell, vec2 m)
 {
+    ivec2 cells = ivec2(push.cells_x, push.cells_y);
     int steps = int(ceil(max(abs(m.x), abs(m.y)) / float(MB_LAYER_CELL)));
     for (int s = 1; s <= steps; s++) {
         float part = float(s) / float(steps * MB_LAYER_CELL);
         ivec2 c = cell - ivec2(floor(m * part + 0.5));
-        bool inside = c.x >= 0 && c.x < push.cells_x && c.y >= 0 && c.y < push.cells_y;
-        if (inside && agreeing_weight(raw[c.y * push.cells_x + c.x], m) > 0.0) {
+        if (layer_cell_inside(c, cells) && agreeing_weight(raw[c.y * cells.x + c.x], m) > 0.0) {
             return true;
         }
     }
     return false;
 }
 
-vec4 summary(vec2 m)
+vec4 summary()
 {
     vec4 part = vec4(0.0);
     for (int i = lane; i < cell_count; i += LANES) {
-        part += vec4(raw[i].z > 0.0 ? 1.0 : 0.0, agreeing_weight(raw[i], m), raw[i].z, raw[i].w);
+        part += vec4(raw[i].z > 0.0 ? 1.0 : 0.0, abs(raw[i].w - 1.0) <= float(MB_LAYER_LIGHT_STEADY) ? 1.0 : 0.0, 0.0,
+                     raw[i].w);
     }
     return reduce(part);
 }
 
-vec4 light_summary(vec2 m, float mean)
+bool counts_in_vote(int i, vec2 m, bool steady, float agreeing)
+{
+    ivec2 cell = ivec2(i % push.cells_x, i / push.cells_x);
+    return !steady || (layer_window_inside(cell, m, ivec2(push.width, push.height)) && (agreeing > 0.0 || !is_covered(cell, m)));
+}
+
+vec4 vote(vec2 m, float mean, bool steady)
 {
     vec4 part = vec4(0.0);
     for (int i = lane; i < cell_count; i += LANES) {
-        ivec2 cell = ivec2(i % push.cells_x, i / push.cells_x);
         float agreeing = agreeing_weight(raw[i], m);
-        bool counted = window_inside(cell, m) && (agreeing > 0.0 || !is_covered(cell, m));
-        part += vec4(abs(raw[i].w - 1.0) <= float(MB_LAYER_LIGHT_STEADY) ? 1.0 : 0.0,
-                     abs(raw[i].w - mean) <= float(MB_LAYER_LIGHT_BAND) ? 1.0 : 0.0, counted ? agreeing : 0.0,
-                     counted ? raw[i].z : 0.0);
+        bool counted = counts_in_vote(i, m, steady, agreeing);
+        part += vec4(abs(raw[i].w - mean) <= float(MB_LAYER_LIGHT_BAND) ? 1.0 : 0.0, counted ? agreeing : 0.0,
+                     counted ? raw[i].z : 0.0, 0.0);
     }
     return reduce(part);
 }
@@ -150,7 +142,7 @@ bool is_layer(vec2 m, float share, float agreement)
     float min_length = kept ? float(MB_LAYER_KEEP_MIN_LENGTH) : float(MB_LAYER_MODEL_MIN_LENGTH);
     float min_share = kept ? push.min_share * float(MB_LAYER_KEEP_SHARE) : push.min_share;
     float min_agreement = kept ? float(MB_LAYER_KEEP_CONSENSUS) : float(MB_LAYER_MIN_CONSENSUS);
-    return share >= min_share && l1(m) >= min_length && agreement >= min_agreement;
+    return share >= min_share && l1(m) >= min_length && agreement >= min_agreement && layer_inside_search(m);
 }
 
 void main()
@@ -161,15 +153,14 @@ void main()
     for (int round = 0; round < ROUNDS; round++) {
         m = refit(m, TOLERANCES[round]);
     }
-    vec4 t = summary(m);
+    vec4 t = summary();
+    float steady_share = t.y / float(cell_count);
     float mean = t.w / float(cell_count);
-    vec4 light = light_summary(m, mean);
-    float steady_share = light.x / float(cell_count);
-    bool steady = steady_share >= float(MB_LAYER_VOTE_STEADY);
-    float agreement = steady ? light.z / max(light.w, 1e-6) : t.y / max(t.z, 1e-6);
+    vec4 votes = vote(m, mean, steady_share >= float(MB_LAYER_VOTE_STEADY));
     float share = t.x / float(cell_count);
     if (lane == 0) {
-        bool enabled = is_layer(m, share, agreement) && !light_changed(mean, steady_share, light.y / float(cell_count));
+        bool enabled = is_layer(m, share, votes.y / max(votes.z, 1e-6)) &&
+                       !light_changed(mean, steady_share, votes.x / float(cell_count));
         model[0] = vec4(m, enabled ? 1.0 : 0.0, share);
     }
 }

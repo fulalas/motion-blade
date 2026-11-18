@@ -1,9 +1,28 @@
 #include "motionblade/layout.h"
+#include "distance.glsl"
 
 int layer_cell_index(ivec2 cell, ivec2 cells)
 {
     cell = clamp(cell, ivec2(0), cells - 1);
     return cell.y * cells.x + cell.x;
+}
+
+bool layer_cell_inside(ivec2 cell, ivec2 cells)
+{
+    return all(greaterThanEqual(cell, ivec2(0))) && all(lessThan(cell, cells));
+}
+
+bool layer_inside_search(vec2 m)
+{
+    float margin = float(MB_LAYER_SEARCH_MARGIN);
+    return abs(m.x) <= float(MB_LAYER_RANGE_X) - margin && abs(m.y) <= float(MB_LAYER_RANGE_Y) - margin;
+}
+
+bool layer_window_inside(ivec2 cell, vec2 m, ivec2 size)
+{
+    float reach = float(MB_LAYER_WINDOW_TAPS - 1);
+    vec2 p = vec2(cell * MB_LAYER_CELL + MB_LAYER_CELL / 2) + m;
+    return p.x - reach >= 1.0 && p.x + reach <= float(size.x - 1) && p.y - reach >= 1.0 && p.y + reach <= float(size.y - 1);
 }
 
 #define LAYER_FIELD_AT(NAME, FIELD)                                                              \
@@ -40,5 +59,5 @@ int layer_cell_index(ivec2 cell, ivec2 cells)
     }                                                                                               \
     bool layer_gate_open()                                                                          \
     {                                                                                               \
-        return layer_moving() && ((BITS & 4) == 0 || TRIGGER[0].z > float(MB_LAYER_ADOPTED));      \
+        return layer_moving() && ((BITS & 4) == 0 || TRIGGER[0].z > float(MB_LAYER_ADOPTED_LIMIT));      \
     }

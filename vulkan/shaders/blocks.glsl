@@ -1,12 +1,8 @@
 #include "motionblade/layout.h"
+#include "distance.glsl"
 
 const ivec2 RING8[8] = ivec2[8](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1),
                                 ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1), ivec2(1, 1));
-
-float l1(vec2 a)
-{
-    return abs(a.x) + abs(a.y);
-}
 
 float consistency_limit(float threshold, vec2 u)
 {

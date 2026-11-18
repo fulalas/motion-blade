@@ -11,6 +11,7 @@ typedef struct layer_kernel {
 } layer_kernel;
 
 int layer_cell_index(mb_layer_grid grid, int x, int y);
+bool layer_cell_inside(mb_layer_grid grid, int x, int y);
 vec4 layer_field_at(const vec4 *field, mb_layer_grid grid, vec2 top_position);
 vec2 layer_mask_at(const vec2 *mask, int width, int height, vec2 index_position);
 layer_kernel layer_gauss(float sigma, int radius);

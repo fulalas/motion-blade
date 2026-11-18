@@ -44,14 +44,6 @@ vec2 smoothed_vector(ivec2 cell, vec2 m)
     return (sum + m) * (1.0 / (total + 1.0));
 }
 
-bool window_inside(ivec2 cell, vec2 m)
-{
-    float reach = float(MB_LAYER_WINDOW_TAPS - 1);
-    vec2 p = vec2(cell * MB_LAYER_CELL + MB_LAYER_CELL / 2) + m;
-    return p.x - reach >= 1.0 && p.x + reach <= float(push.width - 1) && p.y - reach >= 1.0 &&
-           p.y + reach <= float(push.height - 1);
-}
-
 vec2 prior_at(ivec2 cell, vec2 m)
 {
     float moving = 0.0;
@@ -59,7 +51,7 @@ vec2 prior_at(ivec2 cell, vec2 m)
     for (int dy = -MB_LAYER_PRIOR_RADIUS; dy <= MB_LAYER_PRIOR_RADIUS; dy++) {
         for (int dx = -MB_LAYER_PRIOR_RADIUS; dx <= MB_LAYER_PRIOR_RADIUS; dx++) {
             ivec2 c = clamp(cell + ivec2(dx, dy), ivec2(0), cells() - 1);
-            if (window_inside(c, m)) {
+            if (layer_window_inside(c, m, ivec2(push.width, push.height))) {
                 float w = prior_weights[dy + MB_LAYER_PRIOR_RADIUS] * prior_weights[dx + MB_LAYER_PRIOR_RADIUS];
                 moving += raw[layer_cell_index(c, cells())].z > 0.0 ? w : 0.0;
                 known += w;

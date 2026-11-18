@@ -10,6 +10,7 @@ typedef struct cell_query {
     vec2 model;
     float tolerance;
     float mean_gain;
+    bool steady;
 } cell_query;
 
 typedef vec4 (*cell_term)(int cell, const cell_query *q);
@@ -51,13 +52,11 @@ static vec4 robust_term(int cell, const cell_query *q)
     return (vec4){w * raw.x, w * raw.y, w, 0.0f};
 }
 
-static vec2 refit(const cell_query *base, vec2 model, float tolerance)
+static vec2 refit(cell_query *q, float tolerance)
 {
-    cell_query q = *base;
-    q.model = model;
-    q.tolerance = tolerance;
-    vec4 t = lane_total(robust_term, &q);
-    return t.z < 1e-6f ? model : v2(t.x / t.z, t.y / t.z);
+    q->tolerance = tolerance;
+    vec4 t = lane_total(robust_term, q);
+    return t.z < 1e-6f ? q->model : v2(t.x / t.z, t.y / t.z);
 }
 
 static float agreeing_weight(vec4 raw, vec2 model)
@@ -81,8 +80,7 @@ static bool is_covered(const cell_query *q, int cx, int cy)
         float part = (float)s / (float)(steps * MB_LAYER_CELL);
         int x = cx - (int)floorf(q->model.x * part + 0.5f);
         int y = cy - (int)floorf(q->model.y * part + 0.5f);
-        bool inside = x >= 0 && x < q->grid.cells_x && y >= 0 && y < q->grid.cells_y;
-        if (inside && agreeing_weight(q->raw[y * q->grid.cells_x + x], q->model) > 0.0f) {
+        if (layer_cell_inside(q->grid, x, y) && agreeing_weight(q->raw[y * q->grid.cells_x + x], q->model) > 0.0f) {
             return true;
         }
     }
@@ -92,19 +90,24 @@ static bool is_covered(const cell_query *q, int cx, int cy)
 static vec4 summary_term(int cell, const cell_query *q)
 {
     vec4 raw = q->raw[cell];
-    return (vec4){is_moving(raw) ? 1.0f : 0.0f, agreeing_weight(raw, q->model), raw.z, raw.w};
+    return (vec4){is_moving(raw) ? 1.0f : 0.0f, fabsf(raw.w - 1.0f) <= (float)MB_LAYER_LIGHT_STEADY ? 1.0f : 0.0f, 0.0f,
+                  raw.w};
 }
 
-static vec4 light_term(int cell, const cell_query *q)
+static bool counts_in_vote(const cell_query *q, int cell, float agreeing)
 {
-    vec4 raw = q->raw[cell];
     int cx = cell % q->grid.cells_x;
     int cy = cell / q->grid.cells_x;
+    return !q->steady || (window_inside(q->grid, cx, cy, q->model) && (agreeing > 0.0f || !is_covered(q, cx, cy)));
+}
+
+static vec4 vote_term(int cell, const cell_query *q)
+{
+    vec4 raw = q->raw[cell];
     float agreeing = agreeing_weight(raw, q->model);
-    bool counted = window_inside(q->grid, cx, cy, q->model) && (agreeing > 0.0f || !is_covered(q, cx, cy));
-    return (vec4){fabsf(raw.w - 1.0f) <= (float)MB_LAYER_LIGHT_STEADY ? 1.0f : 0.0f,
-                  fabsf(raw.w - q->mean_gain) <= (float)MB_LAYER_LIGHT_BAND ? 1.0f : 0.0f, counted ? agreeing : 0.0f,
-                  counted ? raw.z : 0.0f};
+    bool counted = counts_in_vote(q, cell, agreeing);
+    return (vec4){fabsf(raw.w - q->mean_gain) <= (float)MB_LAYER_LIGHT_BAND ? 1.0f : 0.0f, counted ? agreeing : 0.0f,
+                  counted ? raw.z : 0.0f, 0.0f};
 }
 
 static vec2 best_supported(const vec4 *raw, int cells)
@@ -136,13 +139,19 @@ static bool light_changed(float mean, float steady_share, float band_share)
            band_share >= (float)MB_LAYER_LIGHT_SHARE;
 }
 
+static bool inside_search(vec2 model)
+{
+    float margin = (float)MB_LAYER_SEARCH_MARGIN;
+    return fabsf(model.x) <= (float)MB_LAYER_RANGE_X - margin && fabsf(model.y) <= (float)MB_LAYER_RANGE_Y - margin;
+}
+
 static bool is_layer(const mb_layer_model_pass *pass, vec2 model, float share, float agreement)
 {
     bool kept = layer_is_active(pass->previous);
     float min_length = kept ? (float)MB_LAYER_KEEP_MIN_LENGTH : (float)MB_LAYER_MODEL_MIN_LENGTH;
     float min_share = kept ? pass->min_share * (float)MB_LAYER_KEEP_SHARE : pass->min_share;
     float min_agreement = kept ? (float)MB_LAYER_KEEP_CONSENSUS : (float)MB_LAYER_MIN_CONSENSUS;
-    return share >= min_share && v2_l1(model) >= min_length && agreement >= min_agreement;
+    return share >= min_share && v2_l1(model) >= min_length && agreement >= min_agreement && inside_search(model);
 }
 
 void ref_layer_model(const mb_layer_model_pass *pass)
@@ -151,19 +160,19 @@ void ref_layer_model(const mb_layer_model_pass *pass)
     cell_query q = {.raw = vec4s(pass->raw), .grid = pass->grid};
     int cells = cell_count(q.grid);
     vec2 model = best_supported(q.raw, cells);
-    for (int round = 0; round < ROUNDS; round++) {
-        model = refit(&q, model, TOLERANCES[round]);
-    }
     q.model = model;
+    for (int round = 0; round < ROUNDS; round++) {
+        q.model = refit(&q, TOLERANCES[round]);
+    }
+    model = q.model;
     vec4 t = lane_total(summary_term, &q);
+    float steady_share = t.y / (float)cells;
     q.mean_gain = t.w / (float)cells;
-    vec4 light = lane_total(light_term, &q);
-    float steady_share = light.x / (float)cells;
-    bool steady = steady_share >= (float)MB_LAYER_VOTE_STEADY;
-    float agreement = steady ? light.z / fmaxf(light.w, 1e-6f) : t.y / fmaxf(t.z, 1e-6f);
+    q.steady = steady_share >= (float)MB_LAYER_VOTE_STEADY;
+    vec4 vote = lane_total(vote_term, &q);
     float share = t.x / (float)cells;
-    bool active = is_layer(pass, model, share, agreement) &&
-                  !light_changed(q.mean_gain, steady_share, light.y / (float)cells);
+    bool active = is_layer(pass, model, share, vote.y / fmaxf(vote.z, 1e-6f)) &&
+                  !light_changed(q.mean_gain, steady_share, vote.x / (float)cells);
     vec4s(pass->model)[0] = (vec4){model.x, model.y, active ? 1.0f : 0.0f, share};
 }
 
@@ -174,34 +183,36 @@ static bool directions_agree(vec4 forward, vec4 backward)
     return apart <= (float)MB_LAYER_PAIR_REL * longest + (float)MB_LAYER_PAIR_ABS;
 }
 
+static bool is_measured(vec4 model)
+{
+    return fabsf(model.z - 1.0f) < 0.125f;
+}
+
+static bool big_enough_to_keep(vec4 model, float min_share)
+{
+    return model.w >= min_share * (float)MB_LAYER_KEEP_SHARE && v2_l1(v4_xy(model)) >= (float)MB_LAYER_KEEP_MIN_LENGTH;
+}
+
 static bool continues_into(vec4 past, vec4 current, float min_share)
 {
     float apart = v2_l1(v2_sub(v4_xy(past), v4_xy(current)));
-    return current.z > 0.5f && past.w >= min_share * (float)MB_LAYER_KEEP_SHARE &&
-           v2_l1(v4_xy(past)) >= (float)MB_LAYER_KEEP_MIN_LENGTH &&
+    return current.z > 0.5f && big_enough_to_keep(past, min_share) &&
            apart <= (float)MB_LAYER_ADOPT_REL * v2_l1(v4_xy(current)) + (float)MB_LAYER_ADOPT_ABS;
 }
 
 static bool measured_layer(vec4 forward, vec4 backward)
 {
-    return fabsf(forward.z - 1.0f) < 0.125f && fabsf(backward.z - 1.0f) < 0.125f;
+    return is_measured(forward) && is_measured(backward);
 }
 
 static bool nearly_measured(vec4 measured, vec4 other, float min_share)
 {
-    return fabsf(measured.z - 1.0f) < 0.125f && other.w >= min_share * (float)MB_LAYER_KEEP_SHARE &&
-           v2_l1(v4_xy(other)) >= (float)MB_LAYER_KEEP_MIN_LENGTH;
-}
-
-static bool inside_search(vec4 model)
-{
-    float margin = (float)MB_LAYER_LEND_MARGIN;
-    return fabsf(model.x) <= (float)MB_LAYER_RANGE_X - margin && fabsf(model.y) <= (float)MB_LAYER_RANGE_Y - margin;
+    return is_measured(measured) && big_enough_to_keep(other, min_share);
 }
 
 static bool entering_layer(vec4 forward, vec4 backward, float min_share)
 {
-    return inside_search(forward) && inside_search(backward) &&
+    return inside_search(v4_xy(forward)) && inside_search(v4_xy(backward)) &&
            (nearly_measured(forward, backward, min_share) || nearly_measured(backward, forward, min_share));
 }
 
@@ -219,7 +230,7 @@ static void borrow(vec4 *const to[2], mb_buffer *const to_fields[2], vec4 *const
                    mb_buffer *const from_fields[2], mb_layer_grid grid, ivec2 shift, float state)
 {
     for (int d = 0; d < 2; d++) {
-        for (int i = 0; i < grid.cells_x * grid.cells_y; i++) {
+        for (int i = 0; i < cell_count(grid); i++) {
             int source = layer_cell_index(grid, i % grid.cells_x + shift.x, i / grid.cells_x + shift.y);
             vec4s(to_fields[d])[i] = vec4s(from_fields[d])[source];
         }
@@ -229,19 +240,17 @@ static void borrow(vec4 *const to[2], mb_buffer *const to_fields[2], vec4 *const
 
 static vec2 forward_motion(vec4 forward, vec4 backward)
 {
-    return fabsf(forward.z - 1.0f) < 0.125f ? v4_xy(forward) : v2_scale(v4_xy(backward), -1.0f);
+    return is_measured(forward) ? v4_xy(forward) : v2_neg(v4_xy(backward));
 }
 
 static bool visible_before(const vec4 *field, mb_layer_grid g, ivec2 shift)
 {
     float inside = 0.0f;
     float total = 0.0f;
-    for (int i = 0; i < g.cells_x * g.cells_y; i++) {
-        int x = i % g.cells_x - shift.x;
-        int y = i / g.cells_x - shift.y;
+    for (int i = 0; i < cell_count(g); i++) {
         bool layer = field[i].z > 0.5f;
         total += layer ? 1.0f : 0.0f;
-        inside += layer && x >= 0 && x < g.cells_x && y >= 0 && y < g.cells_y ? 1.0f : 0.0f;
+        inside += layer && layer_cell_inside(g, i % g.cells_x - shift.x, i / g.cells_x - shift.y) ? 1.0f : 0.0f;
     }
     return total > 0.0f && inside >= (float)MB_LAYER_LEND_VISIBLE * total;
 }
@@ -260,7 +269,7 @@ void ref_layer_pair(const mb_layer_pair_pass *pass)
     if (directions_agree(*past[0], *past[1])) {
         for (int d = 0; d < 2; d++) {
             if (past[d]->z <= 0.5f && continues_into(*past[d], *current[d], pass->min_share)) {
-                past[d]->z = 2.0f;
+                past[d]->z = (float)MB_LAYER_ADOPTED_STATE;
             }
         }
     }
@@ -269,7 +278,7 @@ void ref_layer_pair(const mb_layer_pair_pass *pass)
         borrow(current, pass->fields, past, pass->past_fields, pass->grid, iv2(0, 0), (float)MB_LAYER_BORROWED);
     } else if (no_layer(*past[0], *past[1]) && entering_layer(*current[0], *current[1], pass->min_share) &&
                visible_before(vec4s(pass->fields[0]), pass->grid, shift)) {
-        borrow(past, pass->past_fields, current, pass->fields, pass->grid, shift, 2.0f);
+        borrow(past, pass->past_fields, current, pass->fields, pass->grid, shift, (float)MB_LAYER_ADOPTED_STATE);
     }
 }
 
