@@ -47,6 +47,10 @@ static const expectation EXPECTED[] = {
     {"layer_evidence", 0.99, 20.0},
     {"layer_blur", 0.99, 0.01},
     {"layer_guard", 0.9, 1.0},
+    {"wipe_seeds", 0.99, 0.01},
+    {"wipe_index", 0.99, 0.0},
+    {"wipe_assign", 0.99, 0.01},
+    {"wipe_gate", 0.99, 0.0},
 };
 
 typedef struct run_config {

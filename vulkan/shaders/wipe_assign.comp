@@ -1,0 +1,259 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { wipe_push push; };
+#include "motionblade/layout.h"
+
+#define CELL MB_WIPE_CELL
+
+layout(local_size_x = 64) in;
+
+layout(binding = 0) uniform sampler2D before_luma;
+layout(binding = 1) uniform sampler2D from_luma;
+layout(binding = 2) uniform sampler2D to_luma;
+layout(binding = 3) uniform sampler2D after_luma;
+layout(std430, binding = 4) readonly buffer Seeds { vec4 seeds[]; };
+layout(std430, binding = 5) buffer Gate { uint gate[]; };
+layout(std430, binding = 6) readonly buffer Nearest { int nearest[]; };
+layout(std430, binding = 7) buffer Fronts { vec4 fronts[]; };
+
+struct Line {
+    float offset;
+    float slope;
+    bool found;
+};
+
+struct Sweep {
+    int axis;
+    int direction;
+    Line from;
+    Line to;
+    float span;
+};
+
+#include "wipe.glsl"
+
+bool scan(int kind, ivec2 cell, float code, out ivec2 found)
+{
+    found = cell;
+    if (!cell_inside(cell)) {
+        return false;
+    }
+    int axis = abs(code) > 1.5 ? 1 : 0;
+    int along = nearest[MB_WIPE_SLOTS * (cell.y * push.cells_x + cell.x) + wipe_slot(kind, axis, code > 0.0)];
+    found = axis == 0 ? ivec2(along, cell.y) : ivec2(cell.x, along);
+    return along >= 0;
+}
+
+void neighbour_seed(int kind, ivec2 cell, int axis, int side, float code, inout vec2 point)
+{
+    for (int k = 0; k < 3; k++) {
+        ivec2 c = cell + cell_step(axis, lateral_offset(k), side);
+        if (has_seed(kind, c, code)) {
+            point = seed_at(kind, c).xy;
+            return;
+        }
+    }
+}
+
+Line line_through(int kind, ivec2 cell, int axis, float code)
+{
+    vec2 own = seed_at(kind, cell).xy;
+    vec2 a = own;
+    vec2 b = own;
+    neighbour_seed(kind, cell, axis, -1, code, a);
+    neighbour_seed(kind, cell, axis, 1, code, b);
+    float lateral = lateral_of(b, axis) - lateral_of(a, axis);
+    float along = along_of(b, axis) - along_of(a, axis);
+    if (abs(lateral) <= 1e-3 || abs(along) > float(MB_WIPE_MAX_SLOPE) * abs(lateral)) {
+        return Line(0.0, 0.0, false);
+    }
+    float slope = along / lateral;
+    return Line(along_of(own, axis) - slope * lateral_of(own, axis), slope, true);
+}
+
+bool is_blocked(ivec2 cell, int axis, int from, int to)
+{
+    int direction = to >= from ? 1 : -1;
+    for (int i = from; i != to + direction; i += direction) {
+        ivec2 c = axis == 0 ? ivec2(i, cell.y) : ivec2(cell.x, i);
+        vec4 changes = cell_inside(c) ? seed_at(MB_WIPE_CHANGES, c) : vec4(0.0);
+        float before = changes.x;
+        float after = changes.z;
+        bool near_old = abs(i - from) < 2;
+        bool near_new = abs(i - to) < 2;
+        if ((!near_new && after >= float(MB_WIPE_BLOCKING)) || (!near_old && before >= float(MB_WIPE_BLOCKING))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+float line_at(Line line, float lateral)
+{
+    return line.offset + line.slope * lateral;
+}
+
+Line find_line(int kind, inout ivec2 cell, int axis, float code)
+{
+    Line line = Line(0.0, 0.0, false);
+    ivec2 start = cell;
+    for (int k = 0; k <= 2 * MB_WIPE_LATERAL && !line.found; k++) {
+        ivec2 found;
+        if (scan(kind, start + cell_step(axis, 0, lateral_offset(k)), code, found)) {
+            cell = found;
+            line = line_through(kind, found, axis, code);
+        }
+    }
+    return line;
+}
+
+Sweep sweep_through(ivec2 cell, int axis, int direction)
+{
+    float code = float(direction * (axis + 1));
+    ivec2 seed = cell;
+    Sweep s = Sweep(axis, direction, find_line(MB_WIPE_OLD, seed, axis, code), Line(0.0, 0.0, false), 0.0);
+    if (!s.from.found) {
+        return s;
+    }
+    int first = axis == 0 ? seed.x : seed.y;
+    s.to = find_line(MB_WIPE_NEW, seed, axis, code);
+    if (!s.to.found || is_blocked(cell, axis, first, axis == 0 ? seed.x : seed.y)) {
+        return s;
+    }
+    vec2 centre = (vec2(cell) + 0.5) * float(CELL);
+    float from = line_at(s.from, lateral_of(centre, axis));
+    float to = line_at(s.to, lateral_of(centre, axis));
+    float cell_lo = along_of(centre, axis) - 0.5 * float(CELL);
+    bool overlaps = max(min(from, to), cell_lo) <= min(max(from, to), cell_lo + float(CELL));
+    s.span = overlaps ? (to - from) * float(direction) : 0.0;
+    return s;
+}
+
+Sweep shortest_sweep(ivec2 cell)
+{
+    Sweep best = Sweep(0, 0, Line(0.0, 0.0, false), Line(0.0, 0.0, false), 0.0);
+    for (int k = 0; k < 4; k++) {
+        Sweep s = sweep_through(cell, k / 2, (k & 1) != 0 ? 1 : -1);
+        if (s.span >= float(MB_WIPE_MIN_SPAN) && (best.span <= 0.0 || s.span < best.span)) {
+            best = s;
+        }
+    }
+    return best;
+}
+
+bool is_moving(ivec2 p)
+{
+    float before = texelFetch(before_luma, p, 0).r * 255.0;
+    float from = texelFetch(from_luma, p, 0).r * 255.0;
+    float to = texelFetch(to_luma, p, 0).r * 255.0;
+    float after = texelFetch(after_luma, p, 0).r * 255.0;
+    float noise = float(MB_WIPE_NOISE);
+    return abs(after - to) > noise || abs(from - before) > noise;
+}
+
+bool is_swept(Sweep s, ivec2 q)
+{
+    vec2 p = vec2(q) + 0.5;
+    float from = line_at(s.from, lateral_of(p, s.axis));
+    float to = line_at(s.to, lateral_of(p, s.axis));
+    float along = along_of(p, s.axis);
+    return along > min(from, to) + float(MB_WIPE_EDGE) && along < max(from, to) - float(MB_WIPE_EDGE);
+}
+
+bool is_still_content(ivec2 cell, Sweep s)
+{
+    float swept = 0.0;
+    float moving = 0.0;
+    for (int y = (cell.y - 1) * CELL; y < (cell.y + 2) * CELL; y++) {
+        for (int x = (cell.x - 1) * CELL; x < (cell.x + 2) * CELL; x++) {
+            ivec2 q = ivec2(x, y);
+            if (x >= 0 && y >= 0 && x < push.width && y < push.height && is_swept(s, q)) {
+                swept += 1.0;
+                moving += is_moving(q) ? 1.0 : 0.0;
+            }
+        }
+    }
+    return swept >= 1.0 && moving <= float(MB_WIPE_MAX_MOVING) * swept;
+}
+
+bool is_still_beyond(ivec2 cell, Sweep s, Line line, int outward)
+{
+    int first = ((s.axis == 0 ? cell.y : cell.x) - 1) * CELL;
+    float samples = 0.0;
+    float changed = 0.0;
+    for (int lateral = first; lateral < first + 3 * CELL; lateral++) {
+        float front = line_at(line, float(lateral) + 0.5);
+        for (int k = 0; k < MB_WIPE_FRINGE; k++) {
+            int along = int(floor(front + float(outward) * (1.0 + float(k))));
+            ivec2 q = s.axis == 0 ? ivec2(along, lateral) : ivec2(lateral, along);
+            if (q.x >= 0 && q.y >= 0 && q.x < push.width && q.y < push.height) {
+                float change = abs(texelFetch(to_luma, q, 0).r * 255.0 - texelFetch(from_luma, q, 0).r * 255.0);
+                samples += 1.0;
+                changed += change > float(MB_WIPE_STILL) ? 1.0 : 0.0;
+            }
+        }
+    }
+    return changed <= float(MB_WIPE_MAX_FRINGE) * samples;
+}
+
+bool is_sharp(ivec2 cell, Sweep s)
+{
+    return is_still_beyond(cell, s, s.from, -s.direction) && is_still_beyond(cell, s, s.to, s.direction);
+}
+
+bool is_between(Sweep s, ivec2 cell)
+{
+    vec2 centre = (vec2(cell) + 0.5) * float(CELL);
+    float from = line_at(s.from, lateral_of(centre, s.axis));
+    float to = line_at(s.to, lateral_of(centre, s.axis));
+    return along_of(centre, s.axis) >= min(from, to) && along_of(centre, s.axis) <= max(from, to);
+}
+
+bool has_switched(ivec2 cell, Sweep s)
+{
+    float texels = 0.0;
+    float switched = 0.0;
+    for (int lateral = -MB_WIPE_LATERAL; lateral <= MB_WIPE_LATERAL; lateral++) {
+        for (int along = -1; along <= 1; along++) {
+            ivec2 c = cell + cell_step(s.axis, along, lateral);
+            if (cell_inside(c) && is_between(s, c)) {
+                texels += float(CELL * CELL);
+                switched += seed_at(MB_WIPE_CHANGES, c).y;
+            }
+        }
+    }
+    return switched >= float(MB_WIPE_MIN_CHANGED) * texels;
+}
+
+bool near_change(ivec2 cell)
+{
+    for (int k = 0; k < 9; k++) {
+        ivec2 c = cell + ivec2(k % 3 - 1, k / 3 - 1);
+        if (cell_inside(c) && seed_at(MB_WIPE_CHANGES, c).y > 0.0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void main()
+{
+    int index = int(gl_GlobalInvocationID.x);
+    if (index >= push.cells_x * push.cells_y || gate[MB_WIPE_GATE_SEEDS] == 0u) {
+        return;
+    }
+    ivec2 cell = ivec2(index % push.cells_x, index / push.cells_x);
+    vec4 lines = vec4(0.0);
+    float axis = 0.0;
+    if (near_change(cell)) {
+        Sweep s = shortest_sweep(cell);
+        if (s.span > 0.0 && has_switched(cell, s) && is_sharp(cell, s) && is_still_content(cell, s)) {
+            lines = vec4(s.from.offset, s.from.slope, s.to.offset, s.to.slope);
+            axis = float(s.axis + 1);
+            atomicAdd(gate[MB_WIPE_GATE_CELLS], 1u);
+        }
+    }
+    fronts[MB_WIPE_FRONT_VALUES * index] = lines;
+    fronts[MB_WIPE_FRONT_VALUES * index + 1] = vec4(axis, 0.0, 0.0, 0.0);
+}

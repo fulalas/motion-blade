@@ -340,6 +340,7 @@ static void tee_layer_pair(void *self, const mb_layer_pair_pass *pass)
             p.past[k] = BUFFER(pass->past[k]);
             p.fields[k] = BUFFER(pass->fields[k]);
             p.past_fields[k] = BUFFER(pass->past_fields[k]);
+            p.vectors[k] = BUFFER(pass->vectors[k]);
         }
         OPS(t, side)->layer_pair(SELF(t, side), &p);
     }
@@ -441,6 +442,65 @@ static void tee_layer_composite(void *self, const mb_layer_composite_pass *pass)
     }
 }
 
+static void tee_wipe_seeds(void *self, const mb_wipe_seeds_pass *pass)
+{
+    tee *t = self;
+    for (int side = 0; side < SIDES; side++) {
+        mb_wipe_seeds_pass p = *pass;
+        for (int k = 0; k < 4; k++) {
+            p.frames[k] = IMAGE(pass->frames[k]);
+        }
+        p.seeds = BUFFER(pass->seeds);
+        p.gate = BUFFER(pass->gate);
+        OPS(t, side)->wipe_seeds(SELF(t, side), &p);
+    }
+    check_buffer(t, "wipe_seeds", pass->seeds, COMPARE_FLOATS);
+    check_buffer(t, "wipe_gate", pass->gate, COMPARE_WORDS);
+}
+
+static void tee_wipe_index(void *self, const mb_wipe_index_pass *pass)
+{
+    tee *t = self;
+    for (int side = 0; side < SIDES; side++) {
+        mb_wipe_index_pass p = *pass;
+        p.seeds = BUFFER(pass->seeds);
+        p.gate = BUFFER(pass->gate);
+        p.nearest = BUFFER(pass->nearest);
+        OPS(t, side)->wipe_index(SELF(t, side), &p);
+    }
+    check_buffer(t, "wipe_index", pass->nearest, COMPARE_WORDS);
+}
+
+static void tee_wipe_assign(void *self, const mb_wipe_assign_pass *pass)
+{
+    tee *t = self;
+    for (int side = 0; side < SIDES; side++) {
+        mb_wipe_assign_pass p = *pass;
+        for (int k = 0; k < 4; k++) {
+            p.frames[k] = IMAGE(pass->frames[k]);
+        }
+        p.seeds = BUFFER(pass->seeds);
+        p.gate = BUFFER(pass->gate);
+        p.nearest = BUFFER(pass->nearest);
+        p.fronts = BUFFER(pass->fronts);
+        OPS(t, side)->wipe_assign(SELF(t, side), &p);
+    }
+    check_buffer(t, "wipe_assign", pass->fronts, COMPARE_FLOATS);
+    check_buffer(t, "wipe_gate", pass->gate, COMPARE_WORDS);
+}
+
+static void tee_wipe_composite(void *self, const mb_wipe_composite_pass *pass)
+{
+    tee *t = self;
+    for (int side = 0; side < SIDES; side++) {
+        mb_wipe_composite_pass p = *pass;
+        p.warp = warp_side(&pass->warp, side);
+        p.fronts = BUFFER(pass->fronts);
+        p.gate = BUFFER(pass->gate);
+        OPS(t, side)->wipe_composite(SELF(t, side), &p);
+    }
+}
+
 static void tee_prepare(void *self, const mb_video_format *format)
 {
     tee *t = self;
@@ -504,4 +564,8 @@ const mb_backend_ops TEE_OPS = {
     .layer_blur = tee_layer_blur,
     .layer_guard = tee_layer_guard,
     .layer_composite = tee_layer_composite,
+    .wipe_seeds = tee_wipe_seeds,
+    .wipe_index = tee_wipe_index,
+    .wipe_assign = tee_wipe_assign,
+    .wipe_composite = tee_wipe_composite,
 };

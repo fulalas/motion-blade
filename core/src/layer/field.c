@@ -255,10 +255,71 @@ static bool visible_before(const vec4 *field, mb_layer_grid g, ivec2 shift)
     return total > 0.0f && inside >= (float)MB_LAYER_LEND_VISIBLE * total;
 }
 
+typedef struct cell_cluster {
+    float blocks;
+    float inliers;
+    vec2 sum;
+    float squares;
+} cell_cluster;
+
+static cell_cluster cluster_in(const mb_layer_pair_pass *pass, int direction, int cell)
+{
+    const vec4 *vectors = vec4s(pass->vectors[direction]);
+    vec2 expected = v4_xy(vec4s(pass->fields[direction])[cell]);
+    float limit = (float)MB_LAYER_TRACK_REL * v2_l1(expected) + (float)MB_LAYER_TRACK_ABS;
+    int x0 = cell % pass->grid.cells_x * pass->cell_blocks;
+    int y0 = cell / pass->grid.cells_x * pass->cell_blocks;
+    cell_cluster c = {0.0f, 0.0f, v2(0.0f, 0.0f), 0.0f};
+    for (int y = y0; y < y0 + pass->cell_blocks && y < pass->blocks.blocks_y; y++) {
+        for (int x = x0; x < x0 + pass->cell_blocks && x < pass->blocks.blocks_x; x++) {
+            vec2 apart = v2_sub(v2_scale(v4_xy(vectors[y * pass->blocks.blocks_x + x]), pass->vector_scale), expected);
+            bool inlier = v2_l1(apart) <= limit;
+            c.blocks += 1.0f;
+            c.inliers += inlier ? 1.0f : 0.0f;
+            c.sum = v2_add(c.sum, inlier ? apart : v2(0.0f, 0.0f));
+            c.squares += inlier ? apart.x * apart.x + apart.y * apart.y : 0.0f;
+        }
+    }
+    return c;
+}
+
+static bool is_tight(cell_cluster c, float vector_scale)
+{
+    if (c.inliers < 0.5f || c.inliers < (float)MB_LAYER_TRACK_INLIERS * c.blocks) {
+        return false;
+    }
+    vec2 mean = v2_scale(c.sum, 1.0f / c.inliers);
+    float spread = (float)MB_LAYER_TRACK_SPREAD * vector_scale;
+    return c.squares / c.inliers - (mean.x * mean.x + mean.y * mean.y) <= spread * spread;
+}
+
+static vec2 tracked_cells(const mb_layer_pair_pass *pass, int direction)
+{
+    const vec4 *field = vec4s(pass->fields[direction]);
+    vec2 counts = v2(0.0f, 0.0f);
+    if (!layer_is_active(pass->models[direction])) {
+        return counts;
+    }
+    for (int i = 0; i < cell_count(pass->grid); i++) {
+        if (field[i].z > 0.5f) {
+            counts.x += 1.0f;
+            counts.y += is_tight(cluster_in(pass, direction, i), pass->vector_scale) ? 1.0f : 0.0f;
+        }
+    }
+    return counts;
+}
+
+static bool already_tracked(const mb_layer_pair_pass *pass)
+{
+    vec2 counts = v2_add(tracked_cells(pass, 0), tracked_cells(pass, 1));
+    return counts.x > 0.0f && counts.y >= (float)MB_LAYER_TRACK_SHARE * counts.x;
+}
+
 void ref_layer_pair(const mb_layer_pair_pass *pass)
 {
     vec4 *current[2] = {vec4s(pass->models[0]), vec4s(pass->models[1])};
-    if (!directions_agree(*current[0], *current[1])) {
+    bool tracked = already_tracked(pass);
+    if (tracked || !directions_agree(*current[0], *current[1])) {
         current[0]->z = 0.0f;
         current[1]->z = 0.0f;
     }
@@ -274,7 +335,7 @@ void ref_layer_pair(const mb_layer_pair_pass *pass)
         }
     }
     ivec2 shift = cell_shift(forward_motion(*current[0], *current[1]));
-    if (no_layer(*current[0], *current[1]) && measured_layer(*past[0], *past[1])) {
+    if (!tracked && no_layer(*current[0], *current[1]) && measured_layer(*past[0], *past[1])) {
         borrow(current, pass->fields, past, pass->past_fields, pass->grid, iv2(0, 0), (float)MB_LAYER_BORROWED);
     } else if (no_layer(*past[0], *past[1]) && entering_layer(*current[0], *current[1], pass->min_share) &&
                visible_before(vec4s(pass->fields[0]), pass->grid, shift)) {

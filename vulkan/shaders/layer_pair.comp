@@ -13,6 +13,8 @@ layout(std430, binding = 4) buffer ForwardField { vec4 forward_field[]; };
 layout(std430, binding = 5) buffer BackwardField { vec4 backward_field[]; };
 layout(std430, binding = 6) buffer PastForwardField { vec4 past_forward_field[]; };
 layout(std430, binding = 7) buffer PastBackwardField { vec4 past_backward_field[]; };
+layout(std430, binding = 8) readonly buffer ForwardVectors { vec4 forward_vectors[]; };
+layout(std430, binding = 9) readonly buffer BackwardVectors { vec4 backward_vectors[]; };
 
 #define KEEP 0
 #define BORROW_FORWARD 1
@@ -22,7 +24,69 @@ shared vec4 models[4];
 shared int action;
 shared ivec2 shift;
 shared vec2 counts[MB_LAYER_PAIR_LANES];
+shared bool tracked;
 bool visible;
+
+bool is_tight(float blocks, float inliers, vec2 sum, float squares)
+{
+    if (inliers < 0.5 || inliers < float(MB_LAYER_TRACK_INLIERS) * blocks) {
+        return false;
+    }
+    vec2 mean = sum / inliers;
+    float spread = float(MB_LAYER_TRACK_SPREAD) * push.vector_scale;
+    return squares / inliers - dot(mean, mean) <= spread * spread;
+}
+
+#define TRACKED_CELLS(NAME, MODEL, FIELD, VECTORS)                                                  \
+    vec2 NAME(int lane, ivec2 cells)                                                                \
+    {                                                                                               \
+        vec2 part = vec2(0.0);                                                                      \
+        if (MODEL[0].z <= 0.5) {                                                                    \
+            return part;                                                                            \
+        }                                                                                           \
+        for (int i = lane; i < cells.x * cells.y; i += MB_LAYER_PAIR_LANES) {                       \
+            if (FIELD[i].z <= 0.5) {                                                                \
+                continue;                                                                           \
+            }                                                                                       \
+            vec2 expected = FIELD[i].xy;                                                            \
+            float limit = float(MB_LAYER_TRACK_REL) * l1(expected) + float(MB_LAYER_TRACK_ABS);     \
+            ivec2 first = ivec2(i % cells.x, i / cells.x) * push.cell_blocks;                       \
+            ivec2 last = min(first + push.cell_blocks, ivec2(push.blocks_x, push.blocks_y));        \
+            float blocks = 0.0;                                                                     \
+            float inliers = 0.0;                                                                    \
+            vec2 sum = vec2(0.0);                                                                   \
+            float squares = 0.0;                                                                    \
+            for (int y = first.y; y < last.y; y++) {                                                \
+                for (int x = first.x; x < last.x; x++) {                                            \
+                    vec2 apart = VECTORS[y * push.blocks_x + x].xy * push.vector_scale - expected;  \
+                    bool inlier = l1(apart) <= limit;                                               \
+                    blocks += 1.0;                                                                  \
+                    inliers += inlier ? 1.0 : 0.0;                                                  \
+                    sum += inlier ? apart : vec2(0.0);                                              \
+                    squares += inlier ? dot(apart, apart) : 0.0;                                    \
+                }                                                                                   \
+            }                                                                                       \
+            part += vec2(1.0, is_tight(blocks, inliers, sum, squares) ? 1.0 : 0.0);                 \
+        }                                                                                           \
+        return part;                                                                                \
+    }
+
+TRACKED_CELLS(tracked_forward, forward_model, forward_field, forward_vectors)
+TRACKED_CELLS(tracked_backward, backward_model, backward_field, backward_vectors)
+
+void find_tracked(int lane, ivec2 cells)
+{
+    counts[lane] = tracked_forward(lane, cells) + tracked_backward(lane, cells);
+    barrier();
+    if (lane == 0) {
+        vec2 total = vec2(0.0);
+        for (int k = 0; k < MB_LAYER_PAIR_LANES; k++) {
+            total += counts[k];
+        }
+        tracked = total.x > 0.0 && total.y >= float(MB_LAYER_TRACK_SHARE) * total.x;
+    }
+    barrier();
+}
 
 bool directions_agree(vec4 f, vec4 b)
 {
@@ -98,7 +162,7 @@ struct Plan {
 Plan plan()
 {
     Plan p = Plan(forward_model[0], backward_model[0], vec4(0.0), vec4(0.0));
-    if (!directions_agree(p.f, p.b)) {
+    if (tracked || !directions_agree(p.f, p.b)) {
         p.f.z = 0.0;
         p.b.z = 0.0;
     }
@@ -120,7 +184,7 @@ Plan plan()
 
 bool borrows_forward(Plan p)
 {
-    return push.has_past != 0 && no_layer(p.f, p.b) && measured_layer(p.pf, p.pb);
+    return push.has_past != 0 && !tracked && no_layer(p.f, p.b) && measured_layer(p.pf, p.pb);
 }
 
 bool may_lend_back(Plan p)
@@ -151,6 +215,7 @@ void main()
 {
     int lane = int(gl_LocalInvocationID.x);
     ivec2 cells = ivec2(push.cells_x, push.cells_y);
+    find_tracked(lane, cells);
     Plan p = plan();
     visible = false;
     if (may_lend_back(p)) {

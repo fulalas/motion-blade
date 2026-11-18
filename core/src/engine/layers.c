@@ -91,14 +91,20 @@ static void estimate_direction(mb_engine *engine, int direction)
 
 static void compare_directions(mb_engine *engine)
 {
+    const geometry *g = &engine->geo;
     pair_motion *m = pair_at(engine, 0);
     pair_motion *past = ready_pair(engine, 1);
+    int top_scale = 1 << (top_level(g) - g->base_level);
     mb_layer_pair_pass pass = {
         {m->layer_model[0], m->layer_model[1]},
         {past ? past->layer_model[0] : NULL, past ? past->layer_model[1] : NULL},
         {m->layer_field[0], m->layer_field[1]},
         {past ? past->layer_field[0] : NULL, past ? past->layer_field[1] : NULL},
-        layer_grid(&engine->geo),
+        {m->forward[g->base_level], m->backward[g->base_level]},
+        layer_grid(g),
+        g->grids[g->base_level],
+        MB_LAYER_CELL * top_scale / MB_BLOCK_SIZE,
+        1.0f / (float)top_scale,
         engine->params.layer.min_share,
     };
     engine->backend.ops->layer_pair(engine->backend.self, &pass);

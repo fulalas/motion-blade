@@ -297,6 +297,10 @@ REFERENCE_PASS(layer_evidence, mb_layer_evidence_pass)
 REFERENCE_PASS(layer_blur, mb_layer_blur_pass)
 REFERENCE_PASS(layer_guard, mb_layer_guard_pass)
 REFERENCE_PASS(layer_composite, mb_layer_composite_pass)
+REFERENCE_PASS(wipe_seeds, mb_wipe_seeds_pass)
+REFERENCE_PASS(wipe_index, mb_wipe_index_pass)
+REFERENCE_PASS(wipe_assign, mb_wipe_assign_pass)
+REFERENCE_PASS(wipe_composite, mb_wipe_composite_pass)
 
 static const mb_backend_ops CPU_OPS = {
     .destroy = cpu_destroy,
@@ -353,6 +357,10 @@ static const mb_backend_ops CPU_OPS = {
     .layer_blur = cpu_layer_blur,
     .layer_guard = cpu_layer_guard,
     .layer_composite = cpu_layer_composite,
+    .wipe_seeds = cpu_wipe_seeds,
+    .wipe_index = cpu_wipe_index,
+    .wipe_assign = cpu_wipe_assign,
+    .wipe_composite = cpu_wipe_composite,
 };
 
 mb_status mb_cpu_backend_create(mb_backend *backend)

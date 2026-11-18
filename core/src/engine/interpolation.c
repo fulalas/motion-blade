@@ -3,6 +3,7 @@
 #include "engine/geometry.h"
 #include "engine/layers.h"
 #include "engine/motion.h"
+#include "engine/wipes.h"
 
 typedef struct pair_fields {
     mb_buffer *forward;
@@ -310,5 +311,6 @@ void record_interpolation(mb_engine *engine, const pair_choice *pair, double t)
     split_blocks(&ctx);
     blend(&ctx);
     composite_layers(engine, pair, warp_of(&ctx));
+    composite_wipes(engine, pair, warp_of(&ctx));
     bridge_cut(&ctx);
 }

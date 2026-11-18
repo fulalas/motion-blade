@@ -4,6 +4,7 @@
 layout(push_constant) uniform Push { layer_composite_push push; };
 #include "layer.glsl"
 #include "chroma.glsl"
+#include "output.glsl"
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(binding = 0) uniform sampler2D a_luma;
@@ -146,16 +147,6 @@ float composed(float moved_a, float moved_b, float a, float b, float current)
     return front * quad.alpha + back * (1.0 - quad.alpha);
 }
 
-float output_value(float v)
-{
-#ifdef DEPTH16
-    v = min(v, push.max_value);
-    if (push.quant_step > 0.0) {
-        v = round(v / push.quant_step) * push.quant_step;
-    }
-#endif
-    return v;
-}
 
 void compose_luma(ivec2 p)
 {
@@ -171,14 +162,6 @@ void compose_luma(ivec2 p)
     imageStore(out_luma, p, vec4(output_value(value)));
 }
 
-vec2 chroma_fetch(sampler2D first, sampler2D second, ivec2 p)
-{
-#ifdef NV
-    return texelFetch(first, p, 0).rg;
-#else
-    return vec2(texelFetch(first, p, 0).r, texelFetch(second, p, 0).r);
-#endif
-}
 
 
 void compose_chroma(ivec2 p)

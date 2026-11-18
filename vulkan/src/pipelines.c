@@ -120,6 +120,28 @@ static const uint32_t SPV_LAYER_COMPOSITE_16_NV[] =
 #include "layer_composite16nv.spv.h"
     ;
 
+static const uint32_t SPV_WIPE_SEEDS[] =
+#include "wipe_seeds.spv.h"
+    ;
+static const uint32_t SPV_WIPE_INDEX[] =
+#include "wipe_index.spv.h"
+    ;
+static const uint32_t SPV_WIPE_ASSIGN[] =
+#include "wipe_assign.spv.h"
+    ;
+static const uint32_t SPV_WIPE_COMPOSITE_8[] =
+#include "wipe_composite8.spv.h"
+    ;
+static const uint32_t SPV_WIPE_COMPOSITE_16[] =
+#include "wipe_composite16.spv.h"
+    ;
+static const uint32_t SPV_WIPE_COMPOSITE_8_NV[] =
+#include "wipe_composite8nv.spv.h"
+    ;
+static const uint32_t SPV_WIPE_COMPOSITE_16_NV[] =
+#include "wipe_composite16nv.spv.h"
+    ;
+
 enum { MAX_BINDINGS = 32 };
 
 typedef struct pass_info {
@@ -135,6 +157,7 @@ typedef struct pass_info {
 #define INTERPOLATE_BINDINGS "SSSSSSBBBIIISSBBBBB"
 #define EXTRAPOLATE_BINDINGS "SSSSSSBBBIIISSBBSS"
 #define COMPOSITE_BINDINGS "SSSSSSIIIBBBBBBBB"
+#define WIPE_BINDINGS "SSSSSSIIIBB"
 
 static const pass_info PASSES[PASS_COUNT] = {
     [PASS_NORMALIZE] = {SPIRV(SPV_NORMALIZE), "SI", false, 0, "normalize"},
@@ -158,11 +181,14 @@ static const pass_info PASSES[PASS_COUNT] = {
     [PASS_BAR_FLAGS] = {SPIRV(SPV_BAR_FLAGS), "SSW", false, 0, "bar_flags"},
     [PASS_LAYER_SEARCH] = {SPIRV(SPV_LAYER_SEARCH), "SSBW", false, 1, "layer_search"},
     [PASS_LAYER_MODEL] = {SPIRV(SPV_LAYER_MODEL), "BWB", false, 1, "layer_model"},
-    [PASS_LAYER_PAIR] = {SPIRV(SPV_LAYER_PAIR), "WWWWWWWW", false, 1, "layer_pair"},
+    [PASS_LAYER_PAIR] = {SPIRV(SPV_LAYER_PAIR), "WWWWWWWWBB", false, 1, "layer_pair"},
     [PASS_LAYER_SMOOTH] = {SPIRV(SPV_LAYER_SMOOTH), "BBBW", false, 64, "layer_smooth"},
     [PASS_LAYER_EVIDENCE] = {SPIRV(SPV_LAYER_EVIDENCE), "SSSSBBBBBBWB", false, 0, "layer_evidence"},
     [PASS_LAYER_BLUR] = {SPIRV(SPV_LAYER_BLUR), "BWBBB", false, 0, "layer_blur"},
     [PASS_LAYER_GUARD] = {SPIRV(SPV_LAYER_GUARD), "SSSBBBWBB", false, 0, "layer_guard"},
+    [PASS_WIPE_SEEDS] = {SPIRV(SPV_WIPE_SEEDS), "SSSSWW", true, 0, "wipe_seeds"},
+    [PASS_WIPE_INDEX] = {SPIRV(SPV_WIPE_INDEX), "BBW", false, 0, "wipe_index"},
+    [PASS_WIPE_ASSIGN] = {SPIRV(SPV_WIPE_ASSIGN), "SSSSBWBW", false, 64, "wipe_assign"},
     [PASS_INTERPOLATE_8] = {SPIRV(SPV_INTERPOLATE_8), INTERPOLATE_BINDINGS, true, 0, "interpolate"},
     [PASS_INTERPOLATE_16] = {SPIRV(SPV_INTERPOLATE_16), INTERPOLATE_BINDINGS, true, 0, "interpolate"},
     [PASS_INTERPOLATE_8_NV] = {SPIRV(SPV_INTERPOLATE_8_NV), INTERPOLATE_BINDINGS, true, 0, "interpolate"},
@@ -175,6 +201,10 @@ static const pass_info PASSES[PASS_COUNT] = {
     [PASS_LAYER_COMPOSITE_16] = {SPIRV(SPV_LAYER_COMPOSITE_16), COMPOSITE_BINDINGS, false, 0, "layer_composite"},
     [PASS_LAYER_COMPOSITE_8_NV] = {SPIRV(SPV_LAYER_COMPOSITE_8_NV), COMPOSITE_BINDINGS, false, 0, "layer_composite"},
     [PASS_LAYER_COMPOSITE_16_NV] = {SPIRV(SPV_LAYER_COMPOSITE_16_NV), COMPOSITE_BINDINGS, false, 0, "layer_composite"},
+    [PASS_WIPE_COMPOSITE_8] = {SPIRV(SPV_WIPE_COMPOSITE_8), WIPE_BINDINGS, false, 0, "wipe_composite"},
+    [PASS_WIPE_COMPOSITE_16] = {SPIRV(SPV_WIPE_COMPOSITE_16), WIPE_BINDINGS, false, 0, "wipe_composite"},
+    [PASS_WIPE_COMPOSITE_8_NV] = {SPIRV(SPV_WIPE_COMPOSITE_8_NV), WIPE_BINDINGS, false, 0, "wipe_composite"},
+    [PASS_WIPE_COMPOSITE_16_NV] = {SPIRV(SPV_WIPE_COMPOSITE_16_NV), WIPE_BINDINGS, false, 0, "wipe_composite"},
 };
 
 static VkDescriptorType descriptor_type(char kind)
@@ -387,6 +417,7 @@ void pipelines_prepare(mbvk_backend *vk, const mb_video_format *format)
     ready_pipeline(vk, warp_variant(PASS_INTERPOLATE_8, interleaved, sixteen_bit));
     ready_pipeline(vk, warp_variant(PASS_EXTRAPOLATE_8, interleaved, sixteen_bit));
     ready_pipeline(vk, warp_variant(PASS_LAYER_COMPOSITE_8, interleaved, sixteen_bit));
+    ready_pipeline(vk, warp_variant(PASS_WIPE_COMPOSITE_8, interleaved, sixteen_bit));
 }
 
 uint32_t pipeline_groups(pass_id pass, int items)

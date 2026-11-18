@@ -31,6 +31,8 @@ typedef struct pair_motion {
     mb_buffer *stats;
     mb_buffer *layer_field[2];
     mb_buffer *layer_model[2];
+    mb_buffer *wipe_fronts;
+    mb_buffer *wipe_gate;
     bool ready;
 } pair_motion;
 
@@ -44,6 +46,8 @@ typedef struct motion_fields {
     mb_buffer *layer_scratch;
     mb_buffer *mask_evidence;
     mb_buffer *mask_scratch;
+    mb_buffer *wipe_seeds;
+    mb_buffer *wipe_nearest;
 } motion_fields;
 
 typedef struct selection_buffers {

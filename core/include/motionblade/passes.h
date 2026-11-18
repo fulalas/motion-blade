@@ -373,7 +373,11 @@ typedef struct mb_layer_pair_pass {
     mb_buffer *past[2];
     mb_buffer *fields[2];
     mb_buffer *past_fields[2];
+    mb_buffer *vectors[2];
     mb_layer_grid grid;
+    mb_grid blocks;
+    int cell_blocks;
+    float vector_scale;
     float min_share;
 } mb_layer_pair_pass;
 
@@ -448,6 +452,44 @@ typedef struct mb_layer_composite_pass {
     int top_scale;
     int mask_scale;
 } mb_layer_composite_pass;
+
+typedef struct mb_wipe_grid {
+    int cells_x;
+    int cells_y;
+    int width;
+    int height;
+} mb_wipe_grid;
+
+typedef struct mb_wipe_seeds_pass {
+    mb_image *frames[4];
+    mb_buffer *seeds;
+    mb_buffer *gate;
+    mb_wipe_grid grid;
+} mb_wipe_seeds_pass;
+
+typedef struct mb_wipe_index_pass {
+    mb_buffer *seeds;
+    mb_buffer *gate;
+    mb_buffer *nearest;
+    mb_wipe_grid grid;
+} mb_wipe_index_pass;
+
+typedef struct mb_wipe_assign_pass {
+    mb_image *frames[4];
+    mb_buffer *seeds;
+    mb_buffer *gate;
+    mb_buffer *nearest;
+    mb_buffer *fronts;
+    mb_wipe_grid grid;
+} mb_wipe_assign_pass;
+
+typedef struct mb_wipe_composite_pass {
+    mb_warp warp;
+    mb_buffer *fronts;
+    mb_buffer *gate;
+    mb_wipe_grid grid;
+    int texel_scale;
+} mb_wipe_composite_pass;
 
 typedef struct mb_extrapolate_pass {
     mb_warp warp;

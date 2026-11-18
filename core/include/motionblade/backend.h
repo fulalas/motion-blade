@@ -125,6 +125,10 @@ typedef struct mb_backend_ops {
     void (*layer_blur)(void *self, const mb_layer_blur_pass *pass);
     void (*layer_guard)(void *self, const mb_layer_guard_pass *pass);
     void (*layer_composite)(void *self, const mb_layer_composite_pass *pass);
+    void (*wipe_seeds)(void *self, const mb_wipe_seeds_pass *pass);
+    void (*wipe_index)(void *self, const mb_wipe_index_pass *pass);
+    void (*wipe_assign)(void *self, const mb_wipe_assign_pass *pass);
+    void (*wipe_composite)(void *self, const mb_wipe_composite_pass *pass);
 } mb_backend_ops;
 
 typedef struct mb_backend {

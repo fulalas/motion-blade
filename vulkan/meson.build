@@ -7,14 +7,14 @@ glslc_command = [glslc, '-O', '--target-env=vulkan1.1', '-mfmt=c', '-I', meson.p
 shader_names = ['bar_flags', 'chroma_offsets', 'cross_check', 'decide_cut', 'downsample', 'fallback', 'full_search',
   'global_motion', 'iterate_search', 'local_search', 'measure', 'median', 'normalize', 'offset_median', 'panel_spread',
   'panels', 'project', 'select', 'split', 'layer_search', 'layer_model', 'layer_pair', 'layer_smooth', 'layer_evidence', 'layer_blur',
-  'layer_guard']
+  'layer_guard', 'wipe_seeds', 'wipe_index', 'wipe_assign']
 
 shader_headers = []
 foreach name : shader_names
   shader_headers += custom_target(name + '.spv.h', input: 'shaders' / name + '.comp', output: name + '.spv.h',
     depfile: name + '.spv.h.d', command: glslc_command)
 endforeach
-foreach name : ['interpolate', 'extrapolate', 'layer_composite']
+foreach name : ['interpolate', 'extrapolate', 'layer_composite', 'wipe_composite']
   foreach variant : [['8', []], ['16', ['-DDEPTH16']], ['8nv', ['-DNV']], ['16nv', ['-DNV', '-DDEPTH16']]]
     shader_headers += custom_target(name + variant[0] + '.spv.h', input: 'shaders' / name + '.comp',
       output: name + variant[0] + '.spv.h', depfile: name + variant[0] + '.spv.h.d',

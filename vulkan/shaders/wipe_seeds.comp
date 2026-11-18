@@ -1,0 +1,208 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { wipe_push push; };
+#include "motionblade/layout.h"
+
+#define CELL MB_WIPE_CELL
+#define TEXELS (CELL * CELL)
+#define WINDOW (CELL + MB_WIPE_GAP + 1)
+#define MAX_SUBGROUPS 8
+#define SIDE_EARLIER 1
+#define SIDE_LATER 2
+#define SIDE_BOTH 3
+#define CHANGED_BEFORE 1u
+#define CHANGED_NOW 2u
+#define CHANGED_AFTER 4u
+
+layout(local_size_x = TEXELS) in;
+
+layout(binding = 0) uniform sampler2D before_luma;
+layout(binding = 1) uniform sampler2D from_luma;
+layout(binding = 2) uniform sampler2D to_luma;
+layout(binding = 3) uniform sampler2D after_luma;
+layout(std430, binding = 4) buffer Seeds { vec4 seeds[]; };
+layout(std430, binding = 5) buffer Gate { uint gate[]; };
+
+struct SeedSum {
+    vec2 position;
+    vec2 direction;
+    float count;
+    float outlined;
+};
+
+struct Parts {
+    vec4 old_sum;
+    vec4 new_sum;
+    vec4 counts;
+    vec3 changed;
+};
+
+shared uint changed[WINDOW * WINDOW];
+shared vec4 lumas[WINDOW * WINDOW];
+shared Parts parts[MAX_SUBGROUPS];
+
+void read_texel(ivec2 p, int i)
+{
+    bool inside = p.x < push.width && p.y < push.height;
+    ivec2 q = min(p, ivec2(push.width, push.height) - 1);
+    float before = texelFetch(before_luma, q, 0).r * 255.0;
+    float from = texelFetch(from_luma, q, 0).r * 255.0;
+    float to = texelFetch(to_luma, q, 0).r * 255.0;
+    float after = texelFetch(after_luma, q, 0).r * 255.0;
+    float limit = float(MB_WIPE_CHANGE);
+    uint bits = (abs(from - before) > limit ? CHANGED_BEFORE : 0u) | (abs(to - from) > limit ? CHANGED_NOW : 0u) |
+                (abs(after - to) > limit ? CHANGED_AFTER : 0u);
+    changed[i] = inside ? bits : 0u;
+    lumas[i] = inside ? vec4(before, from, to, after) : vec4(0.0);
+}
+
+int side_at(int kind, int i)
+{
+    return int((changed[i] >> uint(kind)) & 3u);
+}
+
+float shown(int kind, int i)
+{
+    return lumas[i][kind + 1];
+}
+
+bool is_lasting(int kind, int first, int last)
+{
+    vec4 step = abs(lumas[first] - lumas[last]);
+    return step[kind + 1] < float(MB_WIPE_MIN_STEP) || max(step[kind], step[kind + 2]) > float(MB_WIPE_LASTING) * step[kind + 1];
+}
+
+bool is_torn(int kind, int earlier, int later)
+{
+    float edge = abs(lumas[earlier][kind + 1] - lumas[later][kind + 1]);
+    return abs(lumas[earlier][1] - lumas[later][2]) > float(MB_WIPE_LASTING) * edge;
+}
+
+bool is_outlined(int kind, int first, int last, int stride)
+{
+    float lo = min(shown(kind, first), shown(kind, last)) - float(MB_WIPE_OUTLINE);
+    float hi = max(shown(kind, first), shown(kind, last)) + float(MB_WIPE_OUTLINE);
+    bool found = is_lasting(kind, first, last);
+    for (int i = first + stride; i != last; i += stride) {
+        found = found || shown(kind, i) < lo || shown(kind, i) > hi;
+    }
+    return found;
+}
+
+void find_front(int kind, ivec2 p, ivec2 step, vec2 start, inout SeedSum sum)
+{
+    int first = p.y * WINDOW + p.x;
+    int stride = step.y * WINDOW + step.x;
+    int side = side_at(kind, first);
+    if (side != SIDE_EARLIER && side != SIDE_LATER) {
+        return;
+    }
+    for (int gap = 0; gap <= MB_WIPE_GAP; gap++) {
+        int last = first + (gap + 1) * stride;
+        int other = side_at(kind, last);
+        if (other == SIDE_BOTH) {
+            continue;
+        }
+        if (other + side == SIDE_EARLIER + SIDE_LATER) {
+            bool forward = side == SIDE_EARLIER;
+            bool torn = is_torn(kind, forward ? first : last, forward ? last : first);
+            sum.position += start + 0.5 * float(gap + 1) * vec2(step);
+            sum.direction += (forward ? 1.0 : -1.0) * vec2(step);
+            sum.count += 1.0;
+            sum.outlined += torn || is_outlined(kind, first, last, stride) ? 1.0 : 0.0;
+        }
+        return;
+    }
+}
+
+float direction_code(vec2 d, float n, float bad)
+{
+    if (n < float(MB_WIPE_MIN_POINTS) || bad > float(MB_WIPE_MAX_OUTLINED) * n) {
+        return 0.0;
+    }
+    vec2 a = abs(d);
+    if (a.x + a.y < float(MB_WIPE_PURITY) * n) {
+        return 0.0;
+    }
+    if (a.x > 0.0 && a.x >= float(MB_WIPE_DOMINANCE) * a.y) {
+        return d.x > 0.0 ? 1.0 : -1.0;
+    }
+    if (a.y > 0.0 && a.y >= float(MB_WIPE_DOMINANCE) * a.x) {
+        return d.y > 0.0 ? 2.0 : -2.0;
+    }
+    return 0.0;
+}
+
+vec4 seed_of(vec4 sum, vec2 counts)
+{
+    return vec4(sum.xy / max(counts.x, 1.0), direction_code(sum.zw, counts.x, counts.y), 0.0);
+}
+
+SeedSum fronts_of(int kind, ivec2 w, vec2 start)
+{
+    SeedSum sum = SeedSum(vec2(0.0), vec2(0.0), 0.0, 0.0);
+    find_front(kind, w, ivec2(1, 0), start, sum);
+    find_front(kind, w, ivec2(0, 1), start, sum);
+    return sum;
+}
+
+Parts measure_texel(int k, ivec2 origin)
+{
+    ivec2 w = ivec2(k % CELL, k / CELL);
+    vec2 start = vec2(origin + w) + 0.5;
+    SeedSum old_fronts = fronts_of(MB_WIPE_OLD, w, start);
+    SeedSum new_fronts = fronts_of(MB_WIPE_NEW, w, start);
+    uint bits = changed[w.y * WINDOW + w.x];
+    return Parts(vec4(old_fronts.position, old_fronts.direction), vec4(new_fronts.position, new_fronts.direction),
+                 vec4(old_fronts.count, old_fronts.outlined, new_fronts.count, new_fronts.outlined),
+                 vec3(float(bits & 1u), float(bits >> 1u & 1u), float(bits >> 2u & 1u)));
+}
+
+void share_parts(Parts p)
+{
+    p.old_sum = subgroupAdd(p.old_sum);
+    p.new_sum = subgroupAdd(p.new_sum);
+    p.counts = subgroupAdd(p.counts);
+    p.changed = subgroupAdd(p.changed);
+    if (subgroupElect()) {
+        parts[gl_SubgroupID] = p;
+    }
+}
+
+void store_cell(int cell)
+{
+    Parts p = Parts(vec4(0.0), vec4(0.0), vec4(0.0), vec3(0.0));
+    for (uint k = 0u; k < gl_NumSubgroups; k++) {
+        p.old_sum += parts[k].old_sum;
+        p.new_sum += parts[k].new_sum;
+        p.counts += parts[k].counts;
+        p.changed += parts[k].changed;
+    }
+    vec4 old_seed = seed_of(p.old_sum, p.counts.xy);
+    vec4 new_seed = seed_of(p.new_sum, p.counts.zw);
+    seeds[MB_WIPE_SEED_VALUES * cell + MB_WIPE_OLD] = old_seed;
+    seeds[MB_WIPE_SEED_VALUES * cell + MB_WIPE_NEW] = new_seed;
+    seeds[MB_WIPE_SEED_VALUES * cell + MB_WIPE_CHANGES] = vec4(p.changed, 0.0);
+    if (old_seed.z != 0.0 || new_seed.z != 0.0) {
+        atomicAdd(gate[MB_WIPE_GATE_SEEDS], 1u);
+    }
+}
+
+void main()
+{
+    int lane = int(gl_LocalInvocationID.x);
+    ivec2 cell = ivec2(gl_WorkGroupID.xy);
+    ivec2 origin = cell * CELL;
+    for (int i = lane; i < WINDOW * WINDOW; i += TEXELS) {
+        read_texel(origin + ivec2(i % WINDOW, i / WINDOW), i);
+    }
+    barrier();
+    share_parts(measure_texel(lane, origin));
+    barrier();
+    if (lane == 0) {
+        store_cell(cell.y * push.cells_x + cell.x);
+    }
+}

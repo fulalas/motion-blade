@@ -33,6 +33,8 @@ PUSH_FITS(struct layer_evidence_push);
 PUSH_FITS(struct layer_blur_push);
 PUSH_FITS(struct layer_guard_push);
 PUSH_FITS(struct layer_composite_push);
+PUSH_FITS(struct wipe_push);
+PUSH_FITS(struct wipe_composite_push);
 
 static uint32_t tiles(int size)
 {
@@ -361,10 +363,12 @@ void vk_layer_model(void *self, const mb_layer_model_pass *pass)
 
 void vk_layer_pair(void *self, const mb_layer_pair_pass *pass)
 {
-    struct layer_pair_push push = {pass->past[0] != NULL, pass->grid.cells_x, pass->grid.cells_y, pass->min_share};
+    struct layer_pair_push push = {pass->past[0] != NULL, pass->grid.cells_x,   pass->grid.cells_y, pass->min_share,
+                                   pass->blocks.blocks_x, pass->blocks.blocks_y, pass->cell_blocks,  pass->vector_scale};
     binding b[] = {buffer(pass->models[0]),      buffer(pass->models[1]),      buffer(pass->past[0]),
                    buffer(pass->past[1]),        buffer(pass->fields[0]),      buffer(pass->fields[1]),
-                   buffer(pass->past_fields[0]), buffer(pass->past_fields[1])};
+                   buffer(pass->past_fields[0]), buffer(pass->past_fields[1]), buffer(pass->vectors[0]),
+                   buffer(pass->vectors[1])};
     over_items(self, (dispatch_desc){PASS_LAYER_PAIR, BINDINGS(b), PUSH(push)}, 1);
 }
 
@@ -430,5 +434,54 @@ void vk_layer_composite(void *self, const mb_layer_composite_pass *pass)
                    buffer(pass->models[0]),  buffer(pass->models[1]),    buffer(pass->masks[0]),
                    buffer(pass->masks[1]),   buffer(pass->guard)};
     pass_id variant = warp_variant(PASS_LAYER_COMPOSITE_8, w->chroma.interleaved, w->range.sixteen_bit);
+    over_quads(self, (dispatch_desc){variant, BINDINGS(b), PUSH(push)}, w);
+}
+
+static struct wipe_push wipe_constants(mb_wipe_grid g)
+{
+    return (struct wipe_push){g.width, g.height, g.cells_x, g.cells_y};
+}
+
+void vk_wipe_seeds(void *self, const mb_wipe_seeds_pass *pass)
+{
+    mb_wipe_grid g = pass->grid;
+    struct wipe_push push = wipe_constants(g);
+    binding b[] = {image(pass->frames[0]), image(pass->frames[1]), image(pass->frames[2]),
+                   image(pass->frames[3]), buffer(pass->seeds),    buffer(pass->gate)};
+    over_groups(self, (dispatch_desc){PASS_WIPE_SEEDS, BINDINGS(b), PUSH(push)}, (uint32_t)g.cells_x, (uint32_t)g.cells_y);
+}
+
+void vk_wipe_index(void *self, const mb_wipe_index_pass *pass)
+{
+    mb_wipe_grid g = pass->grid;
+    struct wipe_push push = wipe_constants(g);
+    binding b[] = {buffer(pass->seeds), buffer(pass->gate), buffer(pass->nearest)};
+    over_groups(self, (dispatch_desc){PASS_WIPE_INDEX, BINDINGS(b), PUSH(push)}, (uint32_t)(g.cells_x + g.cells_y), 1);
+}
+
+void vk_wipe_assign(void *self, const mb_wipe_assign_pass *pass)
+{
+    mb_wipe_grid g = pass->grid;
+    struct wipe_push push = wipe_constants(g);
+    binding b[] = {image(pass->frames[0]), image(pass->frames[1]), image(pass->frames[2]), image(pass->frames[3]),
+                   buffer(pass->seeds),    buffer(pass->gate),     buffer(pass->nearest),    buffer(pass->fronts)};
+    over_items(self, (dispatch_desc){PASS_WIPE_ASSIGN, BINDINGS(b), PUSH(push)}, g.cells_x * g.cells_y);
+}
+
+void vk_wipe_composite(void *self, const mb_wipe_composite_pass *pass)
+{
+    const mb_warp *w = &pass->warp;
+    const mb_chroma_layout *c = &w->chroma;
+    const mb_pair_planes *f = &w->frames;
+    const mb_frame_planes *o = &w->output;
+    struct wipe_composite_push push = {
+        w->width, w->height, c->width, c->height, c->shift_x, c->shift_y, pass->grid.cells_x, pass->grid.cells_y,
+        pass->texel_scale, w->t, w->range.max_value, w->range.step,
+    };
+    binding b[] = {image(f->a.luma),      image(f->b.luma),            image(f->a.chroma[0]),
+                   image(f->b.chroma[0]), image(second_chroma(&f->a)), image(second_chroma(&f->b)),
+                   image(o->luma),        image(o->chroma[0]),         image(second_chroma(o)),
+                   buffer(pass->fronts),  buffer(pass->gate)};
+    pass_id variant = warp_variant(PASS_WIPE_COMPOSITE_8, w->chroma.interleaved, w->range.sixteen_bit);
     over_quads(self, (dispatch_desc){variant, BINDINGS(b), PUSH(push)}, w);
 }

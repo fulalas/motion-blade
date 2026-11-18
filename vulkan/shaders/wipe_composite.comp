@@ -1,0 +1,120 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { wipe_composite_push push; };
+#include "motionblade/layout.h"
+#include "output.glsl"
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D a_luma;
+layout(binding = 1) uniform sampler2D b_luma;
+layout(binding = 2) uniform sampler2D a_chroma1;
+layout(binding = 3) uniform sampler2D b_chroma1;
+layout(binding = 4) uniform sampler2D a_chroma2;
+layout(binding = 5) uniform sampler2D b_chroma2;
+#ifdef DEPTH16
+layout(binding = 6, r16) uniform image2D out_luma;
+#ifdef NV
+layout(binding = 7, rg16) uniform image2D out_chroma1;
+#else
+layout(binding = 7, r16) uniform image2D out_chroma1;
+layout(binding = 8, r16) uniform image2D out_chroma2;
+#endif
+#else
+layout(binding = 6, r8) uniform image2D out_luma;
+#ifdef NV
+layout(binding = 7, rg8) uniform image2D out_chroma1;
+#else
+layout(binding = 7, r8) uniform image2D out_chroma1;
+layout(binding = 8, r8) uniform image2D out_chroma2;
+#endif
+#endif
+layout(std430, binding = 9) readonly buffer Fronts { vec4 fronts[]; };
+layout(std430, binding = 10) readonly buffer Gate { uint gate[]; };
+
+struct WipeCell {
+    vec4 lines;
+    float axis;
+};
+
+struct Switch {
+    float weight;
+    bool swept;
+};
+
+WipeCell cell_at(vec2 position)
+{
+    vec2 w = position / float(push.texel_scale * MB_WIPE_CELL);
+    ivec2 cell = clamp(ivec2(floor(w)), ivec2(0), ivec2(push.cells_x, push.cells_y) - 1);
+    int index = MB_WIPE_FRONT_VALUES * (cell.y * push.cells_x + cell.x);
+    return WipeCell(fronts[index], fronts[index + 1].x);
+}
+
+Switch switch_at(WipeCell cell, vec2 position)
+{
+    vec2 w = position / float(push.texel_scale);
+    bool rows = cell.axis < 1.5;
+    float along = rows ? w.x : w.y;
+    float lateral = rows ? w.y : w.x;
+    float from = cell.lines.x + cell.lines.y * lateral;
+    float span = cell.lines.z + cell.lines.w * lateral - from;
+    if (abs(span) < 1.0) {
+        return Switch(0.0, false);
+    }
+    float passed = (along - from) / span;
+    float weight = clamp((push.t - passed) * abs(span) * float(push.texel_scale) + 0.5, 0.0, 1.0);
+    return Switch(weight, passed >= 0.0 && passed <= 1.0);
+}
+
+void compose_luma(WipeCell cell, ivec2 p)
+{
+    if (p.x >= push.width || p.y >= push.height) {
+        return;
+    }
+    Switch s = switch_at(cell, vec2(p) + 0.5);
+    if (!s.swept) {
+        return;
+    }
+    float old = texelFetch(a_luma, p, 0).r;
+    imageStore(out_luma, p, vec4(output_value(mix(old, texelFetch(b_luma, p, 0).r, s.weight))));
+}
+
+void compose_chroma(WipeCell cell, ivec2 p)
+{
+    if (p.x >= push.chroma_width || p.y >= push.chroma_height) {
+        return;
+    }
+    Switch s = switch_at(cell, (vec2(p) + 0.5) * vec2(1 << push.shift_x, 1 << push.shift_y));
+    if (!s.swept) {
+        return;
+    }
+    vec2 old = chroma_fetch(a_chroma1, a_chroma2, p);
+    vec2 new = chroma_fetch(b_chroma1, b_chroma2, p);
+    vec2 value = vec2(output_value(mix(old.x, new.x, s.weight)), output_value(mix(old.y, new.y, s.weight)));
+#ifdef NV
+    imageStore(out_chroma1, p, vec4(value, 0.0, 0.0));
+#else
+    imageStore(out_chroma1, p, vec4(value.x));
+    imageStore(out_chroma2, p, vec4(value.y));
+#endif
+}
+
+void main()
+{
+    ivec2 q0 = ivec2(gl_GlobalInvocationID.xy) * 2;
+    if (q0.x >= push.width || q0.y >= push.height || gate[MB_WIPE_GATE_CELLS] < uint(MB_WIPE_MIN_CELLS)) {
+        return;
+    }
+    WipeCell cell = cell_at(vec2(q0) + 1.0);
+    if (cell.axis < 0.5) {
+        return;
+    }
+    for (int j = 0; j < 4; j++) {
+        compose_luma(cell, q0 + ivec2(j & 1, j >> 1));
+    }
+    for (int cy = 0; cy < (2 >> push.shift_y); cy++) {
+        for (int cx = 0; cx < (2 >> push.shift_x); cx++) {
+            compose_chroma(cell, (q0 >> ivec2(push.shift_x, push.shift_y)) + ivec2(cx, cy));
+        }
+    }
+}

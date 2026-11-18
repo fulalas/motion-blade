@@ -4,8 +4,10 @@
 
 #include "engine/geometry.h"
 #include "engine/layers.h"
+#include "engine/wipes.h"
 
 enum { FIELD_BYTES = 16, KEY_BYTES = 16, CELL_BYTES = 64, FLOAT_BYTES = 4, FLAG_BYTES = 8 };
+enum { SEED_BYTES = MB_WIPE_SEED_VALUES * 16, FRONT_BYTES = MB_WIPE_FRONT_VALUES * 16, GATE_BYTES = MB_WIPE_GATE_COUNT * 4 };
 enum { STATS_BYTES = MB_STAT_COUNT * 4, HISTORY_BYTES = MB_HIST_COUNT * 4, GLOBAL_BYTES = 16, MASK_BYTES = 8 };
 
 typedef struct allocator {
@@ -109,6 +111,8 @@ static void create_pair(allocator *a, pair_motion *m, const geometry *g)
         m->layer_field[direction] = new_buffer(a, layer_cells(g) * FIELD_BYTES);
         m->layer_model[direction] = new_buffer(a, FIELD_BYTES);
     }
+    m->wipe_fronts = new_buffer(a, wipe_cells(g) * FRONT_BYTES);
+    m->wipe_gate = new_buffer(a, GATE_BYTES);
     m->ready = false;
 }
 
@@ -127,6 +131,8 @@ static void create_fields(allocator *a, motion_fields *f, const geometry *g)
     f->layer_scratch = new_buffer(a, layer_cells(g) * FIELD_BYTES);
     f->mask_evidence = new_buffer(a, layer_mask_texels(g) * MASK_BYTES);
     f->mask_scratch = new_buffer(a, layer_mask_texels(g) * MASK_BYTES);
+    f->wipe_seeds = new_buffer(a, wipe_cells(g) * SEED_BYTES);
+    f->wipe_nearest = new_buffer(a, wipe_cells(g) * MB_WIPE_SLOTS * FLOAT_BYTES);
 }
 
 static void create_selection(allocator *a, selection_buffers *s, const geometry *g)
@@ -166,6 +172,8 @@ static void destroy_pair(const mb_backend *backend, pair_motion *m)
         free_buffer(backend, &m->layer_field[direction]);
         free_buffer(backend, &m->layer_model[direction]);
     }
+    free_buffer(backend, &m->wipe_fronts);
+    free_buffer(backend, &m->wipe_gate);
     m->ready = false;
 }
 
@@ -183,6 +191,8 @@ static void destroy_fields(const mb_backend *backend, motion_fields *f)
     free_buffer(backend, &f->layer_scratch);
     free_buffer(backend, &f->mask_evidence);
     free_buffer(backend, &f->mask_scratch);
+    free_buffer(backend, &f->wipe_seeds);
+    free_buffer(backend, &f->wipe_nearest);
 }
 
 static void destroy_selection(const mb_backend *backend, selection_buffers *s)

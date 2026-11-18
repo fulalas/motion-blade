@@ -31,5 +31,9 @@ void ref_layer_evidence(const mb_layer_evidence_pass *pass);
 void ref_layer_blur(const mb_layer_blur_pass *pass);
 void ref_layer_guard(const mb_layer_guard_pass *pass);
 void ref_layer_composite(const mb_layer_composite_pass *pass);
+void ref_wipe_seeds(const mb_wipe_seeds_pass *pass);
+void ref_wipe_index(const mb_wipe_index_pass *pass);
+void ref_wipe_assign(const mb_wipe_assign_pass *pass);
+void ref_wipe_composite(const mb_wipe_composite_pass *pass);
 
 #endif

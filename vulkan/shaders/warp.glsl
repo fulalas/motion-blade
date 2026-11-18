@@ -1,4 +1,5 @@
 #include "blocks.glsl"
+#include "output.glsl"
 
 layout(binding = 0) uniform sampler2D a_luma;
 layout(binding = 1) uniform sampler2D b_luma;
@@ -114,16 +115,6 @@ void quad_cubic(sampler2D T, vec2 pos, vec2 texel, out float o[4])
     }
 }
 
-float output_value(float v)
-{
-#ifdef DEPTH16
-    v = min(v, push.max_value);
-    if (push.quant_step > 0.0) {
-        v = round(v / push.quant_step) * push.quant_step;
-    }
-#endif
-    return v;
-}
 
 vec2 probed_vector(int field, int i);
 

@@ -2,6 +2,7 @@
 
 #include "engine/geometry.h"
 #include "engine/layers.h"
+#include "engine/wipes.h"
 
 typedef struct direction_frames {
     int origin;
@@ -298,5 +299,6 @@ mb_status run_motion(mb_engine *engine)
     decide_cut(engine);
     estimate_layers(engine);
     pair_at(engine, 0)->ready = true;
+    estimate_wipes(engine);
     return MB_SUCCESS;
 }

@@ -289,6 +289,10 @@ struct layer_pair_push {
     int32_t cells_x;
     int32_t cells_y;
     float min_share;
+    int32_t blocks_x;
+    int32_t blocks_y;
+    int32_t cell_blocks;
+    float vector_scale;
 };
 
 struct layer_smooth_push {
@@ -339,6 +343,28 @@ struct layer_composite_push {
     int32_t mask_height;
     int32_t top_scale;
     int32_t mask_scale;
+    float t;
+    float max_value;
+    float quant_step;
+};
+
+struct wipe_push {
+    int32_t width;
+    int32_t height;
+    int32_t cells_x;
+    int32_t cells_y;
+};
+
+struct wipe_composite_push {
+    int32_t width;
+    int32_t height;
+    int32_t chroma_width;
+    int32_t chroma_height;
+    int32_t shift_x;
+    int32_t shift_y;
+    int32_t cells_x;
+    int32_t cells_y;
+    int32_t texel_scale;
     float t;
     float max_value;
     float quant_step;

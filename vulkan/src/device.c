@@ -171,10 +171,11 @@ static VkPhysicalDeviceSubgroupSizeControlFeaturesEXT own_subgroup_features(VkPh
 static mb_status choose_subgroup_size(mbvk_backend *vk, const extension_support *ext, const char *name)
 {
     subgroup_info info = query_subgroups(vk->physical_device, ext->subgroup_control);
-    VkSubgroupFeatureFlags need = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_CLUSTERED_BIT;
+    VkSubgroupFeatureFlags need =
+        VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_CLUSTERED_BIT;
     bool compute = (info.basic.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
     if ((info.basic.supportedOperations & need) != need || !compute) {
-        mb_log(&vk->logger, MB_LOG_WARNING, "%s lacks clustered subgroup operations", name);
+        mb_log(&vk->logger, MB_LOG_WARNING, "%s lacks arithmetic or clustered subgroup operations", name);
         return MB_ERROR_UNSUPPORTED;
     }
     bool full = false;

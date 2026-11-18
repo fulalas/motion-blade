@@ -105,6 +105,10 @@ typedef struct mb_layer_params {
     float min_share;
 } mb_layer_params;
 
+typedef struct mb_wipe_params {
+    int enabled;
+} mb_wipe_params;
+
 typedef struct mb_framing_params {
     int crop_bars;
     int settle_frames;
@@ -118,6 +122,7 @@ typedef struct mb_params {
     mb_blend_params blend;
     mb_panel_params panel;
     mb_layer_params layer;
+    mb_wipe_params wipe;
     mb_framing_params framing;
 } mb_params;
 

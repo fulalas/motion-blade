@@ -1,0 +1,65 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "push_constants.h"
+layout(push_constant) uniform Push { wipe_push push; };
+#include "motionblade/layout.h"
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Seeds { vec4 seeds[]; };
+layout(std430, binding = 1) readonly buffer Gate { uint gate[]; };
+layout(std430, binding = 2) writeonly buffer Nearest { int nearest[]; };
+
+#include "wipe.glsl"
+
+shared float codes[2][MB_WIPE_MAX_LINE];
+shared int found[MB_WIPE_SLOTS / 2][MB_WIPE_MAX_LINE];
+
+int cell_of(int axis, int line, int along)
+{
+    return axis == 0 ? line * push.cells_x + along : along * push.cells_x + line;
+}
+
+void sweep(int axis, int length, int index)
+{
+    int kind = index / 2;
+    bool positive = (index & 1) != 0;
+    float code = (positive ? 1.0 : -1.0) * float(axis + 1);
+    int step = (kind == MB_WIPE_NEW) == positive ? 1 : -1;
+    int seen = -1;
+    for (int i = 0; i < length; i++) {
+        int along = step > 0 ? length - 1 - i : i;
+        if (codes[kind][along] == code) {
+            seen = along;
+        }
+        found[index][along] = seen >= 0 && abs(seen - along) <= MB_WIPE_RANGE ? seen : -1;
+    }
+}
+
+void main()
+{
+    int lane = int(gl_LocalInvocationID.x);
+    int group = int(gl_WorkGroupID.x);
+    int axis = group < push.cells_y ? 0 : 1;
+    int line = axis == 0 ? group : group - push.cells_y;
+    int length = axis == 0 ? push.cells_x : push.cells_y;
+    if (gate[MB_WIPE_GATE_SEEDS] == 0u) {
+        return;
+    }
+    for (int along = lane; along < length; along += 64) {
+        int cell = cell_of(axis, line, along);
+        codes[MB_WIPE_OLD][along] = seeds[MB_WIPE_SEED_VALUES * cell + MB_WIPE_OLD].z;
+        codes[MB_WIPE_NEW][along] = seeds[MB_WIPE_SEED_VALUES * cell + MB_WIPE_NEW].z;
+    }
+    barrier();
+    if (lane < MB_WIPE_SLOTS / 2) {
+        sweep(axis, length, lane);
+    }
+    barrier();
+    for (int along = lane; along < length; along += 64) {
+        int cell = cell_of(axis, line, along);
+        for (int index = 0; index < MB_WIPE_SLOTS / 2; index++) {
+            nearest[MB_WIPE_SLOTS * cell + wipe_slot(index / 2, axis, (index & 1) != 0)] = found[index][along];
+        }
+    }
+}
