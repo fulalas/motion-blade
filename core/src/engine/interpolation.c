@@ -183,7 +183,7 @@ static void find_panels(const pass_context *ctx)
     mb_global_motion_pass global = {ctx->selection, e->sel.global_motion, base_grid(ctx)};
     b->ops->global_motion(b->self, &global);
     mb_panel_pass panels = {
-        pair_planes(ctx), e->sel.panel_flags, e->sel.global_motion, base_grid(ctx), e->geo.format.width,
+        pair_planes(ctx), e->sel.panel_flags, e->sel.global_motion, ctx->selection, base_grid(ctx), e->geo.format.width,
         e->geo.format.height, e->geo.chroma, e->geo.base_level, ctx->t, 255.0f * geometry_luma_scale(&e->geo),
         p->change_lo, p->change_hi, p->flat, geometry_chroma_mid(&e->geo), p->saturation,
     };

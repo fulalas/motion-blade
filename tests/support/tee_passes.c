@@ -224,6 +224,7 @@ static void tee_panels(void *self, const mb_panel_pass *pass)
         p.frames = pair_side(pass->frames, side);
         p.flags = BUFFER(pass->flags);
         p.global_motion = BUFFER(pass->global_motion);
+        p.selection = BUFFER(pass->selection);
         OPS(t, side)->panels(SELF(t, side), &p);
     }
     check_buffer(t, "panels", pass->flags, COMPARE_FLOATS);

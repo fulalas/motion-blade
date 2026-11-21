@@ -71,19 +71,29 @@ static void probe(const mb_panel_pass *pass, panel_probe *acc, vec2 p, vec2 u)
     acc->luma_hi = v2(fmaxf(acc->luma_hi.x, a), fmaxf(acc->luma_hi.y, b));
 }
 
-static vec2 panel_flag(const mb_panel_pass *pass, int id)
+static panel_probe probe_block(const mb_panel_pass *pass, vec2 corner, float m, vec2 u)
 {
-    float m = (float)(1 << pass->base_level);
-    vec2 u = v2_scale(v4_xy(vec4s(pass->global_motion)[0]), m);
-    ivec2 block = block_coord(id, pass->grid);
-    vec2 corner = block_corner(block, m);
     panel_probe acc = {0.0f, 0.0f, 0.0f, v2(1e30f, 1e30f), v2(-1e30f, -1e30f)};
     for (int k = 0; k < PROBES; k++) {
         vec2 grid = v2_add(v2_scale(v2((float)(k % 3), (float)(k / 3)), 3.0f), v2(1.0f, 1.0f));
         probe(pass, &acc, v2_add(corner, v2_scale(grid, m)), u);
     }
+    return acc;
+}
+
+static vec2 panel_flag(const mb_panel_pass *pass, int id)
+{
+    float m = (float)(1 << pass->base_level);
+    vec2 u = v2_scale(v4_xy(vec4s(pass->global_motion)[0]), m);
+    vec2 own = v2_scale(v4_xy(vec4s(pass->selection)[id]), m);
+    ivec2 block = block_coord(id, pass->grid);
+    vec2 corner = block_corner(block, m);
+    panel_probe acc = probe_block(pass, corner, m, u);
     float scale = pass->level_scale;
     float change = acc.chroma_change / 9.0f * scale;
+    if (change > pass->change_lo) {
+        change = fminf(change, probe_block(pass, corner, m, own).chroma_change / 9.0f * scale);
+    }
     float luma_range = fmaxf(acc.luma_hi.x - acc.luma_lo.x, acc.luma_hi.y - acc.luma_lo.y) * scale;
     float flat = 1.0f - smoothstepf(pass->flat * 0.5f, pass->flat, luma_range);
     float saturated = smoothstepf(pass->saturation * 0.5f, pass->saturation,

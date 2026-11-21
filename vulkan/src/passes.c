@@ -253,7 +253,7 @@ void vk_panels(void *self, const mb_panel_pass *pass)
     const mb_pair_planes *f = &pass->frames;
     binding b[] = {image(f->a.luma),           image(f->b.luma),           image(f->a.chroma[0]),
                    image(f->b.chroma[0]),      image(second_chroma(&f->a)), image(second_chroma(&f->b)),
-                   buffer(pass->flags),        buffer(pass->global_motion)};
+                   buffer(pass->flags),        buffer(pass->global_motion), buffer(pass->selection)};
     over_items(self, (dispatch_desc){PASS_PANELS, BINDINGS(b), PUSH(push)}, mb_grid_block_count(pass->grid));
 }
 

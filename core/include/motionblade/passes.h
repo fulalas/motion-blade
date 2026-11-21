@@ -242,6 +242,7 @@ typedef struct mb_panel_pass {
     mb_pair_planes frames;
     mb_buffer *flags;
     mb_buffer *global_motion;
+    mb_buffer *selection;
     mb_grid grid;
     int width;
     int height;
