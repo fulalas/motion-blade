@@ -43,6 +43,7 @@ typedef struct motion_fields {
     mb_buffer *history;
     mb_buffer *cross_keys;
     mb_buffer *layer_raw;
+    mb_buffer *layer_distinct;
     mb_buffer *layer_scratch;
     mb_buffer *mask_evidence;
     mb_buffer *mask_scratch;

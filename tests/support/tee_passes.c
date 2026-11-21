@@ -312,9 +312,11 @@ static void tee_layer_search(void *self, const mb_layer_search_pass *pass)
         p.target = IMAGE(pass->target);
         p.model = BUFFER(pass->model);
         p.raw = BUFFER(pass->raw);
+        p.distinct = BUFFER(pass->distinct);
         OPS(t, side)->layer_search(SELF(t, side), &p);
     }
     check_buffer(t, "layer_search", pass->raw, COMPARE_FIELD);
+    check_buffer(t, "layer_distinct", pass->distinct, COMPARE_FLOATS);
 }
 
 static void tee_layer_model(void *self, const mb_layer_model_pass *pass)
@@ -323,6 +325,7 @@ static void tee_layer_model(void *self, const mb_layer_model_pass *pass)
     for (int side = 0; side < SIDES; side++) {
         mb_layer_model_pass p = *pass;
         p.raw = BUFFER(pass->raw);
+        p.distinct = BUFFER(pass->distinct);
         p.model = BUFFER(pass->model);
         p.previous = BUFFER(pass->previous);
         OPS(t, side)->layer_model(SELF(t, side), &p);

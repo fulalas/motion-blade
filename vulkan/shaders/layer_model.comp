@@ -8,6 +8,7 @@ layout(local_size_x = MB_LAYER_MODEL_LANES) in;
 layout(std430, binding = 0) readonly buffer Raw { vec4 raw[]; };
 layout(std430, binding = 1) writeonly buffer Model { vec4 model[]; };
 layout(std430, binding = 2) readonly buffer Previous { vec4 previous[]; };
+layout(std430, binding = 3) readonly buffer Distinct { float distinct[]; };
 
 #define LANES MB_LAYER_MODEL_LANES
 #define ROUNDS 3
@@ -125,7 +126,7 @@ vec4 vote(vec2 m, float mean, bool steady)
         float agreeing = agreeing_weight(raw[i], m);
         bool counted = counts_in_vote(i, m, steady, agreeing);
         part += vec4(abs(raw[i].w - mean) <= float(MB_LAYER_LIGHT_BAND) ? 1.0 : 0.0, counted ? agreeing : 0.0,
-                     counted ? raw[i].z : 0.0, 0.0);
+                     counted ? raw[i].z : 0.0, agreeing > 0.0 ? distinct[i] : 0.0);
     }
     return reduce(part);
 }
@@ -136,13 +137,14 @@ bool light_changed(float mean, float steady_share, float band_share)
            band_share >= float(MB_LAYER_LIGHT_SHARE);
 }
 
-bool is_layer(vec2 m, float share, float agreement)
+bool is_layer(vec2 m, float share, float distinct_share, float agreement)
 {
     bool kept = push.has_previous != 0 && previous[0].z > 0.5;
+    float measured_share = kept ? share : distinct_share;
     float min_length = kept ? float(MB_LAYER_KEEP_MIN_LENGTH) : float(MB_LAYER_MODEL_MIN_LENGTH);
     float min_share = kept ? push.min_share * float(MB_LAYER_KEEP_SHARE) : push.min_share;
     float min_agreement = kept ? float(MB_LAYER_KEEP_CONSENSUS) : float(MB_LAYER_MIN_CONSENSUS);
-    return share >= min_share && l1(m) >= min_length && agreement >= min_agreement && layer_inside_search(m);
+    return measured_share >= min_share && l1(m) >= min_length && agreement >= min_agreement && layer_inside_search(m);
 }
 
 void main()
@@ -158,8 +160,9 @@ void main()
     float mean = t.w / float(cell_count);
     vec4 votes = vote(m, mean, steady_share >= float(MB_LAYER_VOTE_STEADY));
     float share = t.x / float(cell_count);
+    float distinct_share = votes.w / float(cell_count);
     if (lane == 0) {
-        bool enabled = is_layer(m, share, votes.y / max(votes.z, 1e-6)) &&
+        bool enabled = is_layer(m, share, distinct_share, votes.y / max(votes.z, 1e-6)) &&
                        !light_changed(mean, steady_share, votes.x / float(cell_count));
         model[0] = vec4(m, enabled ? 1.0 : 0.0, share);
     }

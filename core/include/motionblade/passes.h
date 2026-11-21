@@ -356,12 +356,14 @@ typedef struct mb_layer_search_pass {
     mb_image *target;
     mb_buffer *model;
     mb_buffer *raw;
+    mb_buffer *distinct;
     mb_layer_grid grid;
     float pull;
 } mb_layer_search_pass;
 
 typedef struct mb_layer_model_pass {
     mb_buffer *raw;
+    mb_buffer *distinct;
     mb_buffer *model;
     mb_buffer *previous;
     mb_layer_grid grid;

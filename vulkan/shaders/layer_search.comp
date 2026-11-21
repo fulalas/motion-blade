@@ -12,6 +12,7 @@ layout(binding = 0) uniform sampler2D origin;
 layout(binding = 1) uniform sampler2D target;
 layout(std430, binding = 2) readonly buffer Model { vec4 model[]; };
 layout(std430, binding = 3) writeonly buffer Raw { vec4 raw[]; };
+layout(std430, binding = 4) writeonly buffer Distinct { float distinct[]; };
 
 #define TAPS (MB_LAYER_WINDOW_TAPS * MB_LAYER_WINDOW_TAPS)
 #define REACH (MB_LAYER_WINDOW_TAPS - 1)
@@ -19,11 +20,13 @@ layout(std430, binding = 3) writeonly buffer Raw { vec4 raw[]; };
 #define TILE_X (TILE_SPAN + MB_LAYER_CELL * (ROW - 1))
 #define TILE_Y (2 * (MB_LAYER_RANGE_Y + REACH + 1) + 1)
 #define CANDIDATES (MB_LAYER_ROWS * MB_LAYER_COLUMNS)
+#define SLOW_SPAN (2 * MB_LAYER_SLOW_REACH + 1)
 
 shared float tile[TILE_X * TILE_Y];
 shared float origin_taps[ROW][TAPS];
 shared float lane_cost[THREADS];
 shared int lane_index[THREADS];
+shared float lane_slow[THREADS];
 
 int column;
 int lane;
@@ -102,7 +105,16 @@ void search_coarse(int thread)
     }
     lane_cost[thread] = lowest;
     lane_index[thread] = index;
-    barrier();
+}
+
+void search_slow(int thread)
+{
+    float slow = 1e30;
+    for (int c = lane; c < SLOW_SPAN * SLOW_SPAN; c += LANES) {
+        ivec2 v = ivec2(c % SLOW_SPAN, c / SLOW_SPAN) - MB_LAYER_SLOW_REACH;
+        slow = complete(v) ? min(slow, full_sad(v)) : slow;
+    }
+    lane_slow[thread] = slow;
 }
 
 bool beats(int a, int b)
@@ -141,12 +153,25 @@ vec2 measure_still()
     return vec2(sum / max(count, 1e-6) * 255.0, other / max(own, 1e-4));
 }
 
+float slow_sad(int base, float zero)
+{
+    float lowest = zero;
+    for (int k = 0; k < LANES; k++) {
+        lowest = min(lowest, lane_slow[base + k]);
+    }
+    return lowest;
+}
+
+bool moves(bool found, ivec2 v, float sad, float reference)
+{
+    return found && sad < float(MB_LAYER_MAX_RATIO) * reference && reference - sad > float(MB_LAYER_MIN_GAIN) &&
+           l1(vec2(v)) >= float(MB_LAYER_MIN_LENGTH);
+}
+
 vec4 raw_vector(bool found, ivec2 v, float sad, vec2 still)
 {
     float zero = still.x;
-    bool moving = found && sad < float(MB_LAYER_MAX_RATIO) * zero && zero - sad > float(MB_LAYER_MIN_GAIN) &&
-                  abs(v.x) + abs(v.y) >= MB_LAYER_MIN_LENGTH;
-    float weight = moving ? clamp(zero - sad, 0.0, float(MB_LAYER_MAX_GAIN)) : 0.0;
+    float weight = moves(found, v, sad, zero) ? clamp(zero - sad, 0.0, float(MB_LAYER_MAX_GAIN)) : 0.0;
     return vec4(vec2(v), weight, still.y);
 }
 
@@ -177,7 +202,10 @@ void search_fine(int thread, int base, bool valid, int id)
                 any = true;
             }
         }
-        raw[id] = raw_vector(any, pick, any ? full_sad(pick) : 0.0, measure_still());
+        float sad = any ? full_sad(pick) : 0.0;
+        vec2 still = measure_still();
+        raw[id] = raw_vector(any, pick, sad, still);
+        distinct[id] = moves(any, pick, sad, slow_sad(base, still.x)) ? 1.0 : 0.0;
     }
 }
 
@@ -196,6 +224,8 @@ void main()
     pull = push.has_model != 0 ? push.pull : 0.0;
     load(thread, first_center);
     search_coarse(thread);
+    search_slow(thread);
+    barrier();
     reduce_lanes(thread);
     search_fine(thread, column * LANES, first + column < push.cells_x, cell_y * push.cells_x + first + column);
 }

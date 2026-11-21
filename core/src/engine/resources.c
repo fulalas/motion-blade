@@ -128,6 +128,7 @@ static void create_fields(allocator *a, motion_fields *f, const geometry *g)
     f->history = new_buffer(a, HISTORY_BYTES);
     f->cross_keys = new_buffer(a, blocks * KEY_BYTES);
     f->layer_raw = new_buffer(a, layer_cells(g) * FIELD_BYTES);
+    f->layer_distinct = new_buffer(a, layer_cells(g) * FLOAT_BYTES);
     f->layer_scratch = new_buffer(a, layer_cells(g) * FIELD_BYTES);
     f->mask_evidence = new_buffer(a, layer_mask_texels(g) * MASK_BYTES);
     f->mask_scratch = new_buffer(a, layer_mask_texels(g) * MASK_BYTES);
@@ -188,6 +189,7 @@ static void destroy_fields(const mb_backend *backend, motion_fields *f)
     free_buffer(backend, &f->history);
     free_buffer(backend, &f->cross_keys);
     free_buffer(backend, &f->layer_raw);
+    free_buffer(backend, &f->layer_distinct);
     free_buffer(backend, &f->layer_scratch);
     free_buffer(backend, &f->mask_evidence);
     free_buffer(backend, &f->mask_scratch);

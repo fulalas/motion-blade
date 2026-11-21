@@ -47,8 +47,9 @@ static bool layers_enabled(const mb_engine *engine)
 static void fit_model(mb_engine *engine, int direction, mb_buffer *model)
 {
     const pair_motion *past = ready_pair(engine, 1);
-    mb_layer_model_pass pass = {engine->fields.layer_raw, model, past ? past->layer_model[direction] : NULL,
-                                layer_grid(&engine->geo), engine->params.layer.min_share};
+    mb_layer_model_pass pass = {engine->fields.layer_raw, engine->fields.layer_distinct, model,
+                                past ? past->layer_model[direction] : NULL, layer_grid(&engine->geo),
+                                engine->params.layer.min_share};
     engine->backend.ops->layer_model(engine->backend.self, &pass);
 }
 
@@ -62,7 +63,7 @@ static void search_layer(mb_engine *engine, int direction, mb_buffer *model)
     mb_layer_search_pass pass = {
         level_image(engine, direction ? newest : previous, top_level(g)),
         level_image(engine, direction ? previous : newest, top_level(g)), guide, engine->fields.layer_raw,
-        layer_grid(g), engine->params.layer.pull,
+        engine->fields.layer_distinct, layer_grid(g), engine->params.layer.pull,
     };
     engine->backend.ops->layer_search(engine->backend.self, &pass);
     fit_model(engine, direction, model);

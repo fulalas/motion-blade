@@ -6,6 +6,7 @@ enum { LANES = MB_LAYER_MODEL_LANES, ROUNDS = 3 };
 
 typedef struct cell_query {
     const vec4 *raw;
+    const float *distinct;
     mb_layer_grid grid;
     vec2 model;
     float tolerance;
@@ -107,7 +108,7 @@ static vec4 vote_term(int cell, const cell_query *q)
     float agreeing = agreeing_weight(raw, q->model);
     bool counted = counts_in_vote(q, cell, agreeing);
     return (vec4){fabsf(raw.w - q->mean_gain) <= (float)MB_LAYER_LIGHT_BAND ? 1.0f : 0.0f, counted ? agreeing : 0.0f,
-                  counted ? raw.z : 0.0f, 0.0f};
+                  counted ? raw.z : 0.0f, agreeing > 0.0f ? q->distinct[cell] : 0.0f};
 }
 
 static vec2 best_supported(const vec4 *raw, int cells)
@@ -145,19 +146,21 @@ static bool inside_search(vec2 model)
     return fabsf(model.x) <= (float)MB_LAYER_RANGE_X - margin && fabsf(model.y) <= (float)MB_LAYER_RANGE_Y - margin;
 }
 
-static bool is_layer(const mb_layer_model_pass *pass, vec2 model, float share, float agreement)
+static bool is_layer(const mb_layer_model_pass *pass, vec2 model, float share, float distinct_share, float agreement)
 {
     bool kept = layer_is_active(pass->previous);
+    float measured_share = kept ? share : distinct_share;
     float min_length = kept ? (float)MB_LAYER_KEEP_MIN_LENGTH : (float)MB_LAYER_MODEL_MIN_LENGTH;
     float min_share = kept ? pass->min_share * (float)MB_LAYER_KEEP_SHARE : pass->min_share;
     float min_agreement = kept ? (float)MB_LAYER_KEEP_CONSENSUS : (float)MB_LAYER_MIN_CONSENSUS;
-    return share >= min_share && v2_l1(model) >= min_length && agreement >= min_agreement && inside_search(model);
+    return measured_share >= min_share && v2_l1(model) >= min_length && agreement >= min_agreement &&
+           inside_search(model);
 }
 
 void ref_layer_model(const mb_layer_model_pass *pass)
 {
     static const float TOLERANCES[ROUNDS] = {4.0f, 2.0f, 2.0f};
-    cell_query q = {.raw = vec4s(pass->raw), .grid = pass->grid};
+    cell_query q = {.raw = vec4s(pass->raw), .distinct = floats(pass->distinct), .grid = pass->grid};
     int cells = cell_count(q.grid);
     vec2 model = best_supported(q.raw, cells);
     q.model = model;
@@ -171,7 +174,8 @@ void ref_layer_model(const mb_layer_model_pass *pass)
     q.steady = steady_share >= (float)MB_LAYER_VOTE_STEADY;
     vec4 vote = lane_total(vote_term, &q);
     float share = t.x / (float)cells;
-    bool active = is_layer(pass, model, share, vote.y / fmaxf(vote.z, 1e-6f)) &&
+    float distinct_share = vote.w / (float)cells;
+    bool active = is_layer(pass, model, share, distinct_share, vote.y / fmaxf(vote.z, 1e-6f)) &&
                   !light_changed(q.mean_gain, steady_share, vote.x / (float)cells);
     vec4s(pass->model)[0] = (vec4){model.x, model.y, active ? 1.0f : 0.0f, share};
 }

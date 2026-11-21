@@ -348,7 +348,8 @@ void vk_layer_search(void *self, const mb_layer_search_pass *pass)
 {
     mb_layer_grid g = pass->grid;
     struct layer_search_push push = {g.cells_x, g.cells_y, g.width, g.height, pass->model != NULL, pass->pull};
-    binding b[] = {image(pass->origin), image(pass->target), buffer(pass->model), buffer(pass->raw)};
+    binding b[] = {image(pass->origin), image(pass->target), buffer(pass->model), buffer(pass->raw),
+                   buffer(pass->distinct)};
     int groups_x = (g.cells_x + MB_LAYER_SEARCH_ROW - 1) / MB_LAYER_SEARCH_ROW;
     over_items(self, (dispatch_desc){PASS_LAYER_SEARCH, BINDINGS(b), PUSH(push)}, groups_x * g.cells_y);
 }
@@ -357,7 +358,7 @@ void vk_layer_model(void *self, const mb_layer_model_pass *pass)
 {
     mb_layer_grid g = pass->grid;
     struct layer_model_push push = {g.cells_x, g.cells_y, g.width, g.height, pass->min_share, pass->previous != NULL};
-    binding b[] = {buffer(pass->raw), buffer(pass->model), buffer(pass->previous)};
+    binding b[] = {buffer(pass->raw), buffer(pass->model), buffer(pass->previous), buffer(pass->distinct)};
     over_items(self, (dispatch_desc){PASS_LAYER_MODEL, BINDINGS(b), PUSH(push)}, 1);
 }
 

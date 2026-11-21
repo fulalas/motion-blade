@@ -41,6 +41,7 @@ static const expectation EXPECTED[] = {
     {"interpolate_chroma", 0.99, 2.0},
     {"output_cut", 1.0, 0.0},
     {"layer_search", 0.99, 0.1},
+    {"layer_distinct", 0.99, 0.0},
     {"layer_model", 0.99, 0.05},
     {"layer_pair", 0.99, 0.05},
     {"layer_smooth", 0.99, 0.05},

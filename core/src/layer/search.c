@@ -106,12 +106,28 @@ static still_cell measure_still(const search_cell *cell)
     return (still_cell){sum / fmaxf(count, 1e-6f) * 255.0f, other / fmaxf(own, 1e-4f)};
 }
 
+static float slow_sad(const search_cell *cell, float zero)
+{
+    float lowest = zero;
+    for (int y = -MB_LAYER_SLOW_REACH; y <= MB_LAYER_SLOW_REACH; y++) {
+        for (int x = -MB_LAYER_SLOW_REACH; x <= MB_LAYER_SLOW_REACH; x++) {
+            candidate_cost c = cost_of(cell, v2((float)x, (float)y));
+            lowest = c.complete ? fminf(lowest, c.sad) : lowest;
+        }
+    }
+    return lowest;
+}
+
+static bool moves(const search_best *best, float reference)
+{
+    return best->found && best->sad < (float)MB_LAYER_MAX_RATIO * reference &&
+           reference - best->sad > (float)MB_LAYER_MIN_GAIN && v2_l1(best->vector) >= (float)MB_LAYER_MIN_LENGTH;
+}
+
 static vec4 raw_vector(const search_best *best, still_cell still)
 {
     float zero = still.sad;
-    bool moving = best->found && best->sad < (float)MB_LAYER_MAX_RATIO * zero &&
-                  zero - best->sad > (float)MB_LAYER_MIN_GAIN && v2_l1(best->vector) >= (float)MB_LAYER_MIN_LENGTH;
-    float weight = moving ? clampf(zero - best->sad, 0.0f, (float)MB_LAYER_MAX_GAIN) : 0.0f;
+    float weight = moves(best, zero) ? clampf(zero - best->sad, 0.0f, (float)MB_LAYER_MAX_GAIN) : 0.0f;
     return (vec4){best->vector.x, best->vector.y, weight, still.gain};
 }
 
@@ -119,6 +135,7 @@ void ref_layer_search(const mb_layer_search_pass *pass)
 {
     mb_layer_grid g = pass->grid;
     vec4 *raw = vec4s(pass->raw);
+    float *distinct = floats(pass->distinct);
     search_cell cell = {.target = &pass->target->texture};
     if (pass->model) {
         cell.model = v4_xy(vec4s(pass->model)[0]);
@@ -133,6 +150,8 @@ void ref_layer_search(const mb_layer_search_pass *pass)
         search_best best = {1e30f, 0.0f, v2(0.0f, 0.0f), false};
         search_coarse(&cell, &best);
         search_fine(&cell, &best);
-        raw[id] = raw_vector(&best, measure_still(&cell));
+        still_cell still = measure_still(&cell);
+        raw[id] = raw_vector(&best, still);
+        distinct[id] = moves(&best, slow_sad(&cell, still.sad)) ? 1.0f : 0.0f;
     }
 }
