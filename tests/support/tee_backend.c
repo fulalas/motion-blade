@@ -30,8 +30,12 @@ const tee_pass_report *tee_find(const tee_report *report, const char *name)
 static tee_pass_report *entry(tee *t, const char *name)
 {
     tee_pass_report *found = (tee_pass_report *)tee_find(t->report, name);
-    if (found || t->report->count == TEE_MAX_PASSES) {
+    if (found) {
         return found;
+    }
+    if (t->report->count == TEE_MAX_PASSES) {
+        t->report->overflow = true;
+        return NULL;
     }
     found = &t->report->passes[t->report->count++];
     *found = (tee_pass_report){name, 0, 1.0, 0.0};
@@ -160,6 +164,10 @@ mb_status tee_create_image(void *self, const mb_image_desc *desc, mb_image **out
     for (int side = 0; side < SIDES; side++) {
         mb_status status = OPS(t, side)->create_image(SELF(t, side), desc, (mb_image **)&image->side[side]);
         if (status != MB_SUCCESS) {
+            for (int made = 0; made < side; made++) {
+                OPS(t, made)->destroy_image(SELF(t, made), image->side[made]);
+            }
+            free(image);
             return status;
         }
     }
@@ -187,6 +195,10 @@ mb_status tee_create_buffer(void *self, size_t bytes, mb_buffer **out)
     for (int side = 0; side < SIDES; side++) {
         mb_status status = OPS(t, side)->create_buffer(SELF(t, side), bytes, (mb_buffer **)&buffer->side[side]);
         if (status != MB_SUCCESS) {
+            for (int made = 0; made < side; made++) {
+                OPS(t, made)->destroy_buffer(SELF(t, made), buffer->side[made]);
+            }
+            free(buffer);
             return status;
         }
     }
@@ -305,9 +317,16 @@ mb_status tee_finish_output(void *self, mb_ticket ticket, mb_output_stats *stats
     tee *t = self;
     mb_output_stats device;
     mb_status status = OPS(t, REFERENCE)->finish_output(SELF(t, REFERENCE), ticket, stats);
-    OPS(t, DEVICE)->finish_output(SELF(t, DEVICE), t->device_tickets[ticket.slot % TICKETS], &device);
+    mb_status device_status =
+        OPS(t, DEVICE)->finish_output(SELF(t, DEVICE), t->device_tickets[ticket.slot % TICKETS], &device);
+    if (status != MB_SUCCESS) {
+        return status;
+    }
+    if (device_status != MB_SUCCESS) {
+        return device_status;
+    }
     note(t, "output_cut", stats->scene_cut == device.scene_cut ? 1.0 : 0.0, 0.0);
-    return status;
+    return MB_SUCCESS;
 }
 
 void tee_fill_buffer(void *self, mb_buffer *buffer, uint32_t value)
@@ -405,6 +424,7 @@ mb_status tee_backend_create(mb_backend reference, mb_backend device, tee_report
     t->backends[DEVICE] = device;
     t->report = report;
     report->count = 0;
+    report->overflow = false;
     int pending = reference.max_pending < device.max_pending ? reference.max_pending : device.max_pending;
     *out = (mb_backend){&TEE_OPS, t, pending, device.max_blocks};
     return MB_SUCCESS;

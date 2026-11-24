@@ -43,7 +43,7 @@ void main()
     vec2 v = field[id].xy;
     float sad = target_sad(target, v);
     float dc = block_dc(lane_diff);
-    float block_mean = origin_sum() * (255.0 / 256.0);
+    float block_mean = origin_sum() * (255.0 / WINDOW_TEXELS);
     if (lane == 0) {
         field[id] = vec4(v, sad, dc);
         accumulate(block_mean);

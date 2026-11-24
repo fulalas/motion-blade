@@ -117,6 +117,7 @@ typedef struct job_slot {
     struct mb_buffer readback;
     struct mb_buffer stats_copy;
     bool busy;
+    bool lost;
     bool holds_output;
     uint32_t serial;
     output_target target;
@@ -226,7 +227,6 @@ typedef struct device_features {
     bool push_descriptors;
     uint32_t subgroup_size;
     bool full_subgroups;
-    uint32_t import_memory_bits;
 } device_features;
 
 static const VkImageSubresourceRange COLOR_RANGE = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};

@@ -118,6 +118,8 @@ static int process(FILE *in, FILE *out, light_mode mode)
     float *weights = malloc(sizeof(float) * c.luma);
     if (!frame || !weights) {
         fprintf(stderr, "flick: out of memory\n");
+        free(frame);
+        free(weights);
         return 1;
     }
     light_falloff(weights, &c, mode);

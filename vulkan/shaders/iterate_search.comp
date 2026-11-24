@@ -107,7 +107,7 @@ float early_exit_limit()
     if (push.early_exit <= 0.0) {
         return -1.0;
     }
-    float mean = origin_sum() / 256.0;
+    float mean = origin_sum() / WINDOW_TEXELS;
     float spread = 0.0;
     for (int x = 0; x < LANES; x++) {
         spread += abs(origin_row[x] - mean);
@@ -138,8 +138,8 @@ void try_random_steps(int id, float limit)
 
 void main()
 {
-    int lane = int(gl_LocalInvocationID.x) & 15;
-    int id = int(gl_WorkGroupID.x) * 4 + (int(gl_LocalInvocationID.x) >> 4);
+    int lane = int(gl_LocalInvocationID.x) % LANES;
+    int id = int(gl_WorkGroupID.x) * (int(gl_WorkGroupSize.x) / LANES) + int(gl_LocalInvocationID.x) / LANES;
     if (id >= push.blocks_x * push.blocks_y) {
         return;
     }

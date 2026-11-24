@@ -3,6 +3,8 @@ orig, gen, dst, w, h, n = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]
 size = w * h * 3 // 2
 o = open(orig, "rb").read()
 g = open(gen, "rb").read()
+if len(o) < n * size or len(g) < n // 2 * size:
+    sys.exit(f"interleave: need {n} reference and {n // 2} generated frames, got {len(o) // size} and {len(g) // size}")
 with open(dst, "wb") as f:
     f.write(f"YUV4MPEG2 W{w} H{h} F25:1 Ip A1:1 C420jpeg\n".encode())
     for i in range(n):

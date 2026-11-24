@@ -60,7 +60,7 @@ vec2 panel_flag(int id)
 {
     float m = float(1 << push.base_level);
     vec2 u = global_motion[0].xy * m;
-    vec2 corner = vec2(block_of(id, push.blocks_x)) * 8.0 * m;
+    vec2 corner = vec2(block_of(id, push.blocks_x)) * float(MB_BLOCK_SIZE) * m;
     Probes acc = probe_block(corner, m, u);
     float scale = push.level_scale;
     float d = acc.change / 9.0 * scale;

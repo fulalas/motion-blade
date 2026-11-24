@@ -38,6 +38,12 @@ size_t layer_mask_texels(const geometry *g)
     return (size_t)mask.width * (size_t)mask.height;
 }
 
+static pair_motion *layer_pair(const mb_engine *engine, int back)
+{
+    pair_motion *m = ready_pair(engine, back);
+    return m && m->layers_ready ? m : NULL;
+}
+
 static bool layers_enabled(const mb_engine *engine)
 {
     const geometry *g = &engine->geo;
@@ -46,7 +52,7 @@ static bool layers_enabled(const mb_engine *engine)
 
 static void fit_model(mb_engine *engine, int direction, mb_buffer *model)
 {
-    const pair_motion *past = ready_pair(engine, 1);
+    const pair_motion *past = layer_pair(engine, 1);
     mb_layer_model_pass pass = {engine->fields.layer_raw, engine->fields.layer_distinct, model,
                                 past ? past->layer_model[direction] : NULL, layer_grid(&engine->geo),
                                 engine->params.layer.min_share};
@@ -56,7 +62,7 @@ static void fit_model(mb_engine *engine, int direction, mb_buffer *model)
 static void search_layer(mb_engine *engine, int direction, mb_buffer *model)
 {
     const geometry *g = &engine->geo;
-    const pair_motion *past = ready_pair(engine, 1);
+    const pair_motion *past = layer_pair(engine, 1);
     mb_buffer *guide = past && engine->params.layer.pull > 0.0f ? past->layer_model[direction] : NULL;
     int previous = ring_index(engine, 1);
     int newest = engine->pair.newest;
@@ -94,7 +100,7 @@ static void compare_directions(mb_engine *engine)
 {
     const geometry *g = &engine->geo;
     pair_motion *m = pair_at(engine, 0);
-    pair_motion *past = ready_pair(engine, 1);
+    pair_motion *past = layer_pair(engine, 1);
     int top_scale = 1 << (top_level(g) - g->base_level);
     mb_layer_pair_pass pass = {
         {m->layer_model[0], m->layer_model[1]},
@@ -149,14 +155,15 @@ void estimate_layers(mb_engine *engine)
     estimate_direction(engine, 0);
     estimate_direction(engine, 1);
     compare_directions(engine);
+    pair_at(engine, 0)->layers_ready = true;
     const pair_motion *current = pair_at(engine, 0);
-    const pair_motion *past = ready_pair(engine, 1);
+    const pair_motion *past = layer_pair(engine, 1);
     int newest = engine->pair.newest;
     int previous = ring_index(engine, 1);
     mask_frame(engine, previous, side_of(engine, ring_index(engine, 2), past, 1), side_of(engine, newest, current, 0),
                NULL);
     if (past) {
-        mask_frame(engine, ring_index(engine, 2), side_of(engine, ring_index(engine, 3), ready_pair(engine, 2), 1),
+        mask_frame(engine, ring_index(engine, 2), side_of(engine, ring_index(engine, 3), layer_pair(engine, 2), 1),
                    side_of(engine, previous, past, 0), past->layer_model[0]);
     }
 }
@@ -176,7 +183,7 @@ static void guard_output(mb_engine *engine, const pair_choice *pair, const mb_wa
 
 void composite_layers(mb_engine *engine, const pair_choice *pair, mb_warp warp)
 {
-    if (!layers_enabled(engine)) {
+    if (!layers_enabled(engine) || !pair->current->layers_ready) {
         return;
     }
     const geometry *g = &engine->geo;

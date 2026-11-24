@@ -146,6 +146,13 @@ static void plan_layout(exports *out, const mb_video_format *format)
     out->format = *format;
 }
 
+static bool same_format(const mb_video_format *a, const mb_video_format *b)
+{
+    return a->width == b->width && a->height == b->height && a->bit_depth == b->bit_depth &&
+           a->chroma_shift_x == b->chroma_shift_x && a->chroma_shift_y == b->chroma_shift_y &&
+           a->interleaved_chroma == b->interleaved_chroma && a->lsb_padding == b->lsb_padding;
+}
+
 mb_status mbvk_export_enable(mbvk_backend *vk, const mb_video_format *format)
 {
     bool normalized = mb_bytes_per_sample(format) == 2 && format->bit_depth < 16;
@@ -153,7 +160,7 @@ mb_status mbvk_export_enable(mbvk_backend *vk, const mb_video_format *format)
         return MB_ERROR_UNSUPPORTED;
     }
     if (vk->out.pool) {
-        return MB_SUCCESS;
+        return same_format(&vk->out.format, format) ? MB_SUCCESS : MB_ERROR_UNSUPPORTED;
     }
     plan_layout(&vk->out, format);
     vk->out.pool = calloc(1, sizeof(*vk->out.pool));
@@ -163,10 +170,15 @@ mb_status mbvk_export_enable(mbvk_backend *vk, const mb_video_format *format)
     atomic_init(&vk->out.pool->references, 1);
     for (int i = 0; i < MIN_BUFFERS && add_buffer(vk, vk->out.count) >= 0; i++) {
     }
+    if (!vk->out.count) {
+        drop_reference(vk->out.pool);
+        vk->out.pool = NULL;
+        return MB_ERROR_UNSUPPORTED;
+    }
     for (int i = 0; i < vk->out.count; i++) {
         atomic_store(&vk->out.pool->busy[i], 0);
     }
-    return vk->out.count ? MB_SUCCESS : MB_ERROR_UNSUPPORTED;
+    return MB_SUCCESS;
 }
 
 typedef struct pool_scan {
@@ -367,6 +379,9 @@ mb_status export_record_output(mbvk_backend *vk, const mb_output_copy *copy)
         vk->out.border_version = copy->border.version;
     }
     if (area_is_cropped(copy->area, copy->format)) {
+        if (!copy->border.host_template && !vk->bg.luma.image) {
+            return MB_ERROR_UNSUPPORTED;
+        }
         fill_bars(vk, copy, x);
     }
     for (int i = 0; i < mb_plane_count(&vk->out.format); i++) {

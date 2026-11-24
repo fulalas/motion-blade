@@ -33,16 +33,23 @@ pair_motion *ready_pair(const mb_engine *engine, int back)
     return m && m->ready ? m : NULL;
 }
 
+static void forget_pair(pair_motion *m)
+{
+    m->ready = false;
+    m->layers_ready = false;
+    m->wipes_ready = false;
+}
+
 void motion_advance(mb_engine *engine)
 {
     engine->fields.newest_pair = (engine->fields.newest_pair + 1) % PAIR_RING;
-    pair_at(engine, 0)->ready = false;
+    forget_pair(pair_at(engine, 0));
 }
 
 void motion_forget(mb_engine *engine)
 {
     for (int k = 0; k < PAIR_RING; k++) {
-        engine->fields.pairs[k].ready = false;
+        forget_pair(&engine->fields.pairs[k]);
     }
 }
 

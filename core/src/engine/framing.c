@@ -49,7 +49,7 @@ void framing_save_border(mb_engine *engine, const mb_host_image *frame)
 static bool should_refresh_border(const mb_engine *engine)
 {
     const framing_state *f = &engine->framing;
-    bool stale = f->device_border_version != f->border_version || (f->device_ticks & BORDER_REFRESH_MASK) == 0;
+    bool stale = f->device_border_version != f->border_version || (f->border_ticks & BORDER_REFRESH_MASK) == 0;
     return geometry_is_cropped(&engine->geo, &engine->source) && stale;
 }
 
@@ -65,6 +65,7 @@ mb_device_load framing_plan_device_load(mb_engine *engine, const mb_device_frame
 {
     bool refresh = should_refresh_border(engine);
     bool detect = should_detect_bars(engine);
+    engine->framing.border_ticks++;
     return (mb_device_load){planes, frame, &engine->source, engine->geo.active, refresh, detect};
 }
 

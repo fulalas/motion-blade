@@ -2,6 +2,7 @@
 #extension GL_KHR_shader_subgroup_basic : enable
 
 #define LANES MB_WINDOW_SIZE
+const float WINDOW_TEXELS = float(LANES * LANES);
 
 float origin_row[LANES];
 vec2 texel_size;
@@ -69,14 +70,14 @@ float window_sad(float a[LANES], float b[LANES])
     lane_diff = diff;
     float mean = 0.0;
     if (mean_weight > 0.0) {
-        mean = cluster_sum(diff) / 256.0 * mean_weight;
+        mean = cluster_sum(diff) / WINDOW_TEXELS * mean_weight;
     }
     float sum = 0.0;
     for (int x = 0; x < LANES; x++) {
         sum += abs(a[x] - b[x] - mean);
     }
 #ifdef SAD_STATISTICS
-    float full_mean = cluster_sum(diff) / 256.0;
+    float full_mean = cluster_sum(diff) / WINDOW_TEXELS;
     float plain = 0.0, zero_mean = 0.0;
     for (int x = 0; x < LANES; x++) {
         plain += abs(a[x] - b[x]);
@@ -99,7 +100,7 @@ float origin_sum()
 
 float block_dc(float diff)
 {
-    return cluster_sum(diff) * (255.0 / 256.0);
+    return cluster_sum(diff) * (255.0 / WINDOW_TEXELS);
 }
 
 void set_mean_weight(float lo, float hi, float lane_dc)

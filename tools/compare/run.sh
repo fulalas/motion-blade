@@ -298,9 +298,10 @@ perf_clip() {
     step perf_clip curl -sfL -r 0-$((PERF_FRAMES * (1920 * 1080 * 3 / 2 + 6) + 200)) -o "$D/perf/tmp.y4m" \
             https://media.xiph.org/video/derf/y4m/park_joy_1080p50.y4m &&
         step perf_clip ff -i "$D/perf/tmp.y4m" -frames:v $PERF_FRAMES -an -c:v libx264 -crf 12 \
-            -preset fast -pix_fmt yuv420p "$PERF_CLIP"
+            -preset fast -pix_fmt yuv420p "$D/perf/part.mp4" &&
+        mv "$D/perf/part.mp4" "$PERF_CLIP"
     local r=$?
-    rm -f "$D/perf/tmp.y4m"
+    rm -f "$D/perf/tmp.y4m" "$D/perf/part.mp4"
     return $r
 }
 
@@ -372,7 +373,7 @@ afmf_run() {
 }
 
 gen_afmf() {
-    local w=$1 h=$2 in=$3 out=$4 lead=8 d=$WORK/afmf
+    local w=$1 h=$2 in=$3 out=$4 lead=8 d=$WORK/afmf k
     rm -rf "$d"; mkdir -p "$d/dump"
     local count=$(( $(stat -c %s "$in") / (w * h * 4) ))
     python3 -I "$K/scripts/lead.py" "$in" "$d/src.rgba" "$w" "$h" $lead

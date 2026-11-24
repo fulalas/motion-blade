@@ -1,6 +1,7 @@
 #include "motionblade/params.h"
 
 #include <float.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
@@ -32,7 +33,7 @@ static const param_entry PARAM_TABLE[] = {
     FLOAT_PARAM("mean_removal_lo", search.mean_removal_lo, 0.5f, 0, 1),
     FLOAT_PARAM("mean_removal_hi", search.mean_removal_hi, 1, 0, 1),
     FLOAT_PARAM("early_exit", search.early_exit, 0.06f, ANY),
-    INT_PARAM("iterations", search.iterations, 3, 0, 16),
+    INT_PARAM("iterations", search.iterations, 3, 1, 16),
     INT_PARAM("base_iterations", search.base_iterations, 1, 1, 16),
     INT_PARAM("half_resolution", search.half_resolution, -1, -1, 1),
     INT_PARAM("cross_check_directions", repair.cross_check_directions, 2, 0, 2),
@@ -79,7 +80,7 @@ static const param_entry PARAM_TABLE[] = {
     FLOAT_PARAM("fallback_spread", select.fallback_spread, 0.7f, ANY),
     FLOAT_PARAM("fallback_lo", select.fallback_lo, 2, ANY),
     FLOAT_PARAM("fallback_hi", select.fallback_hi, 6, ANY),
-    FLOAT_PARAM("blend_softness", blend.softness, 250, ANY),
+    FLOAT_PARAM("blend_softness", blend.softness, 250, 1, DBL_MAX),
     FLOAT_PARAM("penalty_one_sided", blend.penalty_one_sided, 384, ANY),
     FLOAT_PARAM("penalty_unconfirmed", blend.penalty_unconfirmed, 256, ANY),
     FLOAT_PARAM("penalty_fallback", blend.penalty_fallback, 1e6f, ANY),
@@ -94,9 +95,9 @@ static const param_entry PARAM_TABLE[] = {
     FLOAT_PARAM("unsure_margin_hi", blend.unsure_margin_hi, 600, ANY),
     FLOAT_PARAM("panel_change_lo", panel.change_lo, 24, ANY),
     FLOAT_PARAM("panel_change_hi", panel.change_hi, 48, ANY),
-    FLOAT_PARAM("panel_flat", panel.flat, 32, ANY),
-    FLOAT_PARAM("panel_saturation", panel.saturation, 48, ANY),
-    FLOAT_PARAM("panel_switch", panel.switch_level, 16, ANY),
+    FLOAT_PARAM("panel_flat", panel.flat, 32, 1, DBL_MAX),
+    FLOAT_PARAM("panel_saturation", panel.saturation, 48, 1, DBL_MAX),
+    FLOAT_PARAM("panel_switch", panel.switch_level, 16, 1, DBL_MAX),
     FLOAT_PARAM("panel_source_distance", panel.source_distance, 8, ANY),
     INT_PARAM("panel_radius", panel.radius, 8, 0, 16),
     INT_PARAM("fast_layer", layer.enabled, 1, 0, 1),
@@ -148,7 +149,7 @@ static bool mean_removal_ordered(const mb_params *params)
 mb_status mb_params_set(mb_params *params, const char *name, double value)
 {
     const param_entry *entry = find_param(name);
-    if (!entry || value < entry->min || value > entry->max) {
+    if (!entry || !isfinite(value) || value < entry->min || value > entry->max) {
         return MB_ERROR_INVALID;
     }
     mb_params changed = *params;

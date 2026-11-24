@@ -74,8 +74,9 @@ void estimate_wipes(mb_engine *engine)
         return;
     }
     close_gate(engine, pair_at(engine, NEWEST_PAIR));
+    pair_at(engine, NEWEST_PAIR)->wipes_ready = true;
     pair_motion *wiped = ready_pair(engine, WIPED_PAIR);
-    if (engine->pair.frame_count < FRAME_RING || !wiped) {
+    if (engine->pair.frame_count < FRAME_RING || !wiped || !wiped->wipes_ready) {
         return;
     }
     int level = wipe_level(&engine->geo);
@@ -90,7 +91,7 @@ void estimate_wipes(mb_engine *engine)
 
 void composite_wipes(mb_engine *engine, const pair_choice *pair, mb_warp warp)
 {
-    if (!wipes_enabled(engine)) {
+    if (!wipes_enabled(engine) || !pair->current->wipes_ready) {
         return;
     }
     mb_wipe_composite_pass pass = {

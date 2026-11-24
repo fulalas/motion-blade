@@ -42,6 +42,7 @@ typedef struct mbvk_dmabuf_input {
     uint32_t pitches[2];
     void (*release)(void *context);
     void *context;
+    bool *taken;
 } mbvk_dmabuf_input;
 
 typedef struct mbvk_vulkan_frame {

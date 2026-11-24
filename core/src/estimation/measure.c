@@ -34,7 +34,7 @@ static void measure_block(const mb_measure_pass *pass, int id)
     window_load_exact(&y, &pass->target->texture, origin, v4_xy(field[id]));
     float weight = mean_weight(pass->mean_removal, fabsf(field[id].w));
     sad_result r = window_zsad(&x, &y, weight);
-    float block_mean = window_sum(&x) * (255.0f / 256.0f);
+    float block_mean = block_dc(window_sum(&x));
     field[id] = (vec4){field[id].x, field[id].y, r.sad, block_dc(r.diff_sum)};
     accumulate(pass, window_sad_pair(&x, &y), block_mean);
 }

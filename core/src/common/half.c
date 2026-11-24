@@ -8,8 +8,12 @@ uint16_t mb_half_from_float(float value)
     uint32_t bits;
     memcpy(&bits, &value, sizeof(bits));
     uint32_t sign = (bits >> 16) & 0x8000u;
-    int exponent = (int)((bits >> 23) & 0xff) - 127 + 15;
+    uint32_t raw_exponent = (bits >> 23) & 0xff;
+    int exponent = (int)raw_exponent - 127 + 15;
     uint32_t mantissa = bits & 0x7fffffu;
+    if (raw_exponent == 0xff && mantissa) {
+        return (uint16_t)(sign | 0x7e00u);
+    }
     if (exponent >= 31) {
         return (uint16_t)(sign | 0x7c00u);
     }
@@ -41,7 +45,7 @@ float mb_half_to_float(uint16_t half)
     int mantissa = half & 0x3ff;
     float magnitude = exponent == 0 ? ldexpf((float)mantissa, -24) : ldexpf((float)(mantissa | 0x400), exponent - 25);
     if (exponent == 31) {
-        magnitude = INFINITY;
+        magnitude = mantissa ? NAN : INFINITY;
     }
     return (half & 0x8000u) ? -magnitude : magnitude;
 }

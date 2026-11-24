@@ -87,14 +87,12 @@ static VkImageCreateInfo dmabuf_image_info(struct mb_image *image, const plane_i
 
 static uint32_t import_memory_bits(mbvk_backend *vk, int fd)
 {
-    if (!vk->features.import_memory_bits) {
-        VkMemoryFdPropertiesKHR properties = {VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
-        if (vk->get_memory_fd_properties(vk->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fd, &properties) ==
-            VK_SUCCESS) {
-            vk->features.import_memory_bits = properties.memoryTypeBits;
-        }
+    VkMemoryFdPropertiesKHR properties = {VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
+    if (vk->get_memory_fd_properties(vk->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fd, &properties) !=
+        VK_SUCCESS) {
+        return 0;
     }
-    return vk->features.import_memory_bits;
+    return properties.memoryTypeBits;
 }
 
 static mb_status bind_dmabuf(mbvk_backend *vk, struct mb_image *image, int fd)
@@ -376,10 +374,23 @@ static mb_status import_planes(mbvk_backend *vk, const mb_device_load *load, str
     return import_dmabuf(vk, load, slot->imports);
 }
 
+static bool planes_valid(const mbvk_dmabuf_input *in)
+{
+    for (int plane = 0; plane < 2; plane++) {
+        if (in->objects[plane] < 0 || in->objects[plane] >= 4 || in->fds[in->objects[plane]] < 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static mb_status load_dmabuf(mbvk_backend *vk, const mb_device_load *load)
 {
     const mbvk_dmabuf_input *in = load->frame->payload;
-    if (!vk->features.modifiers || !load->planes.chroma[0] || load->planes.chroma[1]) {
+    if (!vk->features.modifiers || !load->planes.chroma[0] || load->planes.chroma[1] || !planes_valid(in)) {
+        return MB_ERROR_UNSUPPORTED;
+    }
+    if (in->release && !jobs_can_release(vk)) {
         return MB_ERROR_UNSUPPORTED;
     }
     jobs_poll(vk);
@@ -397,6 +408,9 @@ static mb_status load_dmabuf(mbvk_backend *vk, const mb_device_load *load)
     jobs_host_barrier(vk);
     if (in->release) {
         jobs_add_release(vk, in->release, in->context);
+        if (in->taken) {
+            *in->taken = true;
+        }
     }
     return MB_SUCCESS;
 }
@@ -480,6 +494,7 @@ static mb_status load_shared_frame(mbvk_backend *vk, const mb_device_load *load)
     struct mb_image chroma = frame_plane(f, 1, &like);
     record_load(vk, load, (source_planes){&luma, &chroma});
     end_shared_frame(vk, f, layout);
+    jobs_host_barrier(vk);
     return MB_SUCCESS;
 }
 
@@ -552,7 +567,8 @@ static void copy_bars_into_frame(mbvk_backend *vk, const mb_output_copy *copy, s
 static mb_status record_shared_output(mbvk_backend *vk, const mb_output_copy *copy)
 {
     mbvk_vulkan_frame *f = copy->target->payload;
-    if (!shared_frame_usable(vk, f)) {
+    bool cropped = area_is_cropped(copy->area, copy->format);
+    if (!shared_frame_usable(vk, f) || (cropped && !vk->bg.luma.image)) {
         return MB_ERROR_UNSUPPORTED;
     }
     VkImageLayout layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -561,7 +577,7 @@ static mb_status record_shared_output(mbvk_backend *vk, const mb_output_copy *co
     struct mb_image *outputs[2] = {copy->planes.luma, copy->planes.chroma[0]};
     for (int i = 0; i < 2; i++) {
         struct mb_image target = frame_plane(f, i, &like);
-        if (area_is_cropped(copy->area, copy->format) && vk->bg.luma.image) {
+        if (cropped) {
             copy_bars_into_frame(vk, copy, &target, i);
         }
         mb_rect area = mb_plane_area(copy->format, i, copy->area);

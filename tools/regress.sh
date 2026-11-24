@@ -15,6 +15,7 @@ for a in "$@"; do
     esac
 done
 need_eval
+[ $update = 1 ] || [ -f "$B" ] || { echo "no baseline, run with --update first"; exit 1; }
 out=$(mktemp)
 trap 'rm -f "$out"' EXIT
 fail=0
@@ -66,8 +67,11 @@ cuts() {
     cut_list cuts_squirrel -i "$D/film/bbb_squirrel_branch_1080p30.mp4"
     set -- "$D"/light/flash_*.mkv
     [ -f "$1" ] || { echo "no $D/light/flash_*.mkv, run LIGHT=flash tools/light.sh" >&2; exit 1; }
-    local n=0 f
-    for f in "$@"; do n=$((n + $("$E" "$f" -n 41 | grep -c CUT))); done
+    local n=0 f c
+    for f in "$@"; do
+        c=$("$E" "$f" -n 41 | grep -c CUT; exit ${PIPESTATUS[0]}) || { echo "eval failed on $f" >&2; exit 1; }
+        n=$((n + c))
+    done
     put cuts_flash "$n"
 }
 
@@ -121,6 +125,24 @@ judge() {
     esac
 }
 
+is_speed_key() {
+    case $1 in pass_*|speed_ms_1080p|half_ms|*_vgprs|gpu_level) return 0 ;; esac
+    return 1
+}
+
+save_baseline() {
+    local k v
+    while read -r k v; do
+        [ -n "$v" ] || { echo "empty value for $k, baseline not saved" >&2; exit 1; }
+    done <"$out"
+    if [ $speed = 0 ] && [ -f "$B" ]; then
+        while read -r k v; do
+            is_speed_key "$k" && ! grep -q "^$k " "$out" && echo "$k $v" >>"$out"
+        done <"$B"
+    fi
+    cp "$out" "$B"
+}
+
 report() {
     echo "== result (current / baseline)"
     local k v b mode tol st
@@ -133,7 +155,7 @@ report() {
     done <"$out"
     while read -r k b; do
         grep -q "^$k " "$out" && continue
-        case $k in pass_*|speed_ms_1080p|half_ms|*_vgprs|gpu_level) [ $speed = 0 ] && continue ;; esac
+        [ $speed = 0 ] && is_speed_key "$k" && continue
         printf "%-26s %-34s %-34s %s\n" "$k" "missing" "$b" FAIL
         fail=1
     done <"$B"
@@ -144,11 +166,10 @@ formats
 cuts
 [ $speed = 1 ] && speed
 if [ $update = 1 ]; then
-    cp "$out" "$B"
+    save_baseline
     echo "baseline updated: $B"
     exit 0
 fi
-[ -f "$B" ] || { echo "no baseline, run with --update first"; exit 1; }
 report
 [ $fail = 0 ] && echo "PASS" || echo "FAIL"
 exit $fail

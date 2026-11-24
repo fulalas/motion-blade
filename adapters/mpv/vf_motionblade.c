@@ -375,11 +375,14 @@ static struct mp_image *find_map(struct priv *p, struct mp_image *source)
 static bool push_vaapi(struct priv *p, struct mp_image *mpi)
 {
     struct mp_image *mapped = map_drm(p, mpi);
-    mbvk_dmabuf_input in = {.release = free_image, .context = mapped};
+    bool taken = false;
+    mbvk_dmabuf_input in = {.fds = {-1, -1, -1, -1}, .release = free_image, .context = mapped, .taken = &taken};
     int planes = describe_dmabuf_input(mapped, &in);
     mb_device_frame frame = mbvk_dmabuf_frame(&in);
     if (planes != 2 || mb_engine_push_device(p->engine, &frame) != MB_SUCCESS) {
-        talloc_free(mapped);
+        if (!taken) {
+            talloc_free(mapped);
+        }
         mark_hw_failed(p);
         return false;
     }
@@ -1097,12 +1100,6 @@ static void handle_frame(struct mp_filter *f, struct mp_image *mpi)
         mb_schedule_frame(p->schedule, (mb_timed_frame){mpi, pts_of(mpi)}, display_fps(f));
         return;
     }
-    if (is_hw(mpi) && p->hw_failed) {
-        mpi = download(p, mpi);
-        if (!mpi) {
-            return;
-        }
-    }
     if (!setup(f, mpi)) {
         mb_schedule_forget_frames(p->schedule);
         mpi = download(p, mpi);
@@ -1110,6 +1107,12 @@ static void handle_frame(struct mp_filter *f, struct mp_image *mpi)
             enqueue_plain(p, MAKE_FRAME(MP_FRAME_VIDEO, mpi));
         }
         return;
+    }
+    if (is_hw(mpi) && p->hw_failed) {
+        mpi = download(p, mpi);
+        if (!mpi) {
+            return;
+        }
     }
     mb_schedule_frame(p->schedule, (mb_timed_frame){mpi, pts_of(mpi)}, display_fps(f));
     check_engine(f);
@@ -1206,6 +1209,9 @@ static void f_reset(struct mp_filter *f)
 static void f_destroy(struct mp_filter *f)
 {
     struct priv *p = f->priv;
+    if (!p->schedule) {
+        return;
+    }
     f_reset(f);
     teardown(p);
     mb_schedule_destroy(p->schedule);

@@ -52,9 +52,9 @@ static void destroy_backend(const mb_backend *backend)
     }
 }
 
-static mb_status check_size(const mb_engine *engine)
+static mb_status check_size(const mb_engine *engine, const geometry *geo)
 {
-    long blocks = geometry_base_blocks(&engine->geo);
+    long blocks = geometry_base_blocks(geo);
     if (engine->backend.max_blocks > 0 && blocks > engine->backend.max_blocks) {
         mb_log(&engine->logger, MB_LOG_WARNING, "%dx%d is too large for this GPU", engine->source.width,
                engine->source.height);
@@ -89,7 +89,7 @@ mb_status mb_engine_create(const mb_engine_config *config, mb_engine **out)
         destroy_backend(&config->backend);
         return MB_ERROR_NO_MEMORY;
     }
-    mb_status status = check_size(engine);
+    mb_status status = check_size(engine, &engine->geo);
     if (status == MB_SUCCESS) {
         status = allocate_geometry(engine);
     }
@@ -111,12 +111,20 @@ bool mb_engine_is_healthy(const mb_engine *engine)
 mb_status mb_engine_set_param(mb_engine *engine, const char *name, double value)
 {
     int base = engine->geo.base_level;
+    mb_params previous = engine->params;
     mb_status status = mb_params_set(&engine->params, name, value);
     if (status != MB_SUCCESS || strcmp(name, "half_resolution") != 0) {
         return status;
     }
     geometry next = geometry_for(&engine->source, engine->geo.active, &engine->params.search);
-    return engine->healthy && next.base_level != base ? crop_to(engine, engine->geo.active) : MB_SUCCESS;
+    if (next.base_level == base) {
+        return MB_SUCCESS;
+    }
+    if (check_size(engine, &next) != MB_SUCCESS) {
+        engine->params = previous;
+        return MB_ERROR_UNSUPPORTED;
+    }
+    return engine->healthy ? crop_to(engine, engine->geo.active) : MB_SUCCESS;
 }
 
 static int next_slot(const mb_engine *engine)

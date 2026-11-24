@@ -149,6 +149,9 @@ static mb_status claim_staging(mbvk_backend *vk, size_t bytes, staging **out)
     int k = vk->next_upload;
     vk->next_upload = (k + 1) % UPLOAD_RING;
     staging *s = &vk->uploads[k];
+    if (s->slot == vk->current && s->serial == vk->serial + 1) {
+        return MB_ERROR_BUSY;
+    }
     job_slot *user = s->slot >= 0 ? &vk->slots[s->slot] : NULL;
     if (user && user->busy && user->serial == s->serial && jobs_wait_slot(vk, s->slot) != MB_SUCCESS) {
         return MB_ERROR_DEVICE;

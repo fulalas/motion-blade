@@ -8,7 +8,7 @@
 #include "motionblade/vulkan.h"
 #include "tee_backend.h"
 
-enum { FRAMES = 11, SKIP = 77 };
+enum { FRAMES = 11, SKIP = 77, BAR_ROWS = 24 };
 
 typedef struct expectation {
     const char *pass;
@@ -62,9 +62,13 @@ typedef struct run_config {
     int bit_depth;
     int half_resolution;
     void (*paint)(test_frame *frame, int index);
+    bool letterbox;
 } run_config;
 
+enum { EXPECTED_COUNT = sizeof(EXPECTED) / sizeof(EXPECTED[0]) };
+
 static bool device_available = true;
+static bool compared[EXPECTED_COUNT];
 
 static const test_format *layout_of(const run_config *run)
 {
@@ -92,8 +96,16 @@ static mb_status tee_engine(const run_config *run, tee_report *report, mb_engine
         .params = mb_params_default(),
     };
     config.params.search.half_resolution = run->half_resolution;
+    if (run->letterbox) {
+        config.params.framing.settle_frames = 0;
+    }
     mb_status status = tee_backend_create(reference, device, report, &config.backend);
-    return status == MB_SUCCESS ? mb_engine_create(&config, engine) : status;
+    if (status != MB_SUCCESS) {
+        reference.ops->destroy(reference.self);
+        device.ops->destroy(device.self);
+        return status;
+    }
+    return mb_engine_create(&config, engine);
 }
 
 static bool play(mb_engine *engine, const run_config *run)
@@ -132,12 +144,13 @@ static void print_report(const char *name, const tee_report *report)
 static bool meets_expectations(const tee_report *report)
 {
     bool ok = true;
-    for (size_t i = 0; i < sizeof(EXPECTED) / sizeof(EXPECTED[0]); i++) {
+    for (int i = 0; i < EXPECTED_COUNT; i++) {
         const expectation *e = &EXPECTED[i];
         const tee_pass_report *p = tee_find(report, e->pass);
         if (!p) {
             continue;
         }
+        compared[i] = true;
         if (p->worst_agreement < e->min_agreement || p->worst_difference > e->max_difference) {
             fprintf(stderr, "%s: agreement %.5f (min %.5f), difference %g (max %g)\n", e->pass, p->worst_agreement,
                     e->min_agreement, p->worst_difference, e->max_difference);
@@ -160,7 +173,7 @@ static bool backends_agree(const run_config *run)
     mb_engine_destroy(engine);
     print_report(run->name, &report);
     CHECK(played);
-    CHECK(report.count > 0);
+    CHECK(report.count > 0 && !report.overflow);
     CHECK(meets_expectations(&report));
     return true;
 }
@@ -185,9 +198,32 @@ static bool half_resolution_agrees(void)
     return backends_agree(&(run_config){"half resolution", 384, 224, false, 8, 1, NULL});
 }
 
+static void paint_letterboxed(test_frame *frame, int index)
+{
+    paint_scene(frame, index);
+    paint_bars(frame, BAR_ROWS);
+}
+
+static bool letterboxed_frames_agree(void)
+{
+    return backends_agree(&(run_config){"letterboxed", 256, 160, false, 8, 0, paint_letterboxed, true});
+}
+
 static bool cuts_in_a_row_agree(void)
 {
     return backends_agree(&(run_config){"cuts in a row", 256, 160, false, 8, 0, paint_cuts_in_a_row});
+}
+
+static bool every_pass_compared(void)
+{
+    bool ok = true;
+    for (int i = 0; i < EXPECTED_COUNT && device_available; i++) {
+        if (!compared[i]) {
+            fprintf(stderr, "%s: never compared\n", EXPECTED[i].pass);
+            ok = false;
+        }
+    }
+    return ok;
 }
 
 int main(void)
@@ -197,7 +233,9 @@ int main(void)
         {"interleaved frames agree", interleaved_frames_agree},
         {"ten bit frames agree", ten_bit_frames_agree},
         {"half resolution agrees", half_resolution_agrees},
+        {"letterboxed frames agree", letterboxed_frames_agree},
         {"cuts in a row agree", cuts_in_a_row_agree},
+        {"every pass compared", every_pass_compared},
     };
     int result = RUN_ALL(tests);
     return device_available ? result : SKIP;

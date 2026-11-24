@@ -42,12 +42,12 @@ static int append_candidate(quad_state *q, vec2 u, int mode)
 
 static int candidate_slot(quad_state *q, vec2 u, int mode)
 {
+    q->has_uncover = q->has_uncover || mode == MB_MODE_UNCOVER;
     for (int i = 0; i < q->count; i++) {
         if (v2_equal(q->candidates[i].vector, u)) {
             return i;
         }
     }
-    q->has_uncover = q->has_uncover || mode == MB_MODE_UNCOVER;
     return append_candidate(q, u, mode);
 }
 
@@ -81,7 +81,7 @@ static vec4 cell_of(const quad_state *q, ivec2 block, ivec2 qm)
 static float tent(const quad_state *q, int j, ivec2 block, float reach)
 {
     vec2 p = at_level(q, pixel_of(q, j));
-    vec2 center = v2((float)(block.x * MB_BLOCK_SIZE) + 3.5f, (float)(block.y * MB_BLOCK_SIZE) + 3.5f);
+    vec2 center = v2_sub(block_center(block), v2(0.5f, 0.5f));
     float wx = fmaxf(0.0f, 1.0f - fabsf(p.x - center.x) / reach);
     float wy = fmaxf(0.0f, 1.0f - fabsf(p.y - center.y) / reach);
     return wx * wy;

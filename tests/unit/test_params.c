@@ -1,3 +1,5 @@
+#include <math.h>
+
 #include "check.h"
 #include "motionblade/params.h"
 
@@ -32,6 +34,8 @@ static bool rejects_out_of_range(void)
     mb_params p = mb_params_default();
     CHECK(mb_params_set(&p, "full_search_radius", 17) == MB_ERROR_INVALID);
     CHECK(mb_params_set(&p, "base_iterations", 0) == MB_ERROR_INVALID);
+    CHECK(mb_params_set(&p, "penalty_zero", NAN) == MB_ERROR_INVALID);
+    CHECK(mb_params_set(&p, "blend_softness", 0) == MB_ERROR_INVALID);
     CHECK(p.search.full_search_radius == 16);
     return true;
 }
@@ -45,6 +49,15 @@ static bool keeps_mean_removal_ordered(void)
     return true;
 }
 
+static bool sets_edges_in_any_order(void)
+{
+    mb_params p = mb_params_default();
+    CHECK(mb_params_set(&p, "fallback_lo", 8) == MB_SUCCESS);
+    CHECK(mb_params_set(&p, "fallback_hi", 12) == MB_SUCCESS);
+    CHECK(p.select.fallback_lo == 8.0f && p.select.fallback_hi == 12.0f);
+    return true;
+}
+
 int main(void)
 {
     static const test_case tests[] = {
@@ -53,6 +66,7 @@ int main(void)
         {"rejects unknown names", rejects_unknown_names},
         {"rejects out of range", rejects_out_of_range},
         {"keeps mean removal ordered", keeps_mean_removal_ordered},
+        {"sets edges in any order", sets_edges_in_any_order},
     };
     return RUN_ALL(tests);
 }

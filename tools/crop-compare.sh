@@ -1,5 +1,6 @@
 #!/bin/bash
 . "$(dirname "$(readlink -f "$0")")/env.sh"
+[ $# -ge 4 ] || { echo "crop-compare.sh CLIP FRAME CROP OUT [VIDEO ...]" >&2; exit 1; }
 f=$1; n=$2; crop=$3; out=$4; shift 4
 ins=(-i "$D/$f.mkv"); for x in "$@"; do ins+=(-i "$x"); done
 k=$(( $# + 1 )); fl=""; st=""

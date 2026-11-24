@@ -6,7 +6,7 @@ typedef void (*any_function)(void);
 
 bool mb_backend_is_complete(const mb_backend *backend)
 {
-    if (!backend->ops || backend->max_pending < 1) {
+    if (!backend->ops || backend->max_pending < 1 || backend->max_pending > MB_PENDING_LIMIT) {
         return false;
     }
     const unsigned char *bytes = (const unsigned char *)backend->ops;

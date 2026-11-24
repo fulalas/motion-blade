@@ -10,7 +10,11 @@
     MB_WINDOW_SIZE % MB_LOCAL_STRIDE != 0 || (MB_WINDOW_SIZE & (MB_WINDOW_SIZE - 1)) != 0
 #error the search strides must divide MB_WINDOW_SIZE, a power of two
 #endif
-#define MB_CELL_SIZE 4
+#define MB_CELL_SHIFT 2
+#define MB_CELL_SIZE (1 << MB_CELL_SHIFT)
+#if MB_CELL_SIZE * 2 != MB_BLOCK_SIZE
+#error a cell must be half a block
+#endif
 #define MB_MAX_LEVELS 6
 #define MB_MIN_LEVEL_SIZE 48
 #define MB_MIN_FRAME_SIZE 64

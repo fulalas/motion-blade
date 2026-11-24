@@ -106,18 +106,22 @@ mb_status jobs_wait_slot(mbvk_backend *vk, int slot)
     if (!s->busy) {
         return MB_SUCCESS;
     }
+    if (s->lost) {
+        return MB_ERROR_DEVICE;
+    }
     VkResult r = VK_TIMEOUT;
     for (int attempt = 0; attempt < WAIT_ATTEMPTS && r == VK_TIMEOUT; attempt++) {
         r = vkWaitForFences(vk->device, 1, &s->fence, VK_TRUE, WAIT_NANOSECONDS);
     }
-    s->busy = false;
-    release_slot(vk, s);
-    s->gpu_ms = 0;
     if (r != VK_SUCCESS) {
         mb_log(&vk->logger, MB_LOG_ERROR, "waiting for the GPU failed (%d)", r);
         vk->healthy = false;
+        s->lost = true;
         return MB_ERROR_DEVICE;
     }
+    s->busy = false;
+    release_slot(vk, s);
+    s->gpu_ms = 0;
     vkResetFences(vk->device, 1, &s->fence);
     collect_timestamps(vk, s);
     return MB_SUCCESS;
@@ -170,6 +174,9 @@ static void start_recording(mbvk_backend *vk, job_slot *s)
 
 mb_status jobs_begin(mbvk_backend *vk)
 {
+    if (!vk->healthy) {
+        return MB_ERROR_DEVICE;
+    }
     if (vk->recording) {
         return MB_SUCCESS;
     }
@@ -205,8 +212,6 @@ static VkResult submit_commands(mbvk_backend *vk, job_slot *s)
                                               (uint32_t)vk->waits.count, vk->waits.values,
                                               (uint32_t)vk->signals.count, vk->signals.values};
     VkSubmitInfo info = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    info.commandBufferCount = 1;
-    info.pCommandBuffers = &s->commands;
     if (vk->waits.count || vk->signals.count) {
         info.pNext = &timeline;
         info.waitSemaphoreCount = (uint32_t)vk->waits.count;
@@ -215,10 +220,19 @@ static VkResult submit_commands(mbvk_backend *vk, job_slot *s)
         info.signalSemaphoreCount = (uint32_t)vk->signals.count;
         info.pSignalSemaphores = vk->signals.semaphores;
     }
+    VkResult r = vkEndCommandBuffer(s->commands);
+    if (r == VK_SUCCESS) {
+        info.commandBufferCount = 1;
+        info.pCommandBuffers = &s->commands;
+        r = device_submit(vk, &info, s->fence);
+        info.commandBufferCount = 0;
+    }
+    if (r != VK_SUCCESS && info.pNext) {
+        device_submit(vk, &info, VK_NULL_HANDLE);
+    }
     vk->waits.count = 0;
     vk->signals.count = 0;
-    VkResult r = vkEndCommandBuffer(s->commands);
-    return r == VK_SUCCESS ? device_submit(vk, &info, s->fence) : r;
+    return r;
 }
 
 static mb_status finish_recording(mbvk_backend *vk, bool holds_output)
@@ -234,12 +248,13 @@ static mb_status finish_recording(mbvk_backend *vk, bool holds_output)
     if (submit_commands(vk, s) != VK_SUCCESS) {
         mb_log(&vk->logger, MB_LOG_ERROR, "could not submit command buffer");
         vk->healthy = false;
+        release_slot(vk, s);
         return MB_ERROR_DEVICE;
     }
     s->busy = true;
     s->serial = ++vk->serial;
     s->holds_output = holds_output;
-    return MB_SUCCESS;
+    return vk->healthy ? MB_SUCCESS : MB_ERROR_DEVICE;
 }
 
 mb_status jobs_submit(mbvk_backend *vk)
@@ -358,9 +373,10 @@ uint64_t image_handle(const struct mb_image *image)
 
 void jobs_host_barrier(mbvk_backend *vk)
 {
-    VkMemoryBarrier b = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT};
-    vkCmdPipelineBarrier(jobs_commands(vk), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &b, 0,
-                         NULL, 0, NULL);
+    VkMemoryBarrier b = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL,
+                         VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT};
+    VkPipelineStageFlags writers = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    vkCmdPipelineBarrier(jobs_commands(vk), writers, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &b, 0, NULL, 0, NULL);
 }
 
 void jobs_timestamp(mbvk_backend *vk, const char *name)
@@ -393,13 +409,14 @@ void jobs_to_general(mbvk_backend *vk, struct mb_image *image)
                          NULL, 0, NULL, 1, &b);
 }
 
+bool jobs_can_release(mbvk_backend *vk)
+{
+    return jobs_current(vk)->release_count < MAX_RELEASES;
+}
+
 void jobs_add_release(mbvk_backend *vk, void (*release)(void *context), void *context)
 {
     job_slot *s = jobs_current(vk);
-    if (s->release_count == MAX_RELEASES) {
-        release(context);
-        return;
-    }
     s->releases[s->release_count] = release;
     s->release_contexts[s->release_count++] = context;
 }

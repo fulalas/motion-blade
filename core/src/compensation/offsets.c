@@ -15,8 +15,8 @@ static vec2 chroma_offset(const mb_chroma_offset_pass *pass, int id, vec2 u)
     vec2 c0 = chroma_from_luma(chroma, corner);
     vec2 to_a = chroma_from_luma(chroma, v2_scale(scaled, -pass->t));
     vec2 to_b = chroma_from_luma(chroma, v2_scale(scaled, 1.0f - pass->t));
-    int nx = 4 >> chroma->shift_x;
-    int ny = 4 >> chroma->shift_y;
+    int nx = MB_CELL_SIZE >> chroma->shift_x;
+    int ny = MB_CELL_SIZE >> chroma->shift_y;
     vec2 sum = v2(0.0f, 0.0f);
     for (int y = 0; y < ny; y++) {
         for (int x = 0; x < nx; x++) {

@@ -10,6 +10,10 @@ typedef struct layer_kernel {
     int radius;
 } layer_kernel;
 
+_Static_assert(MB_LAYER_PRIOR_RADIUS <= MB_LAYER_SMOOTH_RADIUS && MB_LAYER_DECIDE_RADIUS <= MB_LAYER_SMOOTH_RADIUS &&
+                   MB_LAYER_SOFTEN_RADIUS <= MB_LAYER_SMOOTH_RADIUS && MB_LAYER_NEAR_TAPS <= MB_LAYER_SMOOTH_RADIUS,
+               "layer_kernel is too small for a layer radius");
+
 int layer_cell_index(mb_layer_grid grid, int x, int y);
 bool layer_cell_inside(mb_layer_grid grid, int x, int y);
 vec4 layer_field_at(const vec4 *field, mb_layer_grid grid, vec2 top_position);

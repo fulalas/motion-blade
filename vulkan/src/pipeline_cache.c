@@ -5,8 +5,12 @@
 #include <string.h>
 #ifdef _WIN32
 #include <direct.h>
+#include <process.h>
+#define process_id _getpid
 #else
 #include <sys/stat.h>
+#include <unistd.h>
+#define process_id getpid
 #endif
 
 enum { PATH_BYTES = 1024 };
@@ -113,8 +117,8 @@ void pipeline_cache_open(mbvk_backend *vk)
 
 static void write_file(const char *path, const void *data, size_t bytes)
 {
-    char temporary[PATH_BYTES + 8];
-    snprintf(temporary, sizeof(temporary), "%s.part", path);
+    char temporary[PATH_BYTES + 24];
+    snprintf(temporary, sizeof(temporary), "%s.%d.part", path, (int)process_id());
     FILE *file = fopen(temporary, "wb");
     if (!file) {
         return;

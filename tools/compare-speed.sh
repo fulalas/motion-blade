@@ -18,34 +18,46 @@ need_clip "$CUT_CLIP"
 pgrep -x mpv >/dev/null && echo "warning: mpv is running, results will be off"
 level=$(cat /sys/class/drm/card*/device/power_dpm_force_performance_level 2>/dev/null | head -1)
 echo "GPU power level: ${level:-unknown}"
-ffmpeg -nostdin -hide_banner -loglevel error -i "$CUT_CLIP" -frames:v $CUT_FRAMES -pix_fmt yuv420p "$work/cuts.y4m"
+ffmpeg -nostdin -hide_banner -loglevel error -i "$CUT_CLIP" -frames:v $CUT_FRAMES -pix_fmt yuv420p "$work/cuts.y4m" ||
+    { echo "cannot decode $CUT_CLIP" >&2; exit 1; }
 
 profile_run() {
     local eval=$1 clip=$2 frames=$3
     shift 3
     "$eval" "$clip" "$@" -nometric 2>&1 | awk '/^wall/ {print "wall", $2}'
+    [ "${PIPESTATUS[0]}" = 0 ] || return 1
     MOTIONBLADE_PROFILE=1 "$eval" "$clip" "$@" -nometric 2>&1 |
         awk -v f="$frames" '/motionblade profile/ {printf "pass_%s %.4f\n", $3, $4 / f}'
+    [ "${PIPESTATUS[0]}" = 0 ]
 }
 
 plain() { profile_run "$1" "$D/suite/crowd_run_1080p50.mkv" $FRAMES -n $N -step $STEP -repeat $REPEAT; }
 cuts() { profile_run "$1" "$work/cuts.y4m" $((CUT_FRAMES / STEP)) -n $CUT_FRAMES -step $STEP; }
 
+record() {
+    local side=$1 kind=$2 eval=$3
+    "$kind" "$eval" >"$work/one" || { echo "$eval failed on the $kind run" >&2; exit 1; }
+    sed "s/^/$side $kind /" "$work/one" >>"$work/runs"
+}
+
 for r in $(seq "$ROUNDS"); do
     for side in old new; do
         eval=$OLD
         [ $side = new ] && eval=$NEW
-        plain "$eval" | sed "s/^/$side plain /" >>"$work/runs"
-        cuts "$eval" | sed "s/^/$side cuts /" >>"$work/runs"
+        record $side plain "$eval"
+        record $side cuts "$eval"
     done
 done
 
 echo "ms per interpolated frame over $ROUNDS rounds: old and new median, old and new best"
 awk '{k = $2 " " $3; v[$1, k, ++n[$1, k]] = $4; keys[k] = 1}
-     function sorted(side, k, a,    m, i) {
+     function sorted(side, k, a,    m, i, j, x) {
          m = n[side, k]
-         for (i = 1; i <= m; i++) a[i] = v[side, k, i]
-         asort(a)
+         for (i = 1; i <= m; i++) {
+             x = v[side, k, i]
+             for (j = i - 1; j > 0 && a[j] > x; j--) a[j + 1] = a[j]
+             a[j + 1] = x
+         }
          return m
      }
      function median(side, k,    m, a) {
@@ -60,7 +72,10 @@ awk '{k = $2 " " $3; v[$1, k, ++n[$1, k]] = $4; keys[k] = 1}
          for (k in keys) {
              o = median("old", k)
              w = median("new", k)
-             if (o == 0 && w == 0) continue
+             if (n["old", k] == 0 || n["new", k] == 0) {
+                 printf "%-28s missing samples (old %d, new %d)\n", k, n["old", k], n["new", k]
+                 continue
+             }
              change = o > 0 ? (w - o) / o * 100 : 0
              printf "%-28s %8.4f %8.4f %+7.1f%%   best %8.4f %8.4f\n", k, o, w, change, best("old", k), best("new", k)
          }

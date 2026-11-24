@@ -69,19 +69,26 @@ install_build() {
 
 gettar() {
     local name="${1##*/}"
-    [ -d "${name%.tar.*}" ] && return 0
+    local dir="${name%.tar.*}"
+    [ -d "$dir" ] && return 0
+    rm -rf "$dir.part"
+    mkdir "$dir.part"
     curl -sfL -o "$name" "$1"
     echo "$2  $name" | sha256sum -c --quiet -
-    tar -xaf "$name"
+    tar -xaf "$name" -C "$dir.part"
     rm "$name"
+    mv "$dir.part/$dir" "$dir"
+    rmdir "$dir.part"
 }
 
 gitpin() {
-    [ -d "$2" ] && return 0
-    git init -q "$2"
-    git -C "$2" fetch -q --depth=1 "$1" "$3"
-    git -C "$2" checkout -q FETCH_HEAD
-    git -C "$2" submodule update --init --recursive --depth=1
+    [ "$(git -C "$2" rev-parse HEAD 2>/dev/null)" = "$3" ] && return 0
+    rm -rf "$2" "$2.part"
+    git init -q "$2.part"
+    git -C "$2.part" fetch -q --depth=1 "$1" "$3"
+    git -C "$2.part" checkout -q FETCH_HEAD
+    git -C "$2.part" submodule update --init --recursive --depth=1
+    mv "$2.part" "$2"
 }
 
 meson_build() {

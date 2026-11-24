@@ -69,10 +69,10 @@ int candidate_slot(vec2 u, int mode)
             ci = i;
         }
     }
+    has_uncover = has_uncover || mode == MB_MODE_UNCOVER;
     if (ci >= 0) {
         return ci;
     }
-    has_uncover = has_uncover || mode == MB_MODE_UNCOVER;
     return append_candidate(u, mode);
 }
 
@@ -96,14 +96,14 @@ int wide_slot(vec2 u, int mode)
 float tent(ivec2 q0, int j, ivec2 b, float reach)
 {
     vec2 p = at_level(vec2(q0 + ivec2(j & 1, j >> 1)));
-    vec2 w2 = max(vec2(0.0), 1.0 - abs(p - (vec2(b * 8) + 3.5)) / reach);
+    vec2 w2 = max(vec2(0.0), 1.0 - abs(p - (block_center(b) - 0.5)) / reach);
     return w2.x * w2.y;
 }
 
 void add_coverage(int ci, ivec2 b, int bi, ivec2 q0)
 {
     for (int j = 0; j < 4; j++) {
-        float w = tent(q0, j, b, 8.0);
+        float w = tent(q0, j, b, float(MB_BLOCK_SIZE));
         coverage[ci][j] += w;
         fallback_sum[j] += w * fallback_weights[bi];
         panel_sum[j] += w * panel_weights[bi];
@@ -114,13 +114,13 @@ void add_coverage(int ci, ivec2 b, int bi, ivec2 q0)
 
 ivec2 block_origin(ivec2 qm)
 {
-    int qx = qm.x >> 2, qy = qm.y >> 2;
+    int qx = qm.x >> MB_CELL_SHIFT, qy = qm.y >> MB_CELL_SHIFT;
     return ivec2((qx & 1) != 0 ? qx / 2 : qx / 2 - 1, (qy & 1) != 0 ? qy / 2 : qy / 2 - 1);
 }
 
 vec4 cell_at(ivec2 b, ivec2 qm)
 {
-    ivec2 cell = clamp(b * 2 + clamp((qm - b * 8) >> 2, ivec2(0), ivec2(1)), ivec2(0), blocks() * 2 - 1);
+    ivec2 cell = clamp(b * 2 + clamp((qm - b * MB_BLOCK_SIZE) >> MB_CELL_SHIFT, ivec2(0), ivec2(1)), ivec2(0), blocks() * 2 - 1);
     return cells[cell.y * push.blocks_x * 2 + cell.x];
 }
 

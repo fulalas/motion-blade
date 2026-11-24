@@ -93,8 +93,16 @@ static bool apply_params(const eval_options *o, mb_engine *engine)
             return false;
         }
         *eq = 0;
-        if (mb_engine_set_param(engine, o->params[i], atof(eq + 1)) != MB_SUCCESS) {
-            fprintf(stderr, "unknown param %s\n", o->params[i]);
+        char *end = NULL;
+        double value = strtod(eq + 1, &end);
+        if (end == eq + 1 || *end) {
+            fprintf(stderr, "bad value for %s\n", o->params[i]);
+            return false;
+        }
+        mb_status status = mb_engine_set_param(engine, o->params[i], value);
+        if (status != MB_SUCCESS) {
+            fprintf(stderr, "cannot set %s to %s (%s): unknown name or value out of range\n", o->params[i], eq + 1,
+                    mb_status_name(status));
             return false;
         }
     }
@@ -235,13 +243,17 @@ static bool run(evaluation *ev)
 {
     const eval_options *o = ev->options;
     for (int round = 0; round < o->repeat; round++) {
-        for (int k = 0; (k + 1) * o->step < ev->frames->count; k++) {
+        int k = 0;
+        for (; (k + 1) * o->step < ev->frames->count; k++) {
             if (k == 0 && round > 0) {
                 mb_engine_reset(ev->engine);
             }
             if (!run_pair(ev, k)) {
                 return false;
             }
+        }
+        if (k > 0) {
+            write_frame(ev, ev->frames->frames[k * o->step]);
         }
     }
     return true;

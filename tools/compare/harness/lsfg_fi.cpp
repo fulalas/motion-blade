@@ -213,8 +213,9 @@ int main(int argc, char** argv)
     const size_t frameBytes = (size_t)W * H * 4;
     FILE* fin = fopen(inPath, "rb");
     if (!fin) { perror(inPath); return 1; }
-    fseek(fin, 0, SEEK_END);
+    if (fseek(fin, 0, SEEK_END) != 0) { perror(inPath); return 1; }
     const long fileSize = ftell(fin);
+    if (fileSize < 0) { perror(inPath); return 1; }
     const int frameCount = (int)((size_t)fileSize / frameBytes);
     if (frameCount < 2) { fprintf(stderr, "need at least 2 frames of %ux%u\n", W, H); return 1; }
     if ((size_t)fileSize % frameBytes) fprintf(stderr, "warning: trailing bytes ignored\n");

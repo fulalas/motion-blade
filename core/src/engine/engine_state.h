@@ -7,6 +7,8 @@
 
 enum { FRAME_RING = 4, PAIR_RING = 3, MAX_QUEUE = 16 };
 
+_Static_assert(MAX_QUEUE >= MB_PENDING_LIMIT, "output queue smaller than the pending limit");
+
 typedef struct geometry {
     mb_rect active;
     mb_video_format format;
@@ -34,6 +36,8 @@ typedef struct pair_motion {
     mb_buffer *wipe_fronts;
     mb_buffer *wipe_gate;
     bool ready;
+    bool layers_ready;
+    bool wipes_ready;
 } pair_motion;
 
 typedef struct motion_fields {
@@ -97,6 +101,7 @@ typedef struct framing_state {
     int device_border_version;
     int push_count;
     unsigned device_ticks;
+    unsigned border_ticks;
     bool flags_pending;
     bool device_input;
 } framing_state;

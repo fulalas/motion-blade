@@ -4,7 +4,10 @@
 #include <string.h>
 
 enum { MAX_DEVICES = 16, MAX_FAMILIES = 16, MAX_EXTENSIONS = 8, PREFERRED_SUBGROUP = 32, NARROW_SUBGROUP = 16,
-       NVIDIA_VENDOR_ID = 0x10DE };
+       NVIDIA_VENDOR_ID = 0x10DE, WANTED_SCORE = 4 };
+
+static const VkSubgroupFeatureFlags NEEDED_SUBGROUP_OPS =
+    VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_CLUSTERED_BIT;
 
 typedef struct extension_support {
     bool push_descriptors;
@@ -15,56 +18,6 @@ typedef struct extension_support {
     bool priority;
     bool subgroup_control;
 } extension_support;
-
-static int device_score(const VkPhysicalDeviceProperties *p, const char *wanted)
-{
-    if (wanted && wanted[0] && !strcmp(wanted, p->deviceName)) {
-        return 4;
-    }
-    switch (p->deviceType) {
-    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
-        return 3;
-    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
-        return 2;
-    case VK_PHYSICAL_DEVICE_TYPE_CPU:
-        return 0;
-    default:
-        return 1;
-    }
-}
-
-static mb_status pick_device(mbvk_backend *vk, const char *wanted)
-{
-    VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "motionblade", 1, "motionblade", 1,
-                             VK_API_VERSION_1_2};
-    VkInstanceCreateInfo info = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, NULL, 0, &app};
-    if (vkCreateInstance(&info, NULL, &vk->instance) != VK_SUCCESS) {
-        return MB_ERROR_DEVICE;
-    }
-    uint32_t count = MAX_DEVICES;
-    VkPhysicalDevice devices[MAX_DEVICES];
-    VkResult r = vkEnumeratePhysicalDevices(vk->instance, &count, devices);
-    if (r != VK_SUCCESS && r != VK_INCOMPLETE) {
-        mb_log(&vk->logger, MB_LOG_ERROR, "vkEnumeratePhysicalDevices failed (%d)", r);
-        return MB_ERROR_DEVICE;
-    }
-    int best = -1;
-    int best_score = -1;
-    for (uint32_t i = 0; i < count; i++) {
-        VkPhysicalDeviceProperties p;
-        vkGetPhysicalDeviceProperties(devices[i], &p);
-        int score = device_score(&p, wanted);
-        if (score > best_score) {
-            best_score = score;
-            best = (int)i;
-        }
-    }
-    if (best < 0) {
-        return MB_ERROR_UNSUPPORTED;
-    }
-    vk->physical_device = devices[best];
-    return MB_SUCCESS;
-}
 
 static bool has_compute(const VkQueueFamilyProperties *f)
 {
@@ -155,6 +108,12 @@ static bool shared_subgroup_control(const mbvk_shared_device *shared, bool *full
     return false;
 }
 
+static bool subgroups_suffice(const subgroup_info *info)
+{
+    return (info->basic.supportedOperations & NEEDED_SUBGROUP_OPS) == NEEDED_SUBGROUP_OPS &&
+           (info->basic.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
+}
+
 static VkPhysicalDeviceSubgroupSizeControlFeaturesEXT own_subgroup_features(VkPhysicalDevice device, bool control)
 {
     VkPhysicalDeviceSubgroupSizeControlFeaturesEXT f = {
@@ -171,10 +130,7 @@ static VkPhysicalDeviceSubgroupSizeControlFeaturesEXT own_subgroup_features(VkPh
 static mb_status choose_subgroup_size(mbvk_backend *vk, const extension_support *ext, const char *name)
 {
     subgroup_info info = query_subgroups(vk->physical_device, ext->subgroup_control);
-    VkSubgroupFeatureFlags need =
-        VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_CLUSTERED_BIT;
-    bool compute = (info.basic.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
-    if ((info.basic.supportedOperations & need) != need || !compute) {
+    if (!subgroups_suffice(&info)) {
         mb_log(&vk->logger, MB_LOG_WARNING, "%s lacks arithmetic or clustered subgroup operations", name);
         return MB_ERROR_UNSUPPORTED;
     }
@@ -208,7 +164,9 @@ typedef struct extension_list {
 
 static void add_extension(extension_list *list, const char *name)
 {
-    list->names[list->count++] = name;
+    if (list->count < MAX_EXTENSIONS - 1) {
+        list->names[list->count++] = name;
+    }
 }
 
 static extension_list wanted_extensions(mbvk_backend *vk, const extension_support *ext, uint32_t api)
@@ -311,6 +269,93 @@ static mb_status check_device(mbvk_backend *vk, const VkPhysicalDeviceProperties
         mb_log(&vk->logger, MB_LOG_WARNING, "the player's Vulkan device lacks shaderStorageImageExtendedFormats");
         return MB_ERROR_UNSUPPORTED;
     }
+    return MB_SUCCESS;
+}
+
+static bool any_compute_family(VkPhysicalDevice device)
+{
+    uint32_t count = MAX_FAMILIES;
+    VkQueueFamilyProperties families[MAX_FAMILIES];
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &count, families);
+    for (uint32_t i = 0; i < count; i++) {
+        if (has_compute(&families[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char *unusable_reason(VkPhysicalDevice device, const VkPhysicalDeviceProperties *p)
+{
+    if (p->apiVersion < VK_API_VERSION_1_1) {
+        return "does not support Vulkan 1.1";
+    }
+    if (!list_extensions(device).push_descriptors) {
+        return "lacks push descriptors";
+    }
+    if (!any_compute_family(device)) {
+        return "has no compute queue";
+    }
+    subgroup_info info = query_subgroups(device, false);
+    return subgroups_suffice(&info) ? NULL : "lacks arithmetic or clustered subgroup operations";
+}
+
+static int device_score(const VkPhysicalDeviceProperties *p, const char *wanted)
+{
+    if (wanted && wanted[0] && !strcmp(wanted, p->deviceName)) {
+        return WANTED_SCORE;
+    }
+    switch (p->deviceType) {
+    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+        return 3;
+    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+        return 2;
+    case VK_PHYSICAL_DEVICE_TYPE_CPU:
+        return 0;
+    default:
+        return 1;
+    }
+}
+
+static mb_status pick_device(mbvk_backend *vk, const char *wanted)
+{
+    VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL, "motionblade", 1, "motionblade", 1,
+                             VK_API_VERSION_1_2};
+    VkInstanceCreateInfo info = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, NULL, 0, &app};
+    if (vkCreateInstance(&info, NULL, &vk->instance) != VK_SUCCESS) {
+        return MB_ERROR_DEVICE;
+    }
+    uint32_t count = MAX_DEVICES;
+    VkPhysicalDevice devices[MAX_DEVICES];
+    VkResult r = vkEnumeratePhysicalDevices(vk->instance, &count, devices);
+    if (r != VK_SUCCESS && r != VK_INCOMPLETE) {
+        mb_log(&vk->logger, MB_LOG_ERROR, "vkEnumeratePhysicalDevices failed (%d)", r);
+        return MB_ERROR_DEVICE;
+    }
+    int best = -1;
+    int best_score = -1;
+    for (uint32_t i = 0; i < count; i++) {
+        VkPhysicalDeviceProperties p;
+        vkGetPhysicalDeviceProperties(devices[i], &p);
+        const char *reason = unusable_reason(devices[i], &p);
+        if (reason) {
+            mb_log(&vk->logger, best < 0 && i + 1 == count ? MB_LOG_WARNING : MB_LOG_VERBOSE, "skipping %s: it %s",
+                   p.deviceName, reason);
+            continue;
+        }
+        int score = device_score(&p, wanted);
+        if (score > best_score) {
+            best_score = score;
+            best = (int)i;
+        }
+    }
+    if (best < 0) {
+        return MB_ERROR_UNSUPPORTED;
+    }
+    if (wanted && wanted[0] && best_score != WANTED_SCORE) {
+        mb_log(&vk->logger, MB_LOG_WARNING, "no usable Vulkan device is named \"%s\"", wanted);
+    }
+    vk->physical_device = devices[best];
     return MB_SUCCESS;
 }
 

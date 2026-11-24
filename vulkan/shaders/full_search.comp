@@ -67,7 +67,7 @@ float mean_difference(int vx, int vy, int span, int tid)
         }
         barrier();
     }
-    return costs[0] / 256.0;
+    return costs[0] / float(MB_WINDOW_SIZE * MB_WINDOW_SIZE);
 }
 
 void scan_candidates(int radius, int span, int tid)

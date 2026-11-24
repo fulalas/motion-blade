@@ -20,13 +20,13 @@ void main()
         return;
     }
     float m = float(1 << push.base_level);
-    vec2 corner = vec2(block_of(id, push.blocks_x)) * 8.0 * m;
+    vec2 corner = vec2(block_of(id, push.blocks_x)) * float(MB_BLOCK_SIZE) * m;
     vec2 u = selection[id].xy * m;
     vec2 shift = vec2(1 << push.shift_x, 1 << push.shift_y);
     vec2 texel = 1.0 / vec2(push.chroma_width, push.chroma_height);
     vec2 c0 = corner / shift, to_a = -push.t * u / shift, to_b = (1.0 - push.t) * u / shift;
     bool interleaved = push.interleaved != 0;
-    int nx = 4 >> push.shift_x, ny = 4 >> push.shift_y;
+    int nx = MB_CELL_SIZE >> push.shift_x, ny = MB_CELL_SIZE >> push.shift_y;
     vec2 sum = vec2(0.0);
     for (int y = 0; y < ny; y++) {
         for (int x = 0; x < nx; x++) {

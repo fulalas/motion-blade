@@ -42,6 +42,24 @@ static void put_vector(FILE *file, float x, float y)
     fwrite(pixel, 1, 3, file);
 }
 
+static bool write_fields(mb_engine *engine, FILE *file, float *vectors)
+{
+    mb_field_kind kinds[3] = {MB_FIELD_FORWARD, MB_FIELD_BACKWARD, MB_FIELD_SELECTION};
+    for (int k = 0; k < 3; k++) {
+        mb_field_dump dump = {vectors, 0, 0};
+        if (mb_engine_read_field(engine, kinds[k], &dump) != MB_SUCCESS) {
+            return false;
+        }
+        if (k == 0) {
+            fprintf(file, "P6 %d %d 255\n", dump.blocks_x, dump.blocks_y * 3);
+        }
+        for (int i = 0; i < dump.blocks_x * dump.blocks_y; i++) {
+            put_vector(file, vectors[4 * i], vectors[4 * i + 1]);
+        }
+    }
+    return true;
+}
+
 void dump_fields(mb_engine *engine, const char *path, int width, int height)
 {
     FILE *file = fopen(path, "wb");
@@ -55,19 +73,11 @@ void dump_fields(mb_engine *engine, const char *path, int width, int height)
         }
         return;
     }
-    mb_field_kind kinds[3] = {MB_FIELD_FORWARD, MB_FIELD_BACKWARD, MB_FIELD_SELECTION};
-    for (int k = 0; k < 3; k++) {
-        mb_field_dump dump = {vectors, 0, 0};
-        if (mb_engine_read_field(engine, kinds[k], &dump) != MB_SUCCESS) {
-            break;
-        }
-        if (k == 0) {
-            fprintf(file, "P6 %d %d 255\n", dump.blocks_x, dump.blocks_y * 3);
-        }
-        for (int i = 0; i < dump.blocks_x * dump.blocks_y; i++) {
-            put_vector(file, vectors[4 * i], vectors[4 * i + 1]);
-        }
-    }
+    bool written = write_fields(engine, file, vectors);
     fclose(file);
     free(vectors);
+    if (!written) {
+        fprintf(stderr, "cannot read the motion fields for %s\n", path);
+        remove(path);
+    }
 }

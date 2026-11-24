@@ -48,7 +48,13 @@ static input open_decoder(const char *path, int frames)
         close(fd[0]);
         return (input){NULL, -1};
     }
-    return (input){fdopen(fd[0], "r"), pid};
+    FILE *file = fdopen(fd[0], "r");
+    if (!file) {
+        close(fd[0]);
+        waitpid(pid, NULL, 0);
+        return (input){NULL, -1};
+    }
+    return (input){file, pid};
 }
 
 static input open_input(const sequence_request *request)

@@ -28,6 +28,7 @@ void jobs_host_barrier(mbvk_backend *vk);
 void jobs_timestamp(mbvk_backend *vk, const char *name);
 VkImageMemoryBarrier image_barrier(VkImage image, VkImageLayout from, VkImageLayout to);
 void jobs_to_general(mbvk_backend *vk, struct mb_image *image);
+bool jobs_can_release(mbvk_backend *vk);
 void jobs_add_release(mbvk_backend *vk, void (*release)(void *context), void *context);
 void jobs_print_profile(const mbvk_backend *vk);
 

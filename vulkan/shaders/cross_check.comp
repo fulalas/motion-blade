@@ -96,7 +96,7 @@ void main()
     }
     barrier();
     texel_size = 1.0 / vec2(push.width, push.height);
-    for (int slot = t >> 4; slot < int(queued); slot += CLUSTERS) {
-        repair(slot, t & 15);
+    for (int slot = t / LANES; slot < int(queued); slot += CLUSTERS) {
+        repair(slot, t % LANES);
     }
 }

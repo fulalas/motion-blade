@@ -5,6 +5,8 @@
 #include "engine/motion.h"
 #include "engine/wipes.h"
 
+static const float EDGE_GAP = 0.001f;
+
 typedef struct pair_fields {
     mb_buffer *forward;
     mb_buffer *backward;
@@ -147,12 +149,17 @@ static void smooth_vectors(pass_context *ctx)
     ctx->selection = ctx->engine->sel.selection[1];
 }
 
+static float upper_edge(float lo, float hi)
+{
+    return hi > lo ? hi : lo + EDGE_GAP;
+}
+
 static void weigh_fallback(const pass_context *ctx)
 {
     const mb_select_params *s = &ctx->engine->params.select;
     mb_fallback_pass pass = {
         ctx->selection, ctx->engine->sel.fallback, ctx->fields.forward, ctx->fields.backward, base_grid(ctx), ctx->t,
-        s->fallback_spread, s->fallback_lo, s->fallback_hi,
+        s->fallback_spread, s->fallback_lo, upper_edge(s->fallback_lo, s->fallback_hi),
     };
     backend_of(ctx)->ops->fallback(backend_of(ctx)->self, &pass);
 }
@@ -185,7 +192,7 @@ static void find_panels(const pass_context *ctx)
     mb_panel_pass panels = {
         pair_planes(ctx), e->sel.panel_flags, e->sel.global_motion, ctx->selection, base_grid(ctx), e->geo.format.width,
         e->geo.format.height, e->geo.chroma, e->geo.base_level, ctx->t, 255.0f * geometry_luma_scale(&e->geo),
-        p->change_lo, p->change_hi, p->flat, geometry_chroma_mid(&e->geo), p->saturation,
+        p->change_lo, upper_edge(p->change_lo, p->change_hi), p->flat, geometry_chroma_mid(&e->geo), p->saturation,
     };
     b->ops->panels(b->self, &panels);
     mb_panel_spread_pass spread = {
@@ -221,12 +228,12 @@ static mb_blend_costs blend_costs(const mb_engine *e)
         .consistency = e->params.select.consistency_threshold,
         .foreground_bonus = b->foreground_bonus,
         .nearest_side_lo = b->nearest_side_lo,
-        .nearest_side_hi = b->nearest_side_hi,
+        .nearest_side_hi = upper_edge(b->nearest_side_lo, b->nearest_side_hi),
         .panel_switch = e->params.panel.switch_level,
         .unsure_spread_lo = b->unsure_spread_lo,
-        .unsure_spread_hi = b->unsure_spread_hi,
+        .unsure_spread_hi = upper_edge(b->unsure_spread_lo, b->unsure_spread_hi),
         .unsure_margin_lo = b->unsure_margin_lo,
-        .unsure_margin_hi = b->unsure_margin_hi,
+        .unsure_margin_hi = upper_edge(b->unsure_margin_lo, b->unsure_margin_hi),
     };
 }
 

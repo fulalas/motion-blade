@@ -18,7 +18,7 @@ float inconsistency(ivec2 block)
     block = clamp(block, ivec2(0), blocks() - 1);
     int index = block.y * push.blocks_x + block.x;
     vec2 u = selection[index].xy;
-    if (selection[index].z != 0.0) {
+    if (int(selection[index].z) != MB_MODE_TWO_SIDED) {
         return 0.0;
     }
     vec2 c = block_center(block);

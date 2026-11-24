@@ -24,7 +24,7 @@ float nearby_flag(ivec2 block)
 float flagged_sources(ivec2 block)
 {
     float strongest = 0.0;
-    vec2 c = vec2(block * 8) + 4.0, t = vec2(push.t);
+    vec2 c = block_center(block), t = vec2(push.t);
     for (int e = 0; e < 9 && push.source_distance > 0.0; e++) {
         vec2 u = selection[neighbour3_index(e, block, blocks())].xy;
         if (l1(u - global_motion[0].xy) <= push.source_distance) {
